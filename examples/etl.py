@@ -1,8 +1,8 @@
-"""Runnable miniflow example.
+"""Runnable microflow example.
 
-    export MINIFLOW_BUCKET=my-bucket   # + AWS_* / MINIFLOW_ENDPOINT
-    miniflow run examples.etl:ETLFlow
-    miniflow query examples.etl:ETLFlow "SELECT * FROM summary"
+    export MICROFLOW_BUCKET=my-bucket   # + AWS_* / MICROFLOW_ENDPOINT
+    microflow run examples.etl:ETLFlow
+    microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 
 Load rows, fan out by group, score each group in parallel, fan in to a summary.
 The DAG is the method signatures: `scored` depends on `parts` because it has a
@@ -11,7 +11,7 @@ parameter named `parts`.
 
 import pyarrow as pa
 
-from miniflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
+from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
 
 
 class Raw(Table):

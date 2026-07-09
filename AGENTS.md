@@ -1,4 +1,4 @@
-# miniflow — agent notes
+# microflow — agent notes
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
 persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
@@ -27,11 +27,11 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 
 ```bash
 uv sync                       # install (uv-managed, Python >=3.12)
-uv run miniflow               # bare command opens the TUI
-uv run miniflow setup         # wizard: writes .miniflow/config (TOML)
-uv run miniflow run examples.etl:ETLFlow
-uv run miniflow query examples.etl:ETLFlow "SELECT * FROM summary"
-uv run miniflow stats examples.etl:ETLFlow          # per-step resources, latest run
+uv run microflow               # bare command opens the TUI
+uv run microflow setup         # wizard: writes .microflow/config (TOML)
+uv run microflow run examples.etl:ETLFlow
+uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
+uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -40,9 +40,9 @@ Every run records CPU/memory for every step and branch — always on, stored as
 `_metrics.parquet` in the run folder, exposed as the `metrics` SQL view.
 
 ```bash
-miniflow stats myproj.flows:Training [run_id]   # per-step: seconds, peak_rss_mb,
+microflow stats myproj.flows:Training [run_id]   # per-step: seconds, peak_rss_mb,
                                                 # avg_cores, max_threads, processes
-miniflow query myproj.flows:Training \
+microflow query myproj.flows:Training \
   "SELECT ts, rss/1e6 AS mb FROM metrics WHERE run_id='...' AND step='features' ORDER BY ts"
 ```
 
@@ -57,7 +57,7 @@ miniflow query myproj.flows:Training \
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
 
-## Architecture (one line per module, src/miniflow/)
+## Architecture (one line per module, src/microflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `= pk` / `= check(...)` / `= field(...)`); compiles to DuckDB DDL
@@ -78,9 +78,9 @@ miniflow query myproj.flows:Training \
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
   LIST); schema-drift check (one parquet footer per step).
-- `config.py`  — `.miniflow/config` (TOML) found by walking up like `.git`;
-  `MINIFLOW_*` env vars override; credentials only from the AWS chain, never stored.
-- `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `miniflow` launches it).
+- `config.py`  — `.microflow/config` (TOML) found by walking up like `.git`;
+  `MICROFLOW_*` env vars override; credentials only from the AWS chain, never stored.
+- `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `microflow` launches it).
 
 ## Conventions & gotchas
 

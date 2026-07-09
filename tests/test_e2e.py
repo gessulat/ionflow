@@ -1,7 +1,7 @@
 import pytest
 
-from miniflow import runner
-from miniflow.git import DirtyRepoError
+from microflow import runner
+from microflow.git import DirtyRepoError
 
 from examples.etl import ETLFlow
 
@@ -30,7 +30,7 @@ def test_run_end_to_end(s3cfg, repo):
     assert row[3] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
 
     # resource metrics: every step sampled at least once; stats derivable
-    from miniflow import query
+    from microflow import query
 
     sampled = {r[0] for r in con.sql(
         f"SELECT DISTINCT step FROM metrics WHERE run_id = '{run_id}'"
@@ -56,7 +56,7 @@ def test_run_with_processes(s3cfg, repo):
     ).fetchall()
     assert branches == [(0,), (1,)]
     # stats count workers only; the orchestrator's pool-wait is not the step's cost
-    from miniflow import query
+    from microflow import query
 
     scored = [r for r in query.step_stats(con, run_id).fetchall() if r[0] == "scored"][0]
     assert scored[5] == 2  # processes

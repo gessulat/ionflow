@@ -4,7 +4,7 @@ import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
 
-from miniflow import ledger, storage
+from microflow import ledger, storage
 
 def _client(cfg):
     return storage.s3_client(cfg)

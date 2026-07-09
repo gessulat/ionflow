@@ -1,7 +1,7 @@
 import pytest
 
-from miniflow import metrics, storage
-from miniflow.dag import build_dag
+from microflow import metrics, storage
+from microflow.dag import build_dag
 
 
 def test_mark_labels_samples():

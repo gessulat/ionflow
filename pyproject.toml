@@ -1,5 +1,5 @@
 [project]
-name = "miniflow"
+name = "microflow"
 version = "0.1.0"
 description = "A barebones Metaflow alternative: typed table flows on S3, no scheduler."
 readme = "README.md"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-miniflow = "miniflow.cli:main"
+microflow = "microflow.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
@@ -35,5 +35,5 @@ pythonpath = ["."]
 # Fast by default: parallel, and the 4 heaviest integration tests are excluded.
 # Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
 addopts = "-n 5 --dist worksteal --doctest-modules -m 'not slow'"
-testpaths = ["tests", "src/miniflow"]
+testpaths = ["tests", "src/microflow"]
 markers = ["slow: heavy integration tests (CLI e2e, process pool, resume); run with -m ''"]

@@ -61,8 +61,8 @@ def moto_endpoint():
 
 @pytest.fixture
 def s3cfg(moto_endpoint, request):
-    from miniflow import storage
-    from miniflow.config import Config
+    from microflow import storage
+    from microflow.config import Config
 
     # unique bucket per test: no teardown needed (server dies with the process)
     cfg = Config(

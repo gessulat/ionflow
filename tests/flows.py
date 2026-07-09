@@ -10,7 +10,7 @@ import uuid
 
 import pyarrow as pa
 
-from miniflow import Branch, Collect, Fanout, Flow, Table
+from microflow import Branch, Collect, Fanout, Flow, Table
 
 
 class Src(Table):

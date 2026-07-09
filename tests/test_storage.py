@@ -4,9 +4,9 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from miniflow import storage
-from miniflow.config import Config
-from miniflow.schema import Table, check, pk
+from microflow import storage
+from microflow.config import Config
+from microflow.schema import Table, check, pk
 
 
 class Features(Table):

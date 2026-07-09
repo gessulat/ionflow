@@ -8,7 +8,7 @@ from . import git, storage
 from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config, write_config
 from .query import step_stats
 
-app = typer.Typer(add_completion=False, help="miniflow: minimal flows on S3")
+app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
 
 
 @app.callback(invoke_without_command=True)
@@ -36,11 +36,11 @@ def _config_or_setup():
         cfg = Config.load()
     except ConfigMissing:
         if sys.stdin.isatty():
-            typer.echo("miniflow isn't configured for this repo yet — let's set it up.\n")
+            typer.echo("microflow isn't configured for this repo yet — let's set it up.\n")
             setup()
             typer.echo("\nSetup complete. Commit the change shown above, then re-run.")
             raise typer.Exit(0)
-        typer.echo("No miniflow config found. Run `miniflow setup`.")
+        typer.echo("No microflow config found. Run `microflow setup`.")
         raise typer.Exit(1)
     if not storage.aws_credentials_available():
         typer.echo(
@@ -61,17 +61,17 @@ def _add_to_gitignore(root):
 
 @app.command()
 def setup():
-    """Configure the S3 bucket for this repo (writes .miniflow/config)."""
+    """Configure the S3 bucket for this repo (writes .microflow/config)."""
     root = git.repo_root()
     if root is None:
-        typer.echo("Warning: not inside a git repository; miniflow runs require one.")
+        typer.echo("Warning: not inside a git repository; microflow runs require one.")
         root = Path.cwd()
     else:
         root = Path(root)
 
     cur = read_config(str(root))
     bucket = typer.prompt("S3 bucket", default=cur.get("bucket"))
-    prefix = typer.prompt("Key prefix", default=cur.get("prefix", "miniflow"))
+    prefix = typer.prompt("Key prefix", default=cur.get("prefix", "microflow"))
     endpoint = typer.prompt(
         "S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False
     )

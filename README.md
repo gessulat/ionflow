@@ -1,7 +1,15 @@
-# miniflow
+```
+|  |   _
+|  |  /
+|  |  +-
+|__|  |
+|     /
+```
+
+# microflow
 
 A barebones [Metaflow](https://metaflow.org) alternative. A **flow is a class**, a
-**step is a method**, and every step returns a **typed table** that miniflow persists
+**step is a method**, and every step returns a **typed table** that microflow persists
 as Parquet on S3. No Kubernetes, no scheduler, no metadata server — the only thing you
 configure is one S3-compatible bucket.
 
@@ -15,13 +23,13 @@ configure is one S3-compatible bucket.
 - **Fan-out / fan-in** over N inputs, in parallel, on one machine.
 - **`resume`** re-runs a failed run, reusing every step that already completed —
   including individual branches of a partially-failed fan-out.
-- **Clean git required.** miniflow refuses to start with a dirty working tree, so every
+- **Clean git required.** microflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 
 ## Install
 
 ```bash
-uv add miniflow    # or: pip install miniflow
+uv add microflow    # or: pip install microflow
 ```
 
 ## Configure (the only setup)
@@ -29,23 +37,23 @@ uv add miniflow    # or: pip install miniflow
 Run the wizard once per repo:
 
 ```bash
-miniflow setup
+microflow setup
 ```
 
 It asks for your bucket (and optional prefix / endpoint / region) and writes them to
-`.miniflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
-whether to gitignore `.miniflow/` (keep it local) or commit it (share with your team).
-Re-run `miniflow setup` any time to change it.
+`.microflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
+whether to gitignore `.microflow/` (keep it local) or commit it (share with your team).
+Re-run `microflow setup` any time to change it.
 
 **Credentials** come from the standard AWS chain (environment variables, `~/.aws/credentials`,
-or an IAM role) and are never written to the repo. `miniflow setup` just checks they resolve
+or an IAM role) and are never written to the repo. `microflow setup` just checks they resolve
 and that the bucket is reachable. Any command guides you into `setup` if the repo isn't
 configured yet.
 
 ```
-# .miniflow/config
+# .microflow/config
 bucket   = "my-bucket"
-prefix   = "miniflow"
+prefix   = "microflow"
 endpoint = "https://…"   # omit for AWS S3; set for MinIO / R2
 region   = "us-east-1"
 ```
@@ -58,7 +66,7 @@ a parameter named `parts`.
 
 ```python
 import pyarrow as pa
-from miniflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
+from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
 
 
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
@@ -115,13 +123,13 @@ and return any of those.
 ## Run it
 
 ```python
-run_id = ETLFlow.run()          # reads .miniflow/config (or pass config=Config(...))
+run_id = ETLFlow.run()          # reads .microflow/config (or pass config=Config(...))
 ```
 
 or from the shell:
 
 ```bash
-miniflow run mymodule:ETLFlow
+microflow run mymodule:ETLFlow
 ```
 
 ## Query every run as one database
@@ -137,19 +145,19 @@ con.sql("SELECT run_id, started, finished, n_rows FROM ledger").show()
 ```
 
 ```bash
-miniflow query mymodule:ETLFlow "SELECT * FROM summary"
-miniflow ls mymodule:ETLFlow
+microflow query mymodule:ETLFlow "SELECT * FROM summary"
+microflow ls mymodule:ETLFlow
 ```
 
 ## Browse in the terminal (TUI)
 
-Bare `miniflow` (no subcommand) opens an interactive terminal UI:
+Bare `microflow` (no subcommand) opens an interactive terminal UI:
 
 ```bash
-miniflow                       # or: miniflow tui myproject.flows
+microflow                       # or: microflow tui myproject.flows
 ```
 
-- one **tab per Flow** in your project (point `miniflow setup` at your `flows` package —
+- one **tab per Flow** in your project (point `microflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
 - each tab is a table of that flow's runs: `run_id`, `status`, `started`, `finished`, **plus
   that flow's custom ledger columns**,
@@ -168,9 +176,9 @@ interval doubles when the 1024-sample cap folds the buffer), so even multi-day r
 stay bounded while peaks are preserved.
 
 ```bash
-miniflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
+microflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
                                            # max_threads (defaults to the latest run)
-miniflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='scored'"
+microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='scored'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
@@ -180,7 +188,7 @@ cpu_system, run_id`). Failed runs keep their metrics.
 ## Resume
 
 ```bash
-miniflow resume mymodule:ETLFlow <origin_run_id>
+microflow resume mymodule:ETLFlow <origin_run_id>
 ```
 
 A **new** `run_id` is created; completed step outputs are copied from the origin run

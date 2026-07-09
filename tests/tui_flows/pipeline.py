@@ -1,6 +1,6 @@
 import pyarrow as pa
 
-from miniflow import Flow, LedgerColumns, Table
+from microflow import Flow, LedgerColumns, Table
 
 
 class Rows(Table):

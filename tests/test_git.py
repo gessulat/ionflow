@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from miniflow.git import DirtyRepoError, repo_root, require_clean
+from microflow.git import DirtyRepoError, repo_root, require_clean
 
 
 def test_clean_returns_hash(clean_repo):

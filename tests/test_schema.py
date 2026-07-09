@@ -3,7 +3,7 @@ import datetime as dt
 import pyarrow as pa
 import pytest
 
-from miniflow.schema import Table, check, field, pk
+from microflow.schema import Table, check, field, pk
 
 
 class Features(Table):

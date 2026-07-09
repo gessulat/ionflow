@@ -105,7 +105,7 @@ class OverviewScreen(Screen):
         if self.warnings:
             yield Static("\n".join("⚠ " + w for w in self.warnings), id="banner")
         if not self.flows:
-            yield Static("No flows found. Set `flows` in .miniflow/config to your flows package.")
+            yield Static("No flows found. Set `flows` in .microflow/config to your flows package.")
         with TabbedContent():
             for name in self.flows:
                 with TabPane(name, id=f"flow-{name}"):
@@ -158,11 +158,11 @@ class OverviewScreen(Screen):
 
 
 class SetupScreen(Screen):
-    """Shown when the repo isn't configured; writes .miniflow/config."""
+    """Shown when the repo isn't configured; writes .microflow/config."""
 
     FIELDS = [  # (input id, prompt label, default)
         ("bucket", "S3 bucket", ""),
-        ("prefix", "Key prefix", "miniflow"),
+        ("prefix", "Key prefix", "microflow"),
         ("endpoint", "S3 endpoint (blank for AWS)", ""),
         ("region", "Region", "us-east-1"),
         ("flows", "Flows package (e.g. myproject.flows)", ""),
@@ -170,7 +170,7 @@ class SetupScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Label("Configure miniflow for this repo")
+        yield Label("Configure microflow for this repo")
         for name, label, default in self.FIELDS:
             yield Label(label)
             yield Input(value=default, id=name)
@@ -200,8 +200,8 @@ class SetupScreen(Screen):
         self.app.switch_screen(self.app.overview_screen(cfg))
 
 
-class MiniflowTUI(App):
-    TITLE = "miniflow"
+class MicroflowTUI(App):
+    TITLE = "microflow"
     BINDINGS = [Binding("q", "quit", "Quit")]
 
     def __init__(self, config=None, flows_override=None):
@@ -234,4 +234,4 @@ class MiniflowTUI(App):
 
 
 def run_tui(config=None, flows_override=None):
-    MiniflowTUI(config, flows_override).run()
+    MicroflowTUI(config, flows_override).run()

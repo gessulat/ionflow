@@ -1,6 +1,6 @@
 import textwrap
 
-from miniflow import discovery
+from microflow import discovery
 
 
 def _make_pkg(root, name, flows):
@@ -10,7 +10,7 @@ def _make_pkg(root, name, flows):
     for mod, cls in flows:
         (pkg / f"{mod}.py").write_text(
             textwrap.dedent(f"""
-            from miniflow import Flow, Table
+            from microflow import Flow, Table
             class {cls}Rows(Table):
                 x: int
             class {cls}(Flow):
@@ -36,7 +36,7 @@ def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
 
 
 def test_flows_with_data(s3cfg):
-    from miniflow import storage
+    from microflow import storage
 
     assert discovery.flows_with_data(s3cfg) == set()
     # key presence is all that matters here; no need for a full flow run
@@ -47,7 +47,7 @@ def test_flows_with_data(s3cfg):
 
 
 def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
-    from miniflow import storage
+    from microflow import storage
     from tui_flows.pipeline import Alpha
 
     Alpha.run(s3cfg, repo=repo, use_processes=False)
