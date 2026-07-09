@@ -118,8 +118,8 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     con = compute_connection()
     flow = flow_cls()
     dag = flow_cls._dag
-    lc = getattr(flow_cls, "Ledger", None)
-    custom_fields = lc.arrow_fields() if lc else []
+    ledger_cols = flow_cls.ledger_columns()
+    custom_fields = flow_cls.ledger_fields()
 
     completed = set()
     if origin_run_id:
@@ -128,14 +128,17 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code")
-        for k in origin.get("steps_complete", []):
+        def copy_part(k):
             name, br = _split(k)
             client.copy_object(
                 Bucket=config.bucket,
                 CopySource={"Bucket": config.bucket, "Key": layout.part(origin_run_id, name, br)},
                 Key=layout.part(run_id, name, br),
             )
-            completed.add(k)
+            return k
+
+        with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
+            completed.update(ex.map(copy_part, origin.get("steps_complete", [])))
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
 
@@ -192,12 +195,10 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 completed.add(_key(name, 0))
             flush()
 
-        custom = {}
-        if lc:
-            missing = [c for c in lc.columns() if not hasattr(flow, c)]
-            if missing:
-                raise RuntimeError(f"ledger columns not populated during run: {missing}")
-            custom = {c: getattr(flow, c) for c in lc.columns()}
+        missing = [c for c in ledger_cols if not hasattr(flow, c)]
+        if missing:
+            raise RuntimeError(f"ledger columns not populated during run: {missing}")
+        custom = {c: getattr(flow, c) for c in ledger_cols}
         finished = _now()
         flush(finished, custom)
         upsert("complete", finished, custom)

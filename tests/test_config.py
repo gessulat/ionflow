@@ -28,7 +28,14 @@ def test_load_walks_up(tmp_path):
 def test_endpoint_optional(tmp_path):
     _write(tmp_path, 'bucket = "b"\n')
     cfg = Config.load(str(tmp_path))
-    assert cfg.endpoint_url is None and cfg.prefix == "miniflow"
+    assert cfg.endpoint_url is None and cfg.prefix == "miniflow" and cfg.flows is None
+
+
+def test_flows_roundtrips(tmp_path):
+    from miniflow.config import write_config
+
+    write_config(tmp_path, Config(bucket="b", flows="myproj.flows"))
+    assert Config.load(str(tmp_path)).flows == "myproj.flows"
 
 
 def test_missing_raises(tmp_path):

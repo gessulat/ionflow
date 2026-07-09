@@ -1,4 +1,4 @@
-from .storage import Layout, connect, list_keys, read_parquet_sql, s3_client, uri
+from .storage import Layout, connect, list_keys, parse_key, read_parquet_sql, s3_client, uri
 
 
 def _empty_view_sql(table):
@@ -11,13 +11,14 @@ def _empty_view_sql(table):
 
 def _steps_with_parts(client, config, layout):
     """Step names that have at least one part, from a single LIST of runs/."""
-    prefix = layout.root + "/runs/"
-    present = set()
-    for key in list_keys(client, config.bucket, prefix):
-        rest = key[len(prefix):].split("/")  # run_id=<id> / <step> / part_N.parquet
-        if len(rest) >= 3:
-            present.add(rest[1])
-    return present
+    keys = list_keys(client, config.bucket, layout.root + "/runs/")
+    parsed = (parse_key(config.prefix + "/", k) for k in keys)
+    return {step for p in parsed if p and (step := p[1])}
+
+
+def step_rows(con, step, run_id, limit=100):
+    """Preview of one step's output for one run (via the step's view)."""
+    return con.sql(f"SELECT * FROM {step} WHERE run_id = '{run_id}' LIMIT {limit}")
 
 
 def duck(flow_cls, config):

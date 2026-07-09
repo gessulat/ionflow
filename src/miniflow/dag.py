@@ -21,10 +21,13 @@ class Collect(typing.Generic[T]):
 class Step:
     name: str
     method: typing.Callable
-    deps: list[str]
     param_kinds: dict[str, str]  # name -> NORMAL | BRANCH | COLLECT
     output_table: type
     is_fanout: bool
+
+    @property
+    def deps(self):
+        return list(self.param_kinds)
 
 
 @dataclass
@@ -61,15 +64,14 @@ def build_dag(cls) -> Dag:
     for name, fn in funcs.items():
         hints = typing.get_type_hints(fn)
         sig = inspect.signature(fn)
-        deps, kinds = [], {}
+        kinds = {}
         for p in list(sig.parameters)[1:]:  # drop self
-            deps.append(p)
             origin = typing.get_origin(hints.get(p))
             kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
         ret = hints.get("return")
         is_fanout = typing.get_origin(ret) is Fanout
         table = typing.get_args(ret)[0] if is_fanout else ret
-        steps[name] = Step(name, fn, deps, kinds, table, is_fanout)
+        steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():
         for d in s.deps:

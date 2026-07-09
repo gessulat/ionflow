@@ -1,37 +1,29 @@
-import subprocess
+from pathlib import Path
 
 import pytest
 
-from miniflow.git import DirtyRepoError, require_clean
+from miniflow.git import DirtyRepoError, repo_root, require_clean
 
 
-def _run(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
-@pytest.fixture
-def repo(tmp_path):
-    _run(tmp_path, "init")
-    _run(tmp_path, "config", "user.email", "t@t.com")
-    _run(tmp_path, "config", "user.name", "t")
-    (tmp_path / "a.txt").write_text("hi")
-    _run(tmp_path, "add", "a.txt")
-    _run(tmp_path, "commit", "-m", "init")
-    return tmp_path
-
-
-def test_clean_returns_hash(repo):
-    h = require_clean(repo)
+def test_clean_returns_hash(clean_repo):
+    h = require_clean(clean_repo)
     assert len(h) == 40
 
 
-def test_modified_is_dirty(repo):
-    (repo / "a.txt").write_text("changed")
+def test_modified_is_dirty(clean_repo):
+    (Path(clean_repo) / "flow.py").write_text("changed")
     with pytest.raises(DirtyRepoError):
-        require_clean(repo)
+        require_clean(clean_repo)
 
 
-def test_untracked_is_dirty(repo):
-    (repo / "b.txt").write_text("new")
+def test_untracked_is_dirty(clean_repo):
+    (Path(clean_repo) / "b.txt").write_text("new")
     with pytest.raises(DirtyRepoError):
-        require_clean(repo)
+        require_clean(clean_repo)
+
+
+def test_repo_root(clean_repo, tmp_path):
+    assert repo_root(clean_repo) is not None
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir(exist_ok=True)
+    assert repo_root(str(outside)) is None

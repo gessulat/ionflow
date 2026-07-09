@@ -1,9 +1,9 @@
 import subprocess
 
-import boto3
 import pytest
 from moto.server import ThreadedMotoServer
 
+from miniflow import storage
 from miniflow.config import Config
 
 
@@ -43,13 +43,7 @@ def s3cfg(moto_endpoint):
         access_key="test",
         secret_key="test",
     )
-    client = boto3.client(
-        "s3",
-        endpoint_url=moto_endpoint,
-        region_name="us-east-1",
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-    )
+    client = storage.s3_client(cfg)
     client.create_bucket(Bucket=cfg.bucket)
     yield cfg
     objs = client.list_objects_v2(Bucket=cfg.bucket).get("Contents", [])

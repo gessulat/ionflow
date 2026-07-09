@@ -31,8 +31,8 @@ def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)
     monkeypatch.setattr("miniflow.storage.aws_credentials_available", lambda: False)
 
-    # bucket, prefix, endpoint(blank), region, gitignore? -> yes
-    r = runner.invoke(cli.app, ["setup"], input="mybucket\nminiflow\n\nus-east-1\ny\n")
+    # bucket, prefix, endpoint(blank), region, flows(blank), gitignore? -> yes
+    r = runner.invoke(cli.app, ["setup"], input="mybucket\nminiflow\n\nus-east-1\n\ny\n")
     assert r.exit_code == 0, r.output
 
     path = config.find_config(clean_repo)  # resolves symlinks; robust on macOS

@@ -10,6 +10,19 @@ from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config,
 app = typer.Typer(add_completion=False, help="miniflow: minimal flows on S3")
 
 
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context):
+    """Launch the TUI when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        _launch_tui()
+
+
+def _launch_tui(flows=None):
+    from . import tui as _tui
+
+    _tui.run_tui(flows_override=flows)  # config resolution is the TUI's own job
+
+
 def _load(spec):
     """Resolve 'package.module:ClassName' to the Flow class."""
     mod, name = spec.split(":")
@@ -62,7 +75,14 @@ def setup():
         "S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False
     )
     region = typer.prompt("Region", default=cur.get("region", "us-east-1"))
-    cfg = Config(bucket=bucket, prefix=prefix, endpoint_url=endpoint or None, region=region)
+    flows = typer.prompt(
+        "Flows package for the TUI (e.g. myproject.flows, blank to skip)",
+        default=cur.get("flows", ""), show_default=False,
+    )
+    cfg = Config(
+        bucket=bucket, prefix=prefix, endpoint_url=endpoint or None,
+        region=region, flows=flows or None,
+    )
 
     if not storage.aws_credentials_available():
         typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
@@ -104,6 +124,12 @@ def ls(flow: str):
 def query(flow: str, sql: str):
     """Run a SQL query against FLOW's tables (views: each step + `ledger`)."""
     _load(flow).duck(_config_or_setup()).sql(sql).show()
+
+
+@app.command()
+def tui(flows: str = typer.Argument(None, help="Flows package (overrides config)")):
+    """Launch the interactive terminal UI."""
+    _launch_tui(flows)
 
 
 def main():

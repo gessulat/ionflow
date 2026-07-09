@@ -35,6 +35,8 @@ def write_config(root, cfg):
     if cfg.endpoint_url:
         lines.append(f'endpoint = "{cfg.endpoint_url}"')
     lines.append(f'region = "{cfg.region}"')
+    if cfg.flows:
+        lines.append(f'flows = "{cfg.flows}"')
     path = d / CONFIG_FILE
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -52,6 +54,7 @@ class Config:
     prefix: str = "miniflow"
     endpoint_url: str | None = None
     region: str = "us-east-1"
+    flows: str | None = None  # package the TUI imports to discover Flow classes
     access_key: str | None = None
     secret_key: str | None = None
 
@@ -70,4 +73,5 @@ class Config:
             prefix=os.environ.get("MINIFLOW_PREFIX") or data.get("prefix", "miniflow"),
             endpoint_url=os.environ.get("MINIFLOW_ENDPOINT") or data.get("endpoint"),
             region=os.environ.get("AWS_DEFAULT_REGION") or data.get("region", "us-east-1"),
+            flows=data.get("flows"),
         )

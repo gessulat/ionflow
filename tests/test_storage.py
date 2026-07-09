@@ -41,7 +41,7 @@ def test_write_read_roundtrip(s3cfg):
         con, client, s3cfg.bucket,
         "mf/ETL/runs/run_id=r1/features/part_0.parquet", _data(), Features,
     )
-    rel = storage.read_glob(con, storage.uri(s3cfg, "mf/ETL/runs/*/features/*.parquet"))
+    rel = con.sql(storage.read_parquet_sql(storage.uri(s3cfg, "mf/ETL/runs/*/features/*.parquet")))
     rows, cols = rel.fetchall(), rel.columns
     got = {c: [r[i] for r in rows] for i, c in enumerate(cols)}
     assert sorted(got["id"]) == [1, 2]

@@ -132,13 +132,9 @@ class Table:
         return cls._columns
 
     @classmethod
-    def column_ddls(cls):
-        return [c.ddl(n) for n, c in cls._columns.items()]
-
-    @classmethod
     def ddl(cls, name, temp=False):
         kw = "TEMP TABLE" if temp else "TABLE"
-        lines = ",\n".join(f"  {line}" for line in cls.column_ddls())
+        lines = ",\n".join(f"  {c.ddl(n)}" for n, c in cls._columns.items())
         return f"CREATE {kw} {name} (\n{lines}\n)"
 
     @classmethod

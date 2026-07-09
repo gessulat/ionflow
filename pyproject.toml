@@ -11,6 +11,7 @@ dependencies = [
     "boto3>=1.43.43",
     "duckdb>=1.5.4",
     "pyarrow>=24.0.0",
+    "textual>=8.2.8",
     "typer>=0.26.8",
 ]
 
@@ -25,7 +26,9 @@ build-backend = "uv_build"
 dev = [
     "moto[s3,server]>=5.2.2",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+asyncio_mode = "auto"

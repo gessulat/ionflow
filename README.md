@@ -141,6 +141,25 @@ miniflow query mymodule:ETLFlow "SELECT * FROM summary"
 miniflow ls mymodule:ETLFlow
 ```
 
+## Browse in the terminal (TUI)
+
+Bare `miniflow` (no subcommand) opens an interactive terminal UI:
+
+```bash
+miniflow                       # or: miniflow tui myproject.flows
+```
+
+- one **tab per Flow** in your project (point `miniflow setup` at your `flows` package —
+  every `Flow` subclass auto-registers on import),
+- each tab is a table of that flow's runs: `run_id`, `status`, `started`, `finished`, **plus
+  that flow's custom ledger columns**,
+- `Tab` cycles flows; `j`/`k`/PageUp/PageDown move the row cursor,
+- **Enter** drills into a run to preview each step's output table; **Esc** goes back.
+
+On startup it re-discovers your flows and warns if a flow's declared table schema has drifted
+from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
+repo isn't configured yet, the TUI opens a setup screen first.
+
 ## Resume
 
 ```bash

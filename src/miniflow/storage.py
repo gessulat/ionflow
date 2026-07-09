@@ -153,6 +153,27 @@ def list_keys(client, bucket, prefix):
     return [o["Key"] for page in pages for o in page.get("Contents", [])]
 
 
+def parse_key(prefix, key):
+    """Reverse of Layout's key scheme, for keys under `prefix` (ends with "/").
+
+    Returns (flow, None) for a flow's ledger, (flow, step) for a run part,
+    or None for anything else (e.g. _meta.json).
+
+    >>> parse_key("mf/", "mf/ETL/ledger.parquet")
+    ('ETL', None)
+    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/raw/part_0.parquet")
+    ('ETL', 'raw')
+    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
+    True
+    """
+    parts = key[len(prefix):].split("/")
+    if parts[1:] == ["ledger.parquet"]:
+        return parts[0], None
+    if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
+        return parts[0], parts[3]
+    return None
+
+
 def load_relation(con, client, bucket, keys):
     """In-memory DuckDB relation over the given parts (read via boto3)."""
     tables = [get_table(client, bucket, k) for k in keys]
@@ -171,7 +192,3 @@ def read_parquet_sql(glob_uri):
         f"SELECT * FROM read_parquet('{glob_uri}', "
         "hive_partitioning=true, union_by_name=true)"
     )
-
-
-def read_glob(con, glob_uri):
-    return con.sql(read_parquet_sql(glob_uri))
