@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 from . import ledger, metrics
 from .config import Config
-from .git import require_clean
+from .git import commit_or_dirty, require_clean
 from .storage import (
     Layout,
     compute_connection,
@@ -41,6 +41,10 @@ def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch, dep_tab
     if kind == "COLLECT":
         keys = sorted(list_keys(client, cfg.bucket, layout.step_dir(run_id, dep) + "/"))
         if not keys:  # empty fan-out: hand the reducer a typed empty table
+            if dep_table is None:
+                raise RuntimeError(
+                    f"empty fan-out from untyped step '{dep}'; declare its Table to type the empty input"
+                )
             return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
@@ -69,7 +73,9 @@ def _import(file, name):
 def _branch_worker(payload):
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
-    layout = Layout(cfg.prefix, flow_cls.__name__)
+    # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
+    # under proto's dirty-tree freedom) must not split the run across namespaces
+    layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
     con = compute_connection()
     client = s3_client(cfg)
     flow = flow_cls()
@@ -116,6 +122,7 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "sample": use_processes,
         "retries": retries,
         "params": params,
+        "proto": flow_cls.prototype,
     }
     pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
     done, error, samples = [], None, []
@@ -135,10 +142,11 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         branch_retries=0, params=None):
     if origin_run_id and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
-    commit = require_clean(repo)
+    # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
+    commit = commit_or_dirty(repo) if flow_cls.prototype else require_clean(repo)
     started = utc_now()
     run_id = _new_run_id(started)
-    layout = Layout(config.prefix, flow_cls.__name__)
+    layout = Layout.for_flow(config, flow_cls)
     client = s3_client(config)
     con = compute_connection()
     flow = flow_cls()
@@ -200,6 +208,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 **(custom or {}),
             },
             custom_fields,
+            reset_on_conflict=flow_cls.prototype,  # scratch ledger history is disposable
         )
 
     flush()

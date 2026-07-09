@@ -62,6 +62,7 @@ RESERVED_STEP_NAMES = {"ledger", "metrics"}  # taken by duck()'s system views
 
 
 def build_dag(cls) -> Dag:
+    prototype = getattr(cls, "prototype", False)
     funcs = {n: o for n, o in vars(cls).items() if _is_step(n, o)}
     for name in RESERVED_STEP_NAMES & set(funcs):
         raise ValueError(f"step '{name}' is reserved (system view)")
@@ -74,8 +75,14 @@ def build_dag(cls) -> Dag:
             origin = typing.get_origin(hints.get(p))
             kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
         ret = hints.get("return")
+        if ret is type(None):  # `-> None` counts as untyped
+            ret = None
         is_fanout = typing.get_origin(ret) is Fanout
         table = typing.get_args(ret)[0] if is_fanout else ret
+        if table is None and not prototype:
+            raise ValueError(
+                f"step '{name}' has no output table annotation (only prototype flows may omit it)"
+            )
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():

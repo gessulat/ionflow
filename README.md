@@ -231,6 +231,37 @@ arrive with the final write). The flush also doubles as a **heartbeat**: `ls`
 and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 5+ minutes — the honest state for a process that was killed without cleanup.
 
+## Prototyping
+
+Iterating on a flow fights the production guarantees (clean git, declared schemas,
+immutable history). Mark a flow as a prototype to relax them — visibly, in code:
+
+```python
+from microflow import Flow, Prototype
+
+class Scratch(Prototype, Flow):     # or: prototype = True as a class attribute
+    def numbers(self):              # untyped step: schema inferred at write
+        return pa.table({"x": [1, 2, 3]})
+
+    def total(self, numbers) -> Totals:   # typed steps still validate as usual
+        return numbers.aggregate("count(*) AS n, sum(x) AS total")
+```
+
+Prototype flows:
+
+- run in a **scratch namespace** (`<prefix>/_proto/<Flow>/…`) — stable views, drift
+  checks, and other clients never see the churn, and stable data is never touched;
+- may run from a **dirty git tree** (ledger records `dirty:<sha>`);
+- may **omit step output schemas** (untyped steps can't fan out — annotate
+  `Fanout[...]` for that);
+- tolerate ledger schema churn (a conflicting old scratch ledger is reset);
+- can be wiped: `microflow clean mymodule:Scratch` (refused for stable flows —
+  deletion is explicit and scratch-only, never a side effect of running).
+
+Remove the mixin to promote: the flow points back at the stable namespace, and every
+guarantee applies again from the first stable run. Untyped steps in a non-prototype
+flow are a **class-definition error**.
+
 ## Resume
 
 ```bash

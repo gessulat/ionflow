@@ -34,3 +34,11 @@ def require_clean(repo="."):
             "refusing to run with a dirty working tree:\n" + status
         )
     return commit_hash(repo)
+
+
+def commit_or_dirty(repo="."):
+    """HEAD commit hash, prefixed 'dirty:' when the tree has changes (prototype runs)."""
+    try:
+        return require_clean(repo)  # one definition of "dirty" for both modes
+    except DirtyRepoError:
+        return f"dirty:{commit_hash(repo)}"

@@ -70,6 +70,8 @@ microflow query myproj.flows:Training \
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`; the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
+  `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git
+  allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume, in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed).
@@ -93,7 +95,10 @@ microflow query myproj.flows:Training \
 
 - Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
   **no pandas/polars in core** (steps may return anything arrow-convertible).
-- Runs refuse a dirty git tree (no override). Tests always create/commit a repo first.
+- Runs refuse a dirty git tree (no override for stable flows; `Prototype` flows run
+  dirty and record `dirty:<sha>`). Tests always create/commit a repo first.
+- Untyped steps (no return annotation) are a class-definition error except in
+  `Prototype` flows, where the parquet schema is inferred at write time.
 - Python docs: a one-liner, plus short prose only for non-obvious constraints;
   doctests for examples (they run in the suite).
 - Run folders on S3 are immutable; the ledger is the only mutated object (CAS).

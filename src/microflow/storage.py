@@ -24,6 +24,9 @@ def utc_now():
 class Layout:
     """S3 key scheme for one flow.
 
+    Prototype flows live under a `_proto/` scratch namespace: disposable,
+    invisible to the flow's stable views, wiped by `microflow clean`.
+
     >>> l = Layout("mf", "ETL")
     >>> l.ledger
     'mf/ETL/ledger.parquet'
@@ -31,14 +34,22 @@ class Layout:
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
     >>> l.table_glob("raw")
     'mf/ETL/runs/*/raw/*.parquet'
+    >>> Layout("mf", "ETL", proto=True).ledger
+    'mf/_proto/ETL/ledger.parquet'
     """
 
     prefix: str
     flow: str
+    proto: bool = False
+
+    @classmethod
+    def for_flow(cls, config, flow_cls):
+        """The layout a flow class writes to — the one place the flag is read."""
+        return cls(config.prefix, flow_cls.__name__, getattr(flow_cls, "prototype", False))
 
     @property
     def root(self):
-        return f"{self.prefix}/{self.flow}"
+        return f"{self.prefix}/_proto/{self.flow}" if self.proto else f"{self.prefix}/{self.flow}"
 
     @property
     def ledger(self):
@@ -145,8 +156,12 @@ def write_part(con, client, bucket, key, data, table):
 
     DuckDB enforces types / NOT NULL / CHECK by inserting into a temp table
     built from the schema DDL; the write itself goes through boto3 (httpfs's
-    write path is unreliable against some S3 stores).
+    write path is unreliable against some S3 stores). `table=None` (untyped
+    prototype step) skips validation — the schema is whatever the data infers.
     """
+    if table is None:
+        put_parquet(client, bucket, key, to_arrow(data))
+        return
     con.register("_src", to_arrow(data))
     try:
         cols = ", ".join(table.columns())
@@ -170,6 +185,16 @@ def put_parquet(client, bucket, key, table, **extra):
 def get_table(client, bucket, key):
     body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
     return pq.read_table(io.BytesIO(body))
+
+
+def delete_prefix(client, bucket, prefix):
+    """Delete every object under `prefix`; returns the number deleted."""
+    keys = list_keys(client, bucket, prefix)
+    for i in range(0, len(keys), 1000):  # DeleteObjects caps at 1000 keys
+        client.delete_objects(
+            Bucket=bucket, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]}
+        )
+    return len(keys)
 
 
 def object_age(client, bucket, key):
@@ -197,12 +222,18 @@ def parse_key(prefix, key):
     """Reverse of Layout's key scheme, for keys under `prefix` (ends with "/").
 
     Returns (flow, None) for a flow's ledger, (flow, step) for a run part,
-    or None for anything else (e.g. _meta.json).
+    or None for anything else (e.g. _meta.json, or prototype `_proto/` keys —
+    scratch must stay invisible to stable scans; namespace-scoped readers pass
+    the `_proto/` prefix themselves).
 
     >>> parse_key("mf/", "mf/ETL/ledger.parquet")
     ('ETL', None)
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/raw/part_0.parquet")
     ('ETL', 'raw')
+    >>> parse_key("mf/", "mf/_proto/ETL/ledger.parquet") is None
+    True
+    >>> parse_key("mf/_proto/", "mf/_proto/ETL/ledger.parquet")
+    ('ETL', None)
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
     True
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None

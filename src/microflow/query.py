@@ -17,16 +17,20 @@ def _empty_view_sql(table):
     """Typed, zero-row SELECT so a step that produced no parts is still queryable.
 
     `run_id` goes last, matching where hive partitioning puts it in real views.
+    `table=None` (untyped prototype step) yields a run_id-only empty view.
     """
-    cols = [f"NULL::{c.duckdb_type()} AS {name}" for name, c in table.columns().items()]
+    cols = [] if table is None else [
+        f"NULL::{c.duckdb_type()} AS {name}" for name, c in table.columns().items()
+    ]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
 def _scan_parts(client, config, layout):
     """(step names with parts, any metrics present) from one LIST of runs/."""
     steps, has_metrics = set(), False
+    ns_prefix = layout.root.removesuffix(layout.flow)  # 'mf/' or 'mf/_proto/'
     for key in list_keys(client, config.bucket, layout.root + "/runs/"):
-        parsed = parse_key(config.prefix + "/", key)
+        parsed = parse_key(ns_prefix, key)
         if parsed and parsed[1]:
             steps.add(parsed[1])
         has_metrics = has_metrics or key.endswith("/" + METRICS_FILE)
@@ -88,7 +92,7 @@ def ledger_with_liveness(flow_cls, config, con=None):
     honest display state at read time (one HEAD per running run).
     """
     con = con or duck(flow_cls, config)
-    layout = Layout(config.prefix, flow_cls.__name__)
+    layout = Layout.for_flow(config, flow_cls)
     stale = _stale_running(con, s3_client(config), config, layout)
     if not stale:
         return con.sql("SELECT * FROM ledger")
@@ -106,7 +110,7 @@ def duck(flow_cls, config):
     new runs appear with nothing to sync.
     """
     con = connect(config)
-    layout = Layout(config.prefix, flow_cls.__name__)
+    layout = Layout.for_flow(config, flow_cls)
     present, has_metrics = _scan_parts(s3_client(config), config, layout)
     for name, step in flow_cls._dag.steps.items():
         if name in present:

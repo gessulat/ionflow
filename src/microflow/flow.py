@@ -3,6 +3,20 @@ from .config import Config
 from .dag import build_dag
 
 
+class Prototype:
+    """Mixin marking a flow as a prototype: `class MyFlow(Prototype, Flow)`.
+
+    Prototype flows live in a scratch namespace (`<prefix>/_proto/`), may run
+    from a dirty git tree (commit recorded as `dirty:<sha>`), may omit step
+    output schemas (inferred at write, validation skipped), skip the startup
+    schema-drift check, and can be wiped with `microflow clean`. Remove the
+    mixin to promote: the stable namespace starts clean and every guarantee
+    (clean git, declared+validated schemas, immutable history) applies again.
+    """
+
+    prototype = True
+
+
 class Flow:
     """Base class. Subclass it; each public method is a step.
 
@@ -18,6 +32,7 @@ class Flow:
 
     _registry: dict[str, type] = {}
     config = None  # bound by the runner (orchestrator and branch workers)
+    prototype = False  # True (or the Prototype mixin) relaxes the guarantees; see Prototype
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)

@@ -49,8 +49,13 @@ def _write(client, bucket, key, rows, custom_fields, etag):
     storage.put_parquet(client, bucket, key, pa.Table.from_pylist(rows, schema=schema), **cas)
 
 
-def upsert_run(client, bucket, key, row, custom_fields=(), retries=5):
-    """Insert or replace this run's ledger row via S3 compare-and-swap."""
+def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_conflict=False):
+    """Insert or replace this run's ledger row via S3 compare-and-swap.
+
+    `reset_on_conflict` (prototype flows): when existing rows no longer fit
+    the current schema — scratch flows churn types freely — start a fresh
+    ledger holding only this run instead of failing.
+    """
     for _ in range(retries):
         rows, etag = _read(client, bucket, key)
         rows = [r for r in rows if r["run_id"] != row["run_id"]]
@@ -63,6 +68,16 @@ def upsert_run(client, bucket, key, row, custom_fields=(), retries=5):
             if _code(e) in _PRECONDITION:
                 continue
             raise
+        except (pa.ArrowInvalid, pa.ArrowTypeError):  # old rows don't fit the current schema
+            if not reset_on_conflict:
+                raise
+            try:
+                _write(client, bucket, key, [dict(row)], list(custom_fields), etag)
+                return
+            except ClientError as e:
+                if _code(e) in _PRECONDITION:  # lost the CAS race; re-read and retry
+                    continue
+                raise
     raise RuntimeError(f"ledger CAS failed after {retries} retries: {key}")
 
 

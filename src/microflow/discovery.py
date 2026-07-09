@@ -24,15 +24,23 @@ def discover_flows(package):
 
 
 def scan_runs(config):
-    """One LIST of the bucket prefix: (flows with a ledger, one sample part key per step).
+    """One LIST of the bucket prefix: stable flows with a ledger, one sample part
+    key per step, and prototype flows with a scratch ledger.
 
-    Returns (with_data, samples) where samples is {flow: {step: key}} — enough
-    for both the orphan check and the schema-drift check without further LISTs.
+    Returns (with_data, samples, proto_with_data). `samples` is {flow: {step:
+    key}}, stable namespace only — the two namespaces must never mix, or a
+    stable flow's drift check would DESCRIBE leftover scratch parquet.
     """
     client = storage.s3_client(config)
     prefix = config.prefix + "/"
-    with_data, samples = set(), {}
+    proto_prefix = prefix + "_proto/"
+    with_data, samples, proto_with_data = set(), {}, set()
     for key in storage.list_keys(client, config.bucket, prefix):
+        if key.startswith(proto_prefix):
+            parsed = storage.parse_key(proto_prefix, key)
+            if parsed and parsed[1] is None:
+                proto_with_data.add(parsed[0])
+            continue
         parsed = storage.parse_key(prefix, key)
         if parsed is None:
             continue
@@ -41,7 +49,7 @@ def scan_runs(config):
             with_data.add(flow)
         else:
             samples.setdefault(flow, {}).setdefault(step, key)
-    return with_data, samples
+    return with_data, samples, proto_with_data
 
 
 def flows_with_data(config):
@@ -85,7 +93,7 @@ def startup_warnings(flows, config, with_data, samples):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
     con = storage.connect(config)  # one connection serves every flow's drift check
     for name in flows:
-        if name not in with_data:
+        if name not in with_data or flows[name].prototype:  # scratch churns by design
             continue
         try:
             warnings += schema_drift(flows[name], con, config, samples.get(name, {}))

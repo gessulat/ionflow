@@ -10,7 +10,7 @@ import uuid
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Table
+from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table
 from microflow.storage import s3_client
 
 
@@ -109,6 +109,16 @@ class SideInputFlow(Flow):
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
+class ProtoFlow(Prototype, Flow):
+    """Prototype: scratch namespace, dirty git ok, first step untyped."""
+
+    def numbers(self):  # untyped: schema inferred at write time
+        return pa.table({"x": [1, 2, 3]})
+
+    def total(self, numbers) -> Agg:
+        return numbers.aggregate("count(*) AS n, sum(x) AS total")
 
 
 class EmptyFanFlow(Flow):

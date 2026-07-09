@@ -52,7 +52,7 @@ def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
 
     Alpha.run(s3cfg, repo=repo, use_processes=False)
     con = storage.connect(s3cfg)
-    _, samples = discovery.scan_runs(s3cfg)
+    _, samples, _ = discovery.scan_runs(s3cfg)
     assert discovery.schema_drift(Alpha, con, s3cfg, samples["Alpha"]) == []
 
     # pretend the code now declares `x` as text instead of the stored bigint
