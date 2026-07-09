@@ -67,9 +67,8 @@ def duck(flow_cls, config):
         con.execute(f"CREATE VIEW {name} AS {body}")
     if has_metrics:
         metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
-    else:  # typed empty view derived from the one schema definition
-        con.register("_metrics_empty", metrics.SCHEMA.empty_table())
-        metrics_body = "SELECT *, NULL::VARCHAR AS run_id FROM _metrics_empty"
+    else:
+        metrics_body = _empty_view_sql(metrics.Sample)
     con.execute(f"CREATE VIEW metrics AS {metrics_body}")
     con.execute(
         f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')"

@@ -1,3 +1,4 @@
+import datetime as dt
 import threading
 import time
 
@@ -5,21 +6,29 @@ import psutil
 import pyarrow as pa
 
 from . import storage
+from .schema import Table
 
 BASE_INTERVAL = 1.0  # seconds between samples at run start
 MAX_SAMPLES = 1024  # per sampler; at the cap, pairs fold and the interval doubles
 
-SCHEMA = pa.schema(
-    [
-        pa.field("ts", pa.timestamp("us")),  # naive UTC, like the ledger
-        pa.field("step", pa.string()),
-        pa.field("branch", pa.int64()),
-        pa.field("rss", pa.int64()),  # bytes
-        pa.field("threads", pa.int64()),  # native threads (includes DuckDB's)
-        pa.field("cpu_user", pa.float64()),  # cumulative process seconds
-        pa.field("cpu_system", pa.float64()),
-    ]
-)
+
+class Sample(Table):
+    """One resource sample; the schema of the `metrics` view.
+
+    `run_id` is added by the hive partition at read time — deliberately
+    absent from the written parquet.
+    """
+
+    ts: dt.datetime  # naive UTC, like the ledger
+    step: str | None  # active step (NULL = orchestrator idle / pool-wait)
+    branch: int | None  # set only by process-mode branch workers
+    rss: int  # bytes
+    threads: int  # native threads (includes DuckDB's)
+    cpu_user: float  # cumulative process seconds
+    cpu_system: float
+
+
+SCHEMA = Sample.arrow_schema()
 
 
 class Sampler:
@@ -100,8 +109,8 @@ def to_table(rows):
     True
     """
     columns = list(zip(*rows))
-    ts = pa.array((int(t * 1e6) for t in columns[0]), pa.timestamp("us"))
-    rest = [pa.array(c, f.type) for c, f in zip(columns[1:], list(SCHEMA)[1:])]
+    ts = pa.array((int(t * 1e6) for t in columns[0]), SCHEMA.types[0])
+    rest = [pa.array(c, t) for c, t in zip(columns[1:], SCHEMA.types[1:])]
     return pa.Table.from_arrays([ts, *rest], schema=SCHEMA)
 
 

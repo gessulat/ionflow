@@ -199,7 +199,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 if todo:
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)
-                    sampler.mark(name if not use_processes else None)
+                    sampler.mark(None if use_processes else name)
                     done, error, samples = _run_branches(
                         flow_cls, config, run_id, step, todo, max_workers, use_processes
                     )
