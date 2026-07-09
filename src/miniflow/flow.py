@@ -16,15 +16,15 @@ class Flow:
 
     @classmethod
     def run(cls, config=None, repo=".", **kw):
-        return runner.run(cls, config or Config.from_env(), repo=repo, **kw)
+        return runner.run(cls, config or Config.load(), repo=repo, **kw)
 
     @classmethod
     def resume(cls, origin_run_id, config=None, repo=".", **kw):
         return runner.run(
-            cls, config or Config.from_env(), repo=repo,
+            cls, config or Config.load(), repo=repo,
             origin_run_id=origin_run_id, **kw,
         )
 
     @classmethod
     def duck(cls, config=None):
-        return query.duck(cls, config or Config.from_env())
+        return query.duck(cls, config or Config.load())

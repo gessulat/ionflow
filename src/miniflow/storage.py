@@ -58,6 +58,20 @@ def s3_client(cfg):
     )
 
 
+def aws_credentials_available():
+    """True if the standard AWS chain resolves credentials (offline check)."""
+    return boto3.Session().get_credentials() is not None
+
+
+def verify_access(cfg):
+    """Best-effort reachability check; returns (ok, message)."""
+    try:
+        s3_client(cfg).head_bucket(Bucket=cfg.bucket)
+        return True, f"bucket '{cfg.bucket}' is reachable"
+    except Exception as e:  # noqa: BLE001 — surface any failure to the user
+        return False, f"cannot reach bucket '{cfg.bucket}': {e}"
+
+
 def uri(cfg, key):
     return f"s3://{cfg.bucket}/{key}"
 
@@ -68,15 +82,18 @@ def compute_connection():
 
 
 def connect(cfg):
-    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs)."""
+    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
+
+    Uses explicit keys when the config carries them (MinIO/tests), otherwise the
+    standard AWS credential chain.
+    """
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs")
-    parts = [
-        "TYPE s3",
-        f"KEY_ID '{cfg.access_key}'",
-        f"SECRET '{cfg.secret_key}'",
-        f"REGION '{cfg.region}'",
-    ]
+    parts = ["TYPE s3", f"REGION '{cfg.region}'"]
+    if cfg.access_key:
+        parts += [f"KEY_ID '{cfg.access_key}'", f"SECRET '{cfg.secret_key}'"]
+    else:
+        parts.append("PROVIDER credential_chain")
     if cfg.endpoint_url:
         u = urlparse(cfg.endpoint_url)
         parts += [

@@ -5,6 +5,7 @@ import pyarrow as pa
 import pytest
 
 from miniflow import storage
+from miniflow.config import Config
 from miniflow.schema import Table, check, pk
 
 
@@ -12,6 +13,15 @@ class Features(Table):
     id: int = pk
     ts: dt.datetime
     score: float = check("score >= 0")
+
+
+def test_connect_uses_credential_chain_without_keys():
+    # No explicit keys -> DuckDB secret should use the AWS credential chain, not crash.
+    con = storage.connect(Config(bucket="b"))
+    provider = con.sql(
+        "SELECT provider FROM duckdb_secrets() WHERE name = 's'"
+    ).fetchone()[0]
+    assert provider == "credential_chain"
 
 
 def _data():

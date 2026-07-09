@@ -26,11 +26,28 @@ uv add miniflow    # or: pip install miniflow
 
 ## Configure (the only setup)
 
+Run the wizard once per repo:
+
 ```bash
-export MINIFLOW_BUCKET=my-bucket
-export MINIFLOW_ENDPOINT=https://…   # omit for AWS S3; set for MinIO / R2
-export AWS_ACCESS_KEY_ID=…
-export AWS_SECRET_ACCESS_KEY=…
+miniflow setup
+```
+
+It asks for your bucket (and optional prefix / endpoint / region) and writes them to
+`.miniflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
+whether to gitignore `.miniflow/` (keep it local) or commit it (share with your team).
+Re-run `miniflow setup` any time to change it.
+
+**Credentials** come from the standard AWS chain (environment variables, `~/.aws/credentials`,
+or an IAM role) and are never written to the repo. `miniflow setup` just checks they resolve
+and that the bucket is reachable. Any command guides you into `setup` if the repo isn't
+configured yet.
+
+```
+# .miniflow/config
+bucket   = "my-bucket"
+prefix   = "miniflow"
+endpoint = "https://…"   # omit for AWS S3; set for MinIO / R2
+region   = "us-east-1"
 ```
 
 ## A complete flow
@@ -98,7 +115,7 @@ and return any of those.
 ## Run it
 
 ```python
-run_id = ETLFlow.run()          # reads config from the environment
+run_id = ETLFlow.run()          # reads .miniflow/config (or pass config=Config(...))
 ```
 
 or from the shell:
