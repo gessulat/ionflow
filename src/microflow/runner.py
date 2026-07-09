@@ -1,4 +1,3 @@
-import datetime as dt
 import importlib.util
 import inspect
 import uuid
@@ -16,12 +15,9 @@ from .storage import (
     load_relation,
     list_keys,
     s3_client,
+    utc_now,
     write_part,
 )
-
-
-def _now():
-    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)  # naive UTC
 
 
 def _new_run_id(now):
@@ -83,7 +79,9 @@ def _branch_worker(payload):
     step = flow_cls._dag.steps[payload["step"]]
     run_id, branch = payload["run_id"], payload["branch"]
     # own sampler only in a separate process; in thread mode the orchestrator's
-    # sampler already covers this process (a second one would double-count CPU)
+    # sampler already covers this process (a second one would double-count CPU).
+    # Never with flush=: _metrics.parquet has ONE writer (the orchestrator, no
+    # CAS on that key) — branch samples return through the pool result channel.
     sampler = None
     if payload["sample"]:
         sampler = metrics.Sampler().start()
@@ -138,7 +136,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     if origin_run_id and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     commit = require_clean(repo)
-    started = _now()
+    started = utc_now()
     run_id = _new_run_id(started)
     layout = Layout(config.prefix, flow_cls.__name__)
     client = s3_client(config)
@@ -206,13 +204,15 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
 
     flush()
     upsert("running")
-    sampler = metrics.Sampler().start()
+    def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
+        metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
+
+    sampler = metrics.Sampler(flush=flush_metrics).start()
     branch_samples = []
 
     def write_metrics():
         try:
-            rows = sampler.stop() + branch_samples
-            metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
+            flush_metrics(sampler.stop() + branch_samples)
         except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
             pass
 
@@ -253,12 +253,12 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         if missing:
             raise RuntimeError(f"ledger columns not populated during run: {missing}")
         custom = {c: getattr(flow, c) for c in ledger_cols}
-        finished = _now()
+        finished = utc_now()
         flush(finished, custom)
         upsert("complete", finished, custom)
     except Exception:
         flush()  # persist partial progress so resume can reuse completed branches
-        upsert("failed", finished=_now())
+        upsert("failed", finished=utc_now())
         raise
     finally:
         write_metrics()  # success AND failure — failed runs need perf data most

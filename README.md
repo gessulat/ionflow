@@ -220,6 +220,13 @@ The same summary appears in the TUI run drill-down ("stats" entry), and the raw
 time series is the `metrics` SQL view (`ts, step, branch, rss, threads, cpu_user,
 cpu_system, run_id`). Failed runs keep their metrics.
 
+The buffer is flushed to S3 every 60s while the run executes, so metrics survive
+hard kills (OOM, SIGKILL) up to the last minute and you can watch a running step's
+memory live from another client (orchestrator process; process-mode branch samples
+arrive with the final write). The flush also doubles as a **heartbeat**: `ls`
+and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
+5+ minutes — the honest state for a process that was killed without cleanup.
+
 ## Resume
 
 ```bash

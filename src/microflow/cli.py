@@ -6,7 +6,7 @@ import typer
 
 from . import git, storage
 from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config, write_config
-from .query import step_stats
+from .query import ledger_with_liveness, step_stats
 
 app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
 
@@ -137,11 +137,9 @@ def resume(flow: str, origin_run_id: str, repo: str = "."):
 
 @app.command()
 def ls(flow: str):
-    """List runs recorded in the ledger."""
-    con = _load(flow).duck(_config_or_setup())
-    con.sql(
-        "SELECT run_id, status, started, finished, commit FROM ledger ORDER BY started"
-    ).show()
+    """List runs recorded in the ledger (stale running runs are marked)."""
+    rel = ledger_with_liveness(_load(flow), _config_or_setup())
+    rel.project("run_id, status, started, finished, commit").order("started").show()
 
 
 @app.command()

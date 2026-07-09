@@ -24,6 +24,14 @@ def test_connect_uses_credential_chain_without_keys():
     assert provider == "credential_chain"
 
 
+def test_object_age_uses_server_clock(s3cfg):
+    client = storage.s3_client(s3cfg)
+    client.put_object(Bucket=s3cfg.bucket, Key="x", Body=b"1")
+    age = storage.object_age(client, s3cfg.bucket, "x")
+    assert age is not None and -2 <= age <= 5  # HTTP Date has 1s resolution
+    assert storage.object_age(client, s3cfg.bucket, "missing") is None
+
+
 def _data():
     return pa.table(
         {

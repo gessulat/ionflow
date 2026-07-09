@@ -1,5 +1,16 @@
 from . import metrics
-from .storage import METRICS_FILE, Layout, connect, list_keys, parse_key, read_parquet_sql, s3_client, uri
+from .storage import (
+    METRICS_FILE,
+    Layout,
+    connect,
+    list_keys,
+    object_age,
+    parse_key,
+    read_parquet_sql,
+    s3_client,
+    uri,
+    utc_now,
+)
 
 
 def _empty_view_sql(table):
@@ -48,6 +59,44 @@ def step_stats(con, run_id):
                count(*) AS processes
         FROM g GROUP BY step ORDER BY min(t0)
     """)
+
+
+def is_stale(client, config, layout, run_id, started):
+    """True if a run's heartbeat (metrics flush) has been quiet for STALE_AFTER.
+
+    Skew-free on the primary path (the object's LastModified vs S3's own
+    clock). Runs with no metrics object yet — crashed before the first flush,
+    or predating heartbeats — fall back to comparing `started` against the
+    local clock, a best-effort cross-machine comparison.
+    """
+    age = object_age(client, config.bucket, layout.metrics(run_id))
+    if age is None:
+        age = (utc_now() - started).total_seconds()
+    return age > metrics.STALE_AFTER
+
+
+def _stale_running(con, client, config, layout):
+    """run_ids stuck in `running` whose heartbeat went quiet."""
+    rows = con.sql("SELECT run_id, started FROM ledger WHERE status = 'running'").fetchall()
+    return [r for r, s in rows if is_stale(client, config, layout, r, s)]
+
+
+def ledger_with_liveness(flow_cls, config, con=None):
+    """Ledger relation where stale running runs read 'running (stale?)'.
+
+    A SIGKILL'd run stays `running` in the ledger forever; this derives the
+    honest display state at read time (one HEAD per running run).
+    """
+    con = con or duck(flow_cls, config)
+    layout = Layout(config.prefix, flow_cls.__name__)
+    stale = _stale_running(con, s3_client(config), config, layout)
+    if not stale:
+        return con.sql("SELECT * FROM ledger")
+    ids = ", ".join(f"'{r}'" for r in stale)
+    return con.sql(
+        f"SELECT * REPLACE (CASE WHEN run_id IN ({ids}) "
+        "THEN 'running (stale?)' ELSE status END AS status) FROM ledger"
+    )
 
 
 def duck(flow_cls, config):

@@ -73,7 +73,8 @@ microflow query myproj.flows:Training \
   per-branch resume, in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
-  `_metrics.parquet` per run, written by the orchestrator on success AND failure.
+  `_metrics.parquet` per run, written by the orchestrator on success AND failure,
+  flushed every 60s mid-run (heartbeat + crash-durable metrics).
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (httpfs write path is unreliable); validation = temp table from DDL, then PUT.
@@ -96,4 +97,6 @@ microflow query myproj.flows:Training \
   doctests for examples (they run in the suite).
 - Run folders on S3 are immutable; the ledger is the only mutated object (CAS).
 - Backblaze B2 is unsupported (no If-Match conditional writes).
-- A run killed by SIGKILL stays `running` in the ledger forever (can't catch it).
+- A run killed by SIGKILL stays `running` in the ledger forever (can't catch it),
+  but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
+  has been quiet for 300s; its metrics survive up to the last flush.

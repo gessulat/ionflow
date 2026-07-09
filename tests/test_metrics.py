@@ -1,6 +1,8 @@
+import datetime as dt
+
 import pytest
 
-from microflow import metrics, storage
+from microflow import ledger, metrics, query, storage
 from microflow.dag import build_dag
 
 
@@ -43,6 +45,61 @@ def test_cap_triggers_fold(monkeypatch):
         s._sample()
     assert len(s._rows) == 2  # folded once at the cap
     assert s._interval == metrics.BASE_INTERVAL * 2
+
+
+def test_tick_runs_duties_on_their_own_cadences():
+    flushed = []
+    s = metrics.Sampler(flush=flushed.append)
+    s._label = ("a", None)
+    s._interval = 10.0
+    s._last_sample = s._last_flush = 100.0
+
+    s._tick(105.0)  # nothing due
+    assert not s._rows and not flushed
+    s._tick(111.0)  # sample due (10s), flush not (60s)
+    assert len(s._rows) == 1 and not flushed
+    s._tick(161.0)  # flush due
+    assert flushed == [s.rows()]
+
+
+def test_flush_errors_do_not_kill_sampling():
+    def boom(rows):
+        raise RuntimeError("s3 down")
+
+    s = metrics.Sampler(flush=boom)
+    s._label = ("a", None)
+    s._last_sample = s._last_flush = 0.0
+    s._tick(100.0)  # both duties due; the raising flush is swallowed
+    assert len(s._rows) == 1
+
+
+def test_stop_joins_the_thread():
+    s = metrics.Sampler().start()
+    s.stop()
+    assert not s._thread.is_alive()
+
+
+def test_stale_running_detection(s3cfg):
+    client = storage.s3_client(s3cfg)
+    layout = storage.Layout(s3cfg.prefix, "F")
+    old = dt.datetime(2020, 1, 1)
+    for run_id in ("dead", "alive"):
+        ledger.upsert_run(
+            client, s3cfg.bucket, layout.ledger,
+            {"run_id": run_id, "status": "running", "started": old},
+        )
+    # a fresh metrics flush is the heartbeat; "dead" never wrote one
+    metrics.write_parquet(
+        client, s3cfg.bucket, layout.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)]
+    )
+
+    con = storage.connect(s3cfg)
+    con.execute(
+        f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{storage.uri(s3cfg, layout.ledger)}')"
+    )
+    rel = query.ledger_with_liveness(type("F", (), {}), s3cfg, con)
+    statuses = dict(rel.project("run_id, status").fetchall())
+    assert statuses == {"dead": "running (stale?)", "alive": "running"}
 
 
 def test_write_parquet_roundtrip(s3cfg):

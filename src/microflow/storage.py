@@ -1,14 +1,23 @@
+import datetime as dt
 import io
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import boto3
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+from botocore.exceptions import ClientError
 
 
 METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
+MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
+
+
+def utc_now():
+    """Naive UTC now — the project's single timestamp convention."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -161,6 +170,22 @@ def put_parquet(client, bucket, key, table, **extra):
 def get_table(client, bucket, key):
     body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
     return pq.read_table(io.BytesIO(body))
+
+
+def object_age(client, bucket, key):
+    """Seconds since the object was last written, by S3's own clock (None if absent).
+
+    Compares the HEAD response's Date header with the object's LastModified,
+    so no client clock is involved.
+    """
+    try:
+        r = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in MISSING_KEY_CODES:
+            return None
+        raise
+    server_now = parsedate_to_datetime(r["ResponseMetadata"]["HTTPHeaders"]["date"])
+    return (server_now - r["LastModified"]).total_seconds()
 
 
 def list_keys(client, bucket, prefix):

@@ -19,7 +19,6 @@ _STD_FIELDS = [
 
 STD_COLS = {f.name for f in _STD_FIELDS}  # names params/custom columns must not take
 
-_MISSING = {"NoSuchKey", "404"}
 _PRECONDITION = {"PreconditionFailed", "412"}
 
 
@@ -31,7 +30,7 @@ def _get_or_none(client, bucket, key):
     try:
         return client.get_object(Bucket=bucket, Key=key)
     except ClientError as e:
-        if _code(e) in _MISSING:
+        if _code(e) in storage.MISSING_KEY_CODES:
             return None
         raise
 

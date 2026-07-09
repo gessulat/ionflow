@@ -10,6 +10,8 @@ from .schema import Table
 
 BASE_INTERVAL = 1.0  # seconds between samples at run start
 MAX_SAMPLES = 1024  # per sampler; at the cap, pairs fold and the interval doubles
+FLUSH_INTERVAL = 60.0  # buffer flushed to S3 this often: heartbeat + crash-durable metrics
+STALE_AFTER = 300.0  # 5 missed flushes: a `running` run quieter than this counts as dead
 
 
 class Sample(Table):
@@ -41,19 +43,27 @@ class Sampler:
     whole life. `mark()` records step boundaries with a forced sample, so even
     sub-second steps appear.
 
+    With a `flush` callback the buffer is also handed over every
+    `FLUSH_INTERVAL` seconds, on a fixed cadence independent of the adaptive
+    sample interval. That periodic write is the run's heartbeat, and it makes
+    metrics survive hard kills. Flush errors are swallowed — S3 flakiness must
+    kill neither this thread nor the run.
+
     >>> s = Sampler()
     >>> s.mark("load"); s.mark("load", 3)
     >>> [(r[1], r[2]) for r in s.stop()][:2]
     [('load', None), ('load', 3)]
     """
 
-    def __init__(self):
+    def __init__(self, flush=None):
         self._proc = psutil.Process()
         self._interval = BASE_INTERVAL
         self._rows = []
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._label = (None, None)
+        self._flush = flush
+        self._last_sample = self._last_flush = time.monotonic()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def start(self):
@@ -65,11 +75,22 @@ class Sampler:
         self._label = (step, branch)
         self._sample()
 
+    def rows(self):
+        """Thread-safe copy of the buffered samples."""
+        with self._lock:
+            return list(self._rows)
+
     def stop(self):
-        """Final sample, halt the thread, return the buffered rows."""
+        """Final sample, halt and join the thread, return the buffered rows.
+
+        Joining guarantees no in-flight periodic flush can land on S3 after
+        the caller's final (superset) write.
+        """
         self._sample()
         self._stop_event.set()
-        return list(self._rows)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)  # bounded: a wedged flush PUT must not stall the run
+        return self.rows()
 
     def _sample(self):
         with self._proc.oneshot():
@@ -97,9 +118,24 @@ class Sampler:
         self._rows = folded
         self._interval *= 2
 
-    def _loop(self):
-        while not self._stop_event.wait(self._interval):
+    def _tick(self, now):
+        """Run whichever duties are due at `now` (monotonic seconds)."""
+        if now - self._last_sample >= self._interval:
+            self._last_sample = now
             self._sample()
+        if self._flush and now - self._last_flush >= FLUSH_INTERVAL:
+            self._last_flush = now
+            try:
+                self._flush(self.rows())
+            except Exception:  # noqa: BLE001 — the heartbeat must never kill the run
+                pass
+
+    def _loop(self):
+        while True:
+            wait = min(self._interval, FLUSH_INTERVAL) if self._flush else self._interval
+            if self._stop_event.wait(wait):
+                return
+            self._tick(time.monotonic())
 
 
 def to_table(rows):
