@@ -11,34 +11,34 @@ parameter named `parts`.
 
 import pyarrow as pa
 
-from miniflow import Branch, Collect, Column, Fanout, Flow, LedgerColumns, Table
+from miniflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
 
 
 class Raw(Table):
-    id = Column(int, primary_key=True)
-    grp = Column(int, nullable=False)
-    value = Column(float, nullable=False)
+    id: int = pk
+    grp: int
+    value: float
 
 
 class Part(Table):
-    id = Column(int)
-    grp = Column(int)
-    value = Column(float)
+    id: int
+    grp: int
+    value: float
 
 
 class GroupScore(Table):
-    grp = Column(int, nullable=False)
-    total = Column(float, check="total >= 0")
+    grp: int
+    total: float = check("total >= 0")
 
 
 class Summary(Table):
-    n_groups = Column(int)
-    grand_total = Column(float)
+    n_groups: int
+    grand_total: float
 
 
 class ETLFlow(Flow):
     class Ledger(LedgerColumns):
-        n_rows = Column(int)
+        n_rows: int
 
     def raw(self) -> Raw:
         return pa.table(

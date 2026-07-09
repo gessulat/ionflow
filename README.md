@@ -41,36 +41,38 @@ a parameter named `parts`.
 
 ```python
 import pyarrow as pa
-from miniflow import Branch, Collect, Column, Fanout, Flow, LedgerColumns, Table
+from miniflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
 
 
-# --- Output schemas: one class per table, compiled to DuckDB DDL on write ---
+# --- Output schemas: annotations, compiled to DuckDB DDL on write ---
+# A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
+# defaults: `= pk`, `= check("...")`, `= field(...)`.
 class Raw(Table):
-    id = Column(int, primary_key=True)
-    grp = Column(int, nullable=False)
-    value = Column(float, nullable=False)
+    id: int = pk
+    grp: int
+    value: float
 
 
 class Part(Table):
-    id = Column(int)
-    grp = Column(int)
-    value = Column(float)
+    id: int
+    grp: int
+    value: float
 
 
 class GroupScore(Table):
-    grp = Column(int, nullable=False)
-    total = Column(float, check="total >= 0")
+    grp: int
+    total: float = check("total >= 0")
 
 
 class Summary(Table):
-    n_groups = Column(int)
-    grand_total = Column(float)
+    n_groups: int
+    grand_total: float
 
 
 class ETLFlow(Flow):
     # Extra ledger columns, populated during the run (small metadata only).
     class Ledger(LedgerColumns):
-        n_rows = Column(int)
+        n_rows: int
 
     def raw(self) -> Raw:                                    # root step (only `self`)
         return pa.table(

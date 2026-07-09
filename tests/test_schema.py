@@ -3,14 +3,14 @@ import datetime as dt
 import pyarrow as pa
 import pytest
 
-from miniflow.schema import Column, Table
+from miniflow.schema import Table, check, field, pk
 
 
 class Features(Table):
-    id = Column(int, primary_key=True)
-    ts = Column(dt.datetime, nullable=False)
-    score = Column(float, check="score >= 0")
-    label = Column(str)
+    id: int = pk
+    ts: dt.datetime
+    score: float | None = check("score >= 0")
+    label: str | None
 
 
 def test_columns_ordered():
@@ -41,6 +41,20 @@ def test_arrow_schema():
     assert schema.field("score").nullable
 
 
+def test_constraint_helpers_and_nullability():
+    class T(Table):
+        a: int = pk
+        b: str | None
+        c: float = check("c > 0")
+        d: int = field(nullable=True, check="d >= 0")
+
+    cols = T.columns()
+    assert cols["a"].primary_key and not cols["a"].nullable
+    assert cols["b"].nullable
+    assert not cols["c"].nullable and cols["c"].check == "c > 0"
+    assert cols["d"].nullable and cols["d"].check == "d >= 0"
+
+
 def test_empty_table_rejected():
     with pytest.raises(TypeError):
 
@@ -52,4 +66,4 @@ def test_unknown_dtype_rejected():
     with pytest.raises(TypeError):
 
         class Bad(Table):
-            x = Column(complex)
+            x: complex

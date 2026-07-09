@@ -10,25 +10,25 @@ import uuid
 
 import pyarrow as pa
 
-from miniflow import Branch, Collect, Column, Fanout, Flow, Table
+from miniflow import Branch, Collect, Fanout, Flow, Table
 
 
 class Src(Table):
-    g = Column(int, nullable=False)
+    g: int
 
 
 class Part(Table):
-    g = Column(int, nullable=False)
+    g: int
 
 
 class Out(Table):
-    g = Column(int)
-    doubled = Column(int)
+    g: int
+    doubled: int
 
 
 class Agg(Table):
-    n = Column(int)
-    total = Column(int)
+    n: int
+    total: int
 
 
 class FlakyFlow(Flow):

@@ -1,23 +1,23 @@
 import pytest
 
 from miniflow.dag import Branch, Collect, Fanout, build_dag
-from miniflow.schema import Column, Table
+from miniflow.schema import Table
 
 
 class Raw(Table):
-    x = Column(int)
+    x: int
 
 
 class Chunk(Table):
-    x = Column(int)
+    x: int
 
 
 class Score(Table):
-    s = Column(float)
+    s: float
 
 
 class Final(Table):
-    s = Column(float)
+    s: float
 
 
 class ETL:

@@ -5,13 +5,13 @@ import pyarrow as pa
 import pytest
 
 from miniflow import storage
-from miniflow.schema import Column, Table
+from miniflow.schema import Table, check, pk
 
 
 class Features(Table):
-    id = Column(int, primary_key=True)
-    ts = Column(dt.datetime, nullable=False)
-    score = Column(float, check="score >= 0")
+    id: int = pk
+    ts: dt.datetime
+    score: float = check("score >= 0")
 
 
 def _data():
