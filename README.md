@@ -67,14 +67,14 @@ a parameter named `parts`.
 
 ```python
 import pyarrow as pa
-from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
+from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
 
 
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
 # A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
-# defaults: `= pk`, `= check("...")`, `= field(...)`.
+# defaults: `= primary_key`, `= check("...")`, `= field(...)`.
 class Raw(Table):
-    id: int = pk
+    id: int = primary_key
     grp: int
     value: float
 

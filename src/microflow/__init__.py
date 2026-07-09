@@ -1,7 +1,7 @@
 from .config import Config
 from .dag import Branch, Collect, Fanout
 from .flow import Flow, Prototype
-from .schema import FlowParams, LedgerColumns, Table, check, field, pk
+from .schema import FlowParams, LedgerColumns, Table, check, field, primary_key
 
 __all__ = [
     "Flow",
@@ -9,7 +9,7 @@ __all__ = [
     "Table",
     "LedgerColumns",
     "FlowParams",
-    "pk",
+    "primary_key",
     "check",
     "field",
     "Fanout",

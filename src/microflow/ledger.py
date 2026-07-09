@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from . import storage
 
-_STD_FIELDS = [
+_BASE_FIELDS = [
     pa.field("run_id", pa.string()),
     pa.field("status", pa.string()),  # running | complete | failed
     pa.field("started", pa.timestamp("us")),
@@ -17,7 +17,7 @@ _STD_FIELDS = [
     pa.field("origin_run_id", pa.string()),
 ]
 
-STD_COLS = {f.name for f in _STD_FIELDS}  # names params/custom columns must not take
+BASE_COLS = {f.name for f in _BASE_FIELDS}  # names params/custom columns must not take
 
 _PRECONDITION = {"PreconditionFailed", "412"}
 
@@ -40,7 +40,7 @@ def _read(client, bucket, key):
 
 
 def _write(client, bucket, key, rows, custom_fields, etag):
-    schema = pa.schema(_STD_FIELDS + custom_fields)
+    schema = pa.schema(_BASE_FIELDS + custom_fields)
     cas = {"IfMatch" if etag else "IfNoneMatch": etag or "*"}
     storage.put_parquet(client, bucket, key, pa.Table.from_pylist(rows, schema=schema), **cas)
 

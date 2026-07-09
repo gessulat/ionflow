@@ -48,7 +48,7 @@ def _arrow_type(dtype):
 
 
 class _Field:
-    """Column constraints attached as an annotation default (`id: int = pk`)."""
+    """Column constraints attached as an annotation default (`id: int = primary_key`)."""
 
     def __init__(self, *, primary_key=False, check=None):
         self.primary_key = primary_key
@@ -60,7 +60,7 @@ def field(*, primary_key=False, check=None):
     return _Field(primary_key=primary_key, check=check)
 
 
-pk = field(primary_key=True)
+primary_key = field(primary_key=True)
 
 
 def check(expr):
@@ -135,12 +135,12 @@ class Table:
     """Declarative table schema; compiles to DuckDB DDL and a pyarrow schema.
 
     Columns are class annotations: a bare type is `NOT NULL`, `T | None` is
-    nullable. Constraints attach as defaults — `= pk`, `= check("...")`, `= field(...)`.
+    nullable. Constraints attach as defaults — `= primary_key`, `= check("...")`, `= field(...)`.
     Column types are resolved with `typing.get_type_hints`, so they must be
     importable at the schema class's module scope.
 
     >>> class T(Table):
-    ...     a: int = pk
+    ...     a: int = primary_key
     ...     b: str | None
     >>> list(T.columns())
     ['a', 'b']
@@ -176,7 +176,7 @@ class Table:
         there is no module scope to resolve forward references against);
         `constraints` attach per column the way defaults do in a class body.
 
-        >>> Wide = Table.make("Wide", {"id": int, "f0": float | None}, id=pk)
+        >>> Wide = Table.make("Wide", {"id": int, "f0": float | None}, id=primary_key)
         >>> Wide.columns()["id"].primary_key
         True
         >>> Wide.arrow_schema().field("f0").nullable

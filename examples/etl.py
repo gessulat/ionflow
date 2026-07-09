@@ -11,11 +11,11 @@ parameter named `parts`.
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, pk
+from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
 
 
 class Raw(Table):
-    id: int = pk
+    id: int = primary_key
     grp: int
     value: float
 

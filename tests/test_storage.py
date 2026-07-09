@@ -6,11 +6,11 @@ import pytest
 
 from microflow import storage
 from microflow.config import Config
-from microflow.schema import Table, check, pk
+from microflow.schema import Table, check, primary_key
 
 
 class Features(Table):
-    id: int = pk
+    id: int = primary_key
     ts: dt.datetime
     score: float = check("score >= 0")
 

@@ -39,7 +39,7 @@ class Flow:
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
         cls._dag = build_dag(cls)
-        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | ledger.STD_COLS | {"config"}
+        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | ledger.BASE_COLS | {"config"}
         if collisions := set(cls.params_columns()) & taken:
             raise TypeError(f"params collide with steps/ledger columns/config: {sorted(collisions)}")
         Flow._registry[cls.__name__] = cls

@@ -3,11 +3,11 @@ import datetime as dt
 import pyarrow as pa
 import pytest
 
-from microflow.schema import Table, check, field, pk
+from microflow.schema import Table, check, field, primary_key
 
 
 class Features(Table):
-    id: int = pk
+    id: int = primary_key
     ts: dt.datetime
     score: float | None = check("score >= 0")
     label: str | None
@@ -43,7 +43,7 @@ def test_arrow_schema():
 
 def test_constraint_helpers_and_nullability():
     class T(Table):
-        a: int = pk
+        a: int = primary_key
         b: str | None
         c: float = check("c > 0")
         d: int | None = field(check="d >= 0")
@@ -57,7 +57,7 @@ def test_constraint_helpers_and_nullability():
 
 def test_list_columns():
     class Emb(Table):
-        id: int = pk
+        id: int = primary_key
         vec: list[float]
         tags: list[str] | None
 
@@ -75,11 +75,11 @@ def test_list_columns():
 
 def test_make_builds_table_dynamically():
     cols = {"id": int, **{f"frag_{i}": float | None for i in range(3)}}
-    Wide = Table.make("Wide", cols, id=pk)
+    Wide = Table.make("Wide", cols, id=primary_key)
     assert list(Wide.columns()) == ["id", "frag_0", "frag_1", "frag_2"]
     assert Wide.ddl("wide").count("DOUBLE") == 3
     with pytest.raises(TypeError, match="unknown columns"):
-        Table.make("Bad", {"a": int}, typo=pk)
+        Table.make("Bad", {"a": int}, typo=primary_key)
 
 
 def test_empty_table_rejected():

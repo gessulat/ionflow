@@ -38,16 +38,16 @@ def _is_step(name, obj):
 
 
 def _toposort(steps):
-    indeg = {n: len(s.deps) for n, s in steps.items()}
-    ready = sorted(n for n, d in indeg.items() if d == 0)
+    in_degree = {n: len(s.deps) for n, s in steps.items()}
+    ready = sorted(n for n, d in in_degree.items() if d == 0)
     order = []
     while ready:
         n = ready.pop(0)
         order.append(n)
         for m, s in steps.items():
             if n in s.deps:
-                indeg[m] -= 1
-                if indeg[m] == 0:
+                in_degree[m] -= 1
+                if in_degree[m] == 0:
                     ready.append(m)
         ready.sort()
     if len(order) != len(steps):

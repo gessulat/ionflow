@@ -60,7 +60,7 @@ microflow query myproj.flows:Training \
 ## Architecture (one line per module, src/microflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
-  `T | None` = nullable, `list[T]` = DuckDB array, `= pk` / `= check(...)` / `= field(...)`);
+  `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` / `= field(...)`);
   compiles to DuckDB DDL + pyarrow schema. Column types must be importable at module
   scope (get_type_hints).
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
