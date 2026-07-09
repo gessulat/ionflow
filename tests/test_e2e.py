@@ -6,8 +6,8 @@ from miniflow.git import DirtyRepoError
 from examples.etl import ETLFlow
 
 
-def test_run_end_to_end(s3cfg, clean_repo):
-    run_id = ETLFlow.run(s3cfg, repo=clean_repo, use_processes=False)
+def test_run_end_to_end(s3cfg, repo):
+    run_id = ETLFlow.run(s3cfg, repo=repo, use_processes=False)
     con = ETLFlow.duck(s3cfg)
 
     # fan-out produced one part per group, aggregated back to a summary
@@ -30,8 +30,9 @@ def test_run_end_to_end(s3cfg, clean_repo):
     assert row[3] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
 
 
-def test_run_with_processes(s3cfg, clean_repo):
-    run_id = ETLFlow.run(s3cfg, repo=clean_repo, use_processes=True, max_workers=2)
+@pytest.mark.slow
+def test_run_with_processes(s3cfg, repo):
+    run_id = ETLFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=2)
     con = ETLFlow.duck(s3cfg)
     total = con.sql(
         f"SELECT grand_total FROM summary WHERE run_id = '{run_id}'"
@@ -48,10 +49,11 @@ def test_dirty_git_refused(s3cfg, tmp_path):
         ETLFlow.run(s3cfg, repo=str(tmp_path))
 
 
-def test_resume_reuses_completed_steps(s3cfg, clean_repo):
-    origin = ETLFlow.run(s3cfg, repo=clean_repo, use_processes=False)
+@pytest.mark.slow
+def test_resume_reuses_completed_steps(s3cfg, repo):
+    origin = ETLFlow.run(s3cfg, repo=repo, use_processes=False)
     resumed = runner.run(
-        ETLFlow, s3cfg, repo=clean_repo, origin_run_id=origin, use_processes=False
+        ETLFlow, s3cfg, repo=repo, origin_run_id=origin, use_processes=False
     )
     assert resumed != origin
 

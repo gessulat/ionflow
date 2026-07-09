@@ -1,3 +1,4 @@
+import pytest
 import tomllib
 
 from typer.testing import CliRunner
@@ -7,11 +8,12 @@ from miniflow import cli, config
 runner = CliRunner()
 
 
-def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
+@pytest.mark.slow
+def test_cli_run_and_query(s3cfg, repo, monkeypatch):
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
     monkeypatch.setattr("miniflow.storage.aws_credentials_available", lambda: True)
 
-    r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow", "--repo", clean_repo])
+    r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow", "--repo", repo])
     assert r.exit_code == 0, r.output
     run_id = r.output.strip()
 
@@ -28,7 +30,7 @@ def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
 
 
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
-    monkeypatch.chdir(clean_repo)
+    monkeypatch.chdir(clean_repo)  # own repo: setup writes .miniflow/ + .gitignore
     monkeypatch.setattr("miniflow.storage.aws_credentials_available", lambda: False)
 
     # bucket, prefix, endpoint(blank), region, flows(blank), gitignore? -> yes
@@ -43,7 +45,7 @@ def test_cli_setup_writes_config(clean_repo, monkeypatch):
 
 
 def test_cli_run_without_config_errors(clean_repo, monkeypatch):
-    monkeypatch.chdir(clean_repo)
+    monkeypatch.chdir(clean_repo)  # own repo: must contain no .miniflow/config
     monkeypatch.delenv("MINIFLOW_BUCKET", raising=False)
 
     r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow"])  # CliRunner stdin is not a tty

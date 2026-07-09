@@ -35,19 +35,22 @@ def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     assert set(flows) == {"OnlyX"}  # other packages' flows are filtered out
 
 
-def test_flows_with_data(s3cfg, clean_repo):
-    from tui_flows.pipeline import Alpha
+def test_flows_with_data(s3cfg):
+    from miniflow import storage
 
     assert discovery.flows_with_data(s3cfg) == set()
-    Alpha.run(s3cfg, repo=clean_repo, use_processes=False)
-    assert "Alpha" in discovery.flows_with_data(s3cfg)
+    # key presence is all that matters here; no need for a full flow run
+    storage.s3_client(s3cfg).put_object(
+        Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b""
+    )
+    assert discovery.flows_with_data(s3cfg) == {"Alpha"}
 
 
-def test_schema_drift_detects_change(s3cfg, clean_repo, monkeypatch):
+def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
     from miniflow import storage
     from tui_flows.pipeline import Alpha
 
-    Alpha.run(s3cfg, repo=clean_repo, use_processes=False)
+    Alpha.run(s3cfg, repo=repo, use_processes=False)
     con = storage.connect(s3cfg)
     _, samples = discovery.scan_runs(s3cfg)
     assert discovery.schema_drift(Alpha, con, s3cfg, samples["Alpha"]) == []

@@ -26,9 +26,13 @@ build-backend = "uv_build"
 dev = [
     "moto[s3,server]>=5.2.2",
     "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-asyncio_mode = "auto"
+# Fast by default: parallel, and the 4 heaviest integration tests are excluded.
+# Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
+addopts = "-n 5 --dist worksteal --doctest-modules -m 'not slow'"
+testpaths = ["tests", "src/miniflow"]
+markers = ["slow: heavy integration tests (CLI e2e, process pool, resume); run with -m ''"]
