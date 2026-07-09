@@ -1,0 +1,80 @@
+import inspect
+import typing
+from dataclasses import dataclass
+
+T = typing.TypeVar("T")
+
+
+class Fanout(typing.Generic[T]):
+    """Return marker: step yields N branch outputs."""
+
+
+class Branch(typing.Generic[T]):
+    """Param marker: step runs once per branch of the named fan-out step."""
+
+
+class Collect(typing.Generic[T]):
+    """Param marker: step receives all branch outputs of the named step."""
+
+
+@dataclass
+class Step:
+    name: str
+    method: typing.Callable
+    deps: list[str]
+    param_kinds: dict[str, str]  # name -> NORMAL | BRANCH | COLLECT
+    output_table: type
+    is_fanout: bool
+
+
+@dataclass
+class Dag:
+    steps: dict[str, Step]
+    order: list[str]
+
+
+def _is_step(name, obj):
+    return inspect.isfunction(obj) and not name.startswith("_")
+
+
+def _toposort(steps):
+    indeg = {n: len(s.deps) for n, s in steps.items()}
+    ready = sorted(n for n, d in indeg.items() if d == 0)
+    order = []
+    while ready:
+        n = ready.pop(0)
+        order.append(n)
+        for m, s in steps.items():
+            if n in s.deps:
+                indeg[m] -= 1
+                if indeg[m] == 0:
+                    ready.append(m)
+        ready.sort()
+    if len(order) != len(steps):
+        raise ValueError(f"cycle detected among steps: {set(steps) - set(order)}")
+    return order
+
+
+def build_dag(cls) -> Dag:
+    funcs = {n: o for n, o in vars(cls).items() if _is_step(n, o)}
+    steps = {}
+    for name, fn in funcs.items():
+        hints = typing.get_type_hints(fn)
+        sig = inspect.signature(fn)
+        deps, kinds = [], {}
+        for p in list(sig.parameters)[1:]:  # drop self
+            deps.append(p)
+            origin = typing.get_origin(hints.get(p))
+            kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
+        ret = hints.get("return")
+        is_fanout = typing.get_origin(ret) is Fanout
+        table = typing.get_args(ret)[0] if is_fanout else ret
+        steps[name] = Step(name, fn, deps, kinds, table, is_fanout)
+
+    for s in steps.values():
+        for d in s.deps:
+            if d not in steps:
+                raise ValueError(
+                    f"step '{s.name}' depends on unknown step '{d}'"
+                )
+    return Dag(steps=steps, order=_toposort(steps))

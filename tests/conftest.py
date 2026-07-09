@@ -1,0 +1,56 @@
+import subprocess
+
+import boto3
+import pytest
+from moto.server import ThreadedMotoServer
+
+from miniflow.config import Config
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def clean_repo(tmp_path):
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "t@t.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "flow.py").write_text("# flow\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "init")
+    return str(tmp_path)
+
+
+@pytest.fixture(scope="session")
+def moto_endpoint():
+    server = ThreadedMotoServer(port=0)
+    server.start()
+    host, port = server.get_host_and_port()
+    yield f"http://{host}:{port}"
+    server.stop()
+
+
+@pytest.fixture
+def s3cfg(moto_endpoint):
+    cfg = Config(
+        bucket="test-bucket",
+        prefix="mf",
+        endpoint_url=moto_endpoint,
+        region="us-east-1",
+        access_key="test",
+        secret_key="test",
+    )
+    client = boto3.client(
+        "s3",
+        endpoint_url=moto_endpoint,
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    client.create_bucket(Bucket=cfg.bucket)
+    yield cfg
+    objs = client.list_objects_v2(Bucket=cfg.bucket).get("Contents", [])
+    for o in objs:
+        client.delete_object(Bucket=cfg.bucket, Key=o["Key"])
+    client.delete_bucket(Bucket=cfg.bucket)
