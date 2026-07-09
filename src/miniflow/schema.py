@@ -26,25 +26,24 @@ _ARROW = {
 
 
 class _Field:
-    """Column metadata attached as an annotation default (`id: int = pk`)."""
+    """Column constraints attached as an annotation default (`id: int = pk`)."""
 
-    def __init__(self, *, primary_key=False, check=None, nullable=None):
+    def __init__(self, *, primary_key=False, check=None):
         self.primary_key = primary_key
         self.check = check
-        self.nullable = nullable
 
 
-pk = _Field(primary_key=True)
+def field(*, primary_key=False, check=None):
+    """Combine constraints when the shortcuts don't suffice."""
+    return _Field(primary_key=primary_key, check=check)
+
+
+pk = field(primary_key=True)
 
 
 def check(expr):
     """CHECK constraint: `score: float = check("score >= 0")`."""
-    return _Field(check=expr)
-
-
-def field(*, primary_key=False, check=None, nullable=None):
-    """Full column control for the rare case the shortcuts don't cover."""
-    return _Field(primary_key=primary_key, check=check, nullable=nullable)
+    return field(check=expr)
 
 
 class Column:
@@ -54,7 +53,7 @@ class Column:
     False
     """
 
-    def __init__(self, dtype, *, nullable=True, primary_key=False, check=None):
+    def __init__(self, dtype, *, nullable=False, primary_key=False, check=None):
         if dtype not in _DUCKDB:
             raise TypeError(f"unsupported column dtype: {dtype!r}")
         self.dtype = dtype
@@ -84,20 +83,21 @@ def _strip_optional(hint):
     return hint, False
 
 
+def _arrow_fields(columns):
+    return [pa.field(n, _ARROW[c.dtype], nullable=c.nullable) for n, c in columns.items()]
+
+
 def _columns_of(cls, force_nullable=False):
     cols = {}
     for name, hint in typing.get_type_hints(cls).items():
-        if name.startswith("_"):
+        if typing.get_origin(hint) is typing.ClassVar:
             continue
         base, optional = _strip_optional(hint)
         spec = getattr(cls, name, None)
         spec = spec if isinstance(spec, _Field) else None
-        nullable = True if force_nullable else optional
-        if spec and spec.nullable is not None:
-            nullable = spec.nullable
         cols[name] = Column(
             base,
-            nullable=nullable,
+            nullable=force_nullable or optional,
             primary_key=bool(spec and spec.primary_key),
             check=spec.check if spec else None,
         )
@@ -109,6 +109,8 @@ class Table:
 
     Columns are class annotations: a bare type is `NOT NULL`, `T | None` is
     nullable. Constraints attach as defaults — `= pk`, `= check("...")`, `= field(...)`.
+    Column types are resolved with `typing.get_type_hints`, so they must be
+    importable at the schema class's module scope.
 
     >>> class T(Table):
     ...     a: int = pk
@@ -141,10 +143,7 @@ class Table:
 
     @classmethod
     def arrow_schema(cls):
-        return pa.schema(
-            pa.field(n, _ARROW[c.dtype], nullable=c.nullable)
-            for n, c in cls._columns.items()
-        )
+        return pa.schema(_arrow_fields(cls._columns))
 
 
 class LedgerColumns:
@@ -166,7 +165,4 @@ class LedgerColumns:
 
     @classmethod
     def arrow_fields(cls):
-        return [
-            pa.field(n, _ARROW[c.dtype], nullable=True)
-            for n, c in cls._columns.items()
-        ]
+        return _arrow_fields(cls._columns)

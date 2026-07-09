@@ -46,7 +46,7 @@ def test_constraint_helpers_and_nullability():
         a: int = pk
         b: str | None
         c: float = check("c > 0")
-        d: int = field(nullable=True, check="d >= 0")
+        d: int | None = field(check="d >= 0")
 
     cols = T.columns()
     assert cols["a"].primary_key and not cols["a"].nullable
