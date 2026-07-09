@@ -30,7 +30,7 @@ def ls(flow: str):
     """List runs recorded in the ledger."""
     con = _load(flow).duck(Config.from_env())
     con.sql(
-        "SELECT run_id, started, finished, commit FROM ledger ORDER BY started"
+        "SELECT run_id, status, started, finished, commit FROM ledger ORDER BY started"
     ).show()
 
 

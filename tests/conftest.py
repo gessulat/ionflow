@@ -13,13 +13,15 @@ def _git(cwd, *args):
 
 @pytest.fixture
 def clean_repo(tmp_path):
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@t.com")
-    _git(tmp_path, "config", "user.name", "t")
-    (tmp_path / "flow.py").write_text("# flow\n")
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-m", "init")
-    return str(tmp_path)
+    repo = tmp_path / "repo"  # own subdir; tmp_path stays free for test scratch files
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "flow.py").write_text("# flow\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    return str(repo)
 
 
 @pytest.fixture(scope="session")

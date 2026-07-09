@@ -9,10 +9,12 @@ configure is one S3-compatible bucket.
   No `self.next(...)`.
 - **Schemas are declared, enforced, and queryable.** Each output table is a class;
   DuckDB validates types / `NOT NULL` / `CHECK` on write and exposes every run as SQL.
-- **Runs are logged in an append-only ledger** in the bucket: `run_id`, `started`,
-  `finished`, git `commit`, `steps_complete`, plus any flow-specific columns.
+- **Runs are logged in an append-only ledger** in the bucket: `run_id`, `status`
+  (`running` / `complete` / `failed`), `started`, `finished`, git `commit`,
+  `steps_complete`, plus any flow-specific columns.
 - **Fan-out / fan-in** over N inputs, in parallel, on one machine.
-- **`resume`** re-runs a failed run, reusing the steps that already completed.
+- **`resume`** re-runs a failed run, reusing every step that already completed —
+  including individual branches of a partially-failed fan-out.
 - **Clean git required.** miniflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 

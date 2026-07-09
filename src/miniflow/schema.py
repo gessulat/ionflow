@@ -40,8 +40,11 @@ class Column:
         self.nullable = False if primary_key else nullable
         self.check = check
 
+    def duckdb_type(self):
+        return _DUCKDB[self.dtype]
+
     def ddl(self, name):
-        parts = [name, _DUCKDB[self.dtype]]
+        parts = [name, self.duckdb_type()]
         if not self.nullable:
             parts.append("NOT NULL")
         if self.primary_key:

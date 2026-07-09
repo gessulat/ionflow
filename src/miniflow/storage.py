@@ -143,6 +143,11 @@ def load_relation(con, client, bucket, keys):
     return con.from_arrow(at)
 
 
+def empty_relation(con, table):
+    """Typed, zero-row DuckDB relation for a table that produced no parts."""
+    return con.from_arrow(table.arrow_schema().empty_table())
+
+
 def read_parquet_sql(glob_uri):
     """SELECT over a glob, with hive `run_id=` partitioning surfaced as a column."""
     return (

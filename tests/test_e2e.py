@@ -22,11 +22,12 @@ def test_run_end_to_end(s3cfg, clean_repo):
 
     # ledger row complete with the custom column populated
     row = con.sql(
-        f"SELECT finished, n_rows, len(steps_complete) FROM ledger WHERE run_id = '{run_id}'"
+        f"SELECT status, finished, n_rows, len(steps_complete) FROM ledger WHERE run_id = '{run_id}'"
     ).fetchone()
-    assert row[0] is not None
-    assert row[1] == 4  # n_rows custom ledger column
-    assert row[2] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
+    assert row[0] == "complete"
+    assert row[1] is not None
+    assert row[2] == 4  # n_rows custom ledger column
+    assert row[3] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
 
 
 def test_run_with_processes(s3cfg, clean_repo):

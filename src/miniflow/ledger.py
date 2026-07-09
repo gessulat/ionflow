@@ -7,6 +7,7 @@ from botocore.exceptions import ClientError
 
 _STD_FIELDS = [
     pa.field("run_id", pa.string()),
+    pa.field("status", pa.string()),  # running | complete | failed
     pa.field("started", pa.timestamp("us")),
     pa.field("finished", pa.timestamp("us")),
     pa.field("commit", pa.string()),

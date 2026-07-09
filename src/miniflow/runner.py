@@ -3,7 +3,7 @@ import importlib.util
 import inspect
 import uuid
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 from . import ledger
@@ -12,6 +12,7 @@ from .git import require_clean
 from .storage import (
     Layout,
     compute_connection,
+    empty_relation,
     load_relation,
     list_keys,
     s3_client,
@@ -40,17 +41,23 @@ def _count_of(completed, step):
     return sum(1 for k in completed if _split(k)[0] == step)
 
 
-def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch):
+def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
         keys = sorted(list_keys(client, cfg.bucket, layout.step_dir(run_id, dep) + "/"))
+        if not keys:  # empty fan-out: hand the reducer a typed empty table
+            return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
     return load_relation(con, client, cfg.bucket, keys)
 
 
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
+    dag = flow.__class__._dag
     kwargs = {
-        dep: _input_relation(con, client, cfg, layout, run_id, dep, kind, branch)
+        dep: _input_relation(
+            con, client, cfg, layout, run_id, dep, kind, branch,
+            dag.steps[dep].output_table,
+        )
         for dep, kind in step.param_kinds.items()
     }
     return step.method(flow, **kwargs)
@@ -78,6 +85,11 @@ def _branch_worker(payload):
 
 
 def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes):
+    """Run branches in parallel; return (indices that succeeded, first error or None).
+
+    Failures don't cancel siblings, so a partial fan-out leaves the completed
+    branches' parts durably on S3 for a later resume to reuse.
+    """
     payload = {
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
@@ -86,8 +98,15 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes)
         "run_id": run_id,
     }
     pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+    done, error = [], None
     with pool(max_workers=max_workers) as ex:
-        list(ex.map(_branch_worker, [{**payload, "branch": i} for i in todo]))
+        futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
+        for fut in as_completed(futures):
+            try:
+                done.append(fut.result())
+            except Exception as e:  # noqa: BLE001 — surface the first, keep the rest
+                error = error or e
+    return done, error
 
 
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True):
@@ -132,49 +151,59 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         }
         ledger.write_meta(client, config.bucket, layout.meta(run_id), meta)
 
+    def upsert(status, finished=None, custom=None):
+        ledger.upsert_run(
+            client, config.bucket, layout.ledger,
+            {
+                "run_id": run_id, "status": status, "started": started,
+                "finished": finished, "commit": commit,
+                "origin_run_id": origin_run_id, "steps_complete": sorted(completed),
+                **(custom or {}),
+            },
+            custom_fields,
+        )
+
     flush()
-    ledger.upsert_run(
-        client, config.bucket, layout.ledger,
-        {"run_id": run_id, "started": started, "commit": commit, "origin_run_id": origin_run_id},
-        custom_fields,
-    )
+    upsert("running")
 
-    for name in dag.order:
-        step = dag.steps[name]
-        branch_dep = next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
-        if branch_dep:
-            n = _count_of(completed, branch_dep)
-            todo = [i for i in range(n) if _key(name, i) not in completed]
-            if todo:
-                _run_branches(flow_cls, config, run_id, step, todo, max_workers, use_processes)
-            completed.update(_key(name, i) for i in range(n))
-        elif step.is_fanout:
-            if not _count_of(completed, name):  # skip if a prior run already produced it
-                items = list(_call(con, client, config, layout, flow, step, run_id, None))
-                for i, item in enumerate(items):
-                    write_part(con, client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
-                    completed.add(_key(name, i))
-        elif _key(name, 0) not in completed:
-            result = _call(con, client, config, layout, flow, step, run_id, None)
-            write_part(con, client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
-            completed.add(_key(name, 0))
-        flush()
+    try:
+        for name in dag.order:
+            step = dag.steps[name]
+            branch_dep = next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
+            if branch_dep:
+                n = _count_of(completed, branch_dep)
+                todo = [i for i in range(n) if _key(name, i) not in completed]
+                if todo:
+                    done, error = _run_branches(
+                        flow_cls, config, run_id, step, todo, max_workers, use_processes
+                    )
+                    completed.update(_key(name, i) for i in done)  # only branches that succeeded
+                    if error:
+                        raise error
+            elif step.is_fanout:
+                if not _count_of(completed, name):  # skip if a prior run already produced it
+                    items = list(_call(con, client, config, layout, flow, step, run_id, None))
+                    for i, item in enumerate(items):
+                        write_part(con, client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
+                        completed.add(_key(name, i))
+            elif _key(name, 0) not in completed:
+                result = _call(con, client, config, layout, flow, step, run_id, None)
+                write_part(con, client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
+                completed.add(_key(name, 0))
+            flush()
 
-    custom = {}
-    if lc:
-        missing = [c for c in lc.columns() if not hasattr(flow, c)]
-        if missing:
-            raise RuntimeError(f"ledger columns not populated during run: {missing}")
-        custom = {c: getattr(flow, c) for c in lc.columns()}
-    finished = _now()
-    flush(finished, custom)
-    ledger.upsert_run(
-        client, config.bucket, layout.ledger,
-        {
-            "run_id": run_id, "started": started, "finished": finished,
-            "commit": commit, "origin_run_id": origin_run_id,
-            "steps_complete": sorted(completed), **custom,
-        },
-        custom_fields,
-    )
+        custom = {}
+        if lc:
+            missing = [c for c in lc.columns() if not hasattr(flow, c)]
+            if missing:
+                raise RuntimeError(f"ledger columns not populated during run: {missing}")
+            custom = {c: getattr(flow, c) for c in lc.columns()}
+        finished = _now()
+        flush(finished, custom)
+        upsert("complete", finished, custom)
+    except Exception:
+        flush()  # persist partial progress so resume can reuse completed branches
+        upsert("failed", finished=_now())
+        raise
+
     return run_id
