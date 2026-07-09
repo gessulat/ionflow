@@ -1,24 +1,53 @@
-from .storage import Layout, connect, list_keys, parse_key, read_parquet_sql, s3_client, uri
+from . import metrics
+from .storage import METRICS_FILE, Layout, connect, list_keys, parse_key, read_parquet_sql, s3_client, uri
 
 
 def _empty_view_sql(table):
-    """Typed, zero-row SELECT so a step that produced no parts is still queryable."""
-    cols = ["NULL::VARCHAR AS run_id"] + [
-        f"NULL::{c.duckdb_type()} AS {name}" for name, c in table.columns().items()
-    ]
-    return "SELECT " + ", ".join(cols) + " WHERE false"
+    """Typed, zero-row SELECT so a step that produced no parts is still queryable.
+
+    `run_id` goes last, matching where hive partitioning puts it in real views.
+    """
+    cols = [f"NULL::{c.duckdb_type()} AS {name}" for name, c in table.columns().items()]
+    return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
-def _steps_with_parts(client, config, layout):
-    """Step names that have at least one part, from a single LIST of runs/."""
-    keys = list_keys(client, config.bucket, layout.root + "/runs/")
-    parsed = (parse_key(config.prefix + "/", k) for k in keys)
-    return {step for p in parsed if p and (step := p[1])}
+def _scan_parts(client, config, layout):
+    """(step names with parts, any metrics present) from one LIST of runs/."""
+    steps, has_metrics = set(), False
+    for key in list_keys(client, config.bucket, layout.root + "/runs/"):
+        parsed = parse_key(config.prefix + "/", key)
+        if parsed and parsed[1]:
+            steps.add(parsed[1])
+        has_metrics = has_metrics or key.endswith("/" + METRICS_FILE)
+    return steps, has_metrics
 
 
 def step_rows(con, step, run_id, limit=100):
     """Preview of one step's output for one run (via the step's view)."""
     return con.sql(f"SELECT * FROM {step} WHERE run_id = '{run_id}' LIMIT {limit}")
+
+
+def step_stats(con, run_id):
+    """Per-step resource summary for one run, derived from the metrics samples.
+
+    CPU deltas are computed per (step, branch) first because cumulative CPU
+    times are per process; avg_cores = total CPU seconds / wall seconds.
+    """
+    return con.sql(f"""
+        WITH g AS (
+            SELECT step, branch, min(ts) AS t0, max(ts) AS t1,
+                   max(cpu_user + cpu_system) - min(cpu_user + cpu_system) AS cpu,
+                   max(rss) AS rss, max(threads) AS threads
+            FROM metrics WHERE run_id = '{run_id}' AND step IS NOT NULL
+            GROUP BY step, branch)
+        SELECT step,
+               round(epoch(max(t1) - min(t0)), 1) AS seconds,
+               round(max(rss) / 1048576.0) AS peak_rss_mb,
+               round(sum(cpu) / greatest(epoch(max(t1) - min(t0)), 0.001), 2) AS avg_cores,
+               max(threads) AS max_threads,
+               count(*) AS processes
+        FROM g GROUP BY step ORDER BY min(t0)
+    """)
 
 
 def duck(flow_cls, config):
@@ -29,13 +58,19 @@ def duck(flow_cls, config):
     """
     con = connect(config)
     layout = Layout(config.prefix, flow_cls.__name__)
-    present = _steps_with_parts(s3_client(config), config, layout)
+    present, has_metrics = _scan_parts(s3_client(config), config, layout)
     for name, step in flow_cls._dag.steps.items():
         if name in present:
             body = read_parquet_sql(uri(config, layout.table_glob(name)))
         else:
             body = _empty_view_sql(step.output_table)
         con.execute(f"CREATE VIEW {name} AS {body}")
+    if has_metrics:
+        metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
+    else:  # typed empty view derived from the one schema definition
+        con.register("_metrics_empty", metrics.SCHEMA.empty_table())
+        metrics_body = "SELECT *, NULL::VARCHAR AS run_id FROM _metrics_empty"
+    con.execute(f"CREATE VIEW metrics AS {metrics_body}")
     con.execute(
         f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')"
     )

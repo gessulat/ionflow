@@ -28,6 +28,10 @@ def test_cli_run_and_query(s3cfg, repo, monkeypatch):
     assert ls.exit_code == 0, ls.output
     assert run_id in ls.output
 
+    st = runner.invoke(cli.app, ["stats", "examples.etl:ETLFlow"])  # defaults to latest
+    assert st.exit_code == 0, st.output
+    assert run_id in st.output and "peak_rss_mb" in st.output and "summary" in st.output
+
 
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: setup writes .miniflow/ + .gitignore

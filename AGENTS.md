@@ -31,7 +31,31 @@ uv run miniflow               # bare command opens the TUI
 uv run miniflow setup         # wizard: writes .miniflow/config (TOML)
 uv run miniflow run examples.etl:ETLFlow
 uv run miniflow query examples.etl:ETLFlow "SELECT * FROM summary"
+uv run miniflow stats examples.etl:ETLFlow          # per-step resources, latest run
 ```
+
+## Performance analysis (start here when optimizing a step)
+
+Every run records CPU/memory for every step and branch — always on, stored as
+`_metrics.parquet` in the run folder, exposed as the `metrics` SQL view.
+
+```bash
+miniflow stats myproj.flows:Training [run_id]   # per-step: seconds, peak_rss_mb,
+                                                # avg_cores, max_threads, processes
+miniflow query myproj.flows:Training \
+  "SELECT ts, rss/1e6 AS mb FROM metrics WHERE run_id='...' AND step='features' ORDER BY ts"
+```
+
+- `metrics` columns: `ts, step, branch, rss, threads, cpu_user, cpu_system, run_id`.
+  CPU values are cumulative per process — diff them over a window; effective
+  cores = delta(cpu_user+cpu_system) / delta(wall). `query.step_stats()` does this.
+- Sampling is adaptive: 1s at run start; at 1024 samples per process the buffer
+  folds (peaks preserved) and the interval doubles, so long runs stay bounded.
+- Branch rows (`branch IS NOT NULL`) exist only for process-mode fan-outs;
+  thread-mode branches are covered by the orchestrator's samples.
+- Failed runs keep their metrics — check them first when a run dies.
+- Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
+  `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
 
 ## Architecture (one line per module, src/miniflow/)
 
@@ -43,6 +67,8 @@ uv run miniflow query examples.etl:ETLFlow "SELECT * FROM summary"
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume, git gate, run status (running|complete|failed).
+- `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
+  `_metrics.parquet` per run, written by the orchestrator on success AND failure.
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (httpfs write path is unreliable); validation = temp table from DDL, then PUT.
@@ -61,7 +87,8 @@ uv run miniflow query examples.etl:ETLFlow "SELECT * FROM summary"
 - Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
   **no pandas/polars in core** (steps may return anything arrow-convertible).
 - Runs refuse a dirty git tree (no override). Tests always create/commit a repo first.
-- Python docs: doctests only, no prose docstring conventions beyond a one-liner.
+- Python docs: a one-liner, plus short prose only for non-obvious constraints;
+  doctests for examples (they run in the suite).
 - Run folders on S3 are immutable; the ledger is the only mutated object (CAS).
 - Backblaze B2 is unsupported (no If-Match conditional writes).
 - A run killed by SIGKILL stays `running` in the ledger forever (can't catch it).

@@ -5,6 +5,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
+from . import storage
+
 _STD_FIELDS = [
     pa.field("run_id", pa.string()),
     pa.field("status", pa.string()),  # running | complete | failed
@@ -42,11 +44,8 @@ def _read(client, bucket, key):
 
 def _write(client, bucket, key, rows, custom_fields, etag):
     schema = pa.schema(_STD_FIELDS + custom_fields)
-    buf = io.BytesIO()
-    pq.write_table(pa.Table.from_pylist(rows, schema=schema), buf)
-    kwargs = {"Bucket": bucket, "Key": key, "Body": buf.getvalue()}
-    kwargs["IfMatch" if etag else "IfNoneMatch"] = etag or "*"
-    client.put_object(**kwargs)
+    cas = {"IfMatch" if etag else "IfNoneMatch": etag or "*"}
+    storage.put_parquet(client, bucket, key, pa.Table.from_pylist(rows, schema=schema), **cas)
 
 
 def upsert_run(client, bucket, key, row, custom_fields=(), retries=5):

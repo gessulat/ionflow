@@ -58,8 +58,13 @@ def _toposort(steps):
     return order
 
 
+RESERVED_STEP_NAMES = {"ledger", "metrics"}  # taken by duck()'s system views
+
+
 def build_dag(cls) -> Dag:
     funcs = {n: o for n, o in vars(cls).items() if _is_step(n, o)}
+    for name in RESERVED_STEP_NAMES & set(funcs):
+        raise ValueError(f"step '{name}' is reserved (system view)")
     steps = {}
     for name, fn in funcs.items():
         hints = typing.get_type_hints(fn)

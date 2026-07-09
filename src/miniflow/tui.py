@@ -43,10 +43,11 @@ class FlowTable(DataTable):
 
 
 class RunDetailScreen(Screen):
-    """Per-step output preview for one run; Esc returns to the overview."""
+    """Per-step output preview + resource stats for one run; Esc goes back."""
 
     BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
     CSS = "#steps { width: 24; border-right: solid $primary; } #preview { width: 1fr; }"
+    STATS = "__stats__"  # synthetic list entry; can't collide (steps never start with _)
 
     def __init__(self, flow_cls, run_id, con):
         super().__init__()
@@ -59,6 +60,7 @@ class RunDetailScreen(Screen):
         yield Label(f"{self.flow_cls.__name__} · run {self.run_id}")
         yield Horizontal(
             ListView(
+                ListItem(Label("▸ stats"), id=f"step-{self.STATS}"),
                 *[ListItem(Label(s), id=f"step-{s}") for s in self.flow_cls._dag.steps],
                 id="steps",
             ),
@@ -67,16 +69,17 @@ class RunDetailScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        steps = list(self.flow_cls._dag.steps)
-        if steps:
-            self._show(steps[0])
+        self._show(self.STATS)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.item is not None:
             self._show(event.item.id.removeprefix("step-"))
 
     def _show(self, step) -> None:
-        rel = query.step_rows(self.con, step, self.run_id)
+        if step == self.STATS:
+            rel = query.step_stats(self.con, self.run_id)
+        else:
+            rel = query.step_rows(self.con, step, self.run_id)
         _fill(self.query_one("#preview", DataTable), rel)
 
 

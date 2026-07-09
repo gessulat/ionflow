@@ -29,6 +29,17 @@ def test_run_end_to_end(s3cfg, repo):
     assert row[2] == 4  # n_rows custom ledger column
     assert row[3] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
 
+    # resource metrics: every step sampled at least once; stats derivable
+    from miniflow import query
+
+    sampled = {r[0] for r in con.sql(
+        f"SELECT DISTINCT step FROM metrics WHERE run_id = '{run_id}'"
+    ).fetchall()}
+    assert {"raw", "parts", "scored", "summary"} <= sampled
+    stats = query.step_stats(con, run_id).fetchall()
+    assert len(stats) == 4
+    assert all(r[2] > 0 for r in stats)  # peak_rss_mb
+
 
 @pytest.mark.slow
 def test_run_with_processes(s3cfg, repo):
@@ -38,6 +49,17 @@ def test_run_with_processes(s3cfg, repo):
         f"SELECT grand_total FROM summary WHERE run_id = '{run_id}'"
     ).fetchone()[0]
     assert total == 10.0
+    # branch workers (separate processes) contribute per-branch samples
+    branches = con.sql(
+        f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' "
+        "AND step = 'scored' AND branch IS NOT NULL ORDER BY branch"
+    ).fetchall()
+    assert branches == [(0,), (1,)]
+    # stats count workers only; the orchestrator's pool-wait is not the step's cost
+    from miniflow import query
+
+    scored = [r for r in query.step_stats(con, run_id).fetchall() if r[0] == "scored"][0]
+    assert scored[5] == 2  # processes
 
 
 def test_dirty_git_refused(s3cfg, tmp_path):

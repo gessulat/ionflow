@@ -6,7 +6,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
-from . import ledger
+from . import ledger, metrics
 from .config import Config
 from .git import require_clean
 from .storage import (
@@ -79,16 +79,24 @@ def _branch_worker(payload):
     flow = flow_cls()
     step = flow_cls._dag.steps[payload["step"]]
     run_id, branch = payload["run_id"], payload["branch"]
+    # own sampler only in a separate process; in thread mode the orchestrator's
+    # sampler already covers this process (a second one would double-count CPU)
+    sampler = None
+    if payload["sample"]:
+        sampler = metrics.Sampler().start()
+        sampler.mark(step.name, branch)
     result = _call(con, client, cfg, layout, flow, step, run_id, branch)
     write_part(con, client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
-    return branch
+    return branch, sampler.stop() if sampler else []
 
 
 def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes):
-    """Run branches in parallel; return (indices that succeeded, first error or None).
+    """Run branches in parallel; return (succeeded indices, first error, samples).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
-    branches' parts durably on S3 for a later resume to reuse.
+    branches' parts durably on S3 for a later resume to reuse. Branch workers
+    return their metric samples with the result, so the orchestrator can write
+    one metrics object per run.
     """
     payload = {
         "config": asdict(cfg),
@@ -96,17 +104,20 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes)
         "flow": flow_cls.__name__,
         "step": step.name,
         "run_id": run_id,
+        "sample": use_processes,
     }
     pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
-    done, error = [], None
+    done, error, samples = [], None, []
     with pool(max_workers=max_workers) as ex:
         futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
         for fut in as_completed(futures):
             try:
-                done.append(fut.result())
+                branch, rows = fut.result()
+                done.append(branch)
+                samples += rows
             except Exception as e:  # noqa: BLE001 — surface the first, keep the rest
                 error = error or e
-    return done, error
+    return done, error, samples
 
 
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True):
@@ -168,6 +179,15 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
 
     flush()
     upsert("running")
+    sampler = metrics.Sampler().start()
+    branch_samples = []
+
+    def write_metrics():
+        try:
+            rows = sampler.stop() + branch_samples
+            metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
+        except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
+            pass
 
     try:
         for name in dag.order:
@@ -177,19 +197,25 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 n = _count_of(completed, branch_dep)
                 todo = [i for i in range(n) if _key(name, i) not in completed]
                 if todo:
-                    done, error = _run_branches(
+                    # process mode: workers measure the step; the orchestrator's
+                    # pool-wait must not be attributed to it (step stays NULL)
+                    sampler.mark(name if not use_processes else None)
+                    done, error, samples = _run_branches(
                         flow_cls, config, run_id, step, todo, max_workers, use_processes
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
+                    branch_samples += samples
                     if error:
                         raise error
             elif step.is_fanout:
                 if not _count_of(completed, name):  # skip if a prior run already produced it
+                    sampler.mark(name)
                     items = list(_call(con, client, config, layout, flow, step, run_id, None))
                     for i, item in enumerate(items):
                         write_part(con, client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
                         completed.add(_key(name, i))
             elif _key(name, 0) not in completed:
+                sampler.mark(name)
                 result = _call(con, client, config, layout, flow, step, run_id, None)
                 write_part(con, client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
                 completed.add(_key(name, 0))
@@ -206,5 +232,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         flush()  # persist partial progress so resume can reuse completed branches
         upsert("failed", finished=_now())
         raise
+    finally:
+        write_metrics()  # success AND failure — failed runs need perf data most
 
     return run_id

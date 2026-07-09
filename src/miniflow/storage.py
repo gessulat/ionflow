@@ -8,6 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
+METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
+
+
 @dataclass
 class Layout:
     """S3 key scheme for one flow.
@@ -37,6 +40,13 @@ class Layout:
 
     def meta(self, run_id):
         return f"{self.run_dir(run_id)}/_meta.json"
+
+    def metrics(self, run_id):
+        return f"{self.run_dir(run_id)}/{METRICS_FILE}"
+
+    @property
+    def metrics_glob(self):
+        return f"{self.root}/runs/*/{METRICS_FILE}"
 
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
@@ -138,9 +148,14 @@ def write_part(con, client, bucket, key, data, table):
         con.execute("DROP TABLE _v")
     finally:
         con.unregister("_src")
+    put_parquet(client, bucket, key, out)
+
+
+def put_parquet(client, bucket, key, table, **extra):
+    """Upload a pyarrow Table as parquet; `extra` passes PutObject kwargs (e.g. IfMatch)."""
     buf = io.BytesIO()
-    pq.write_table(out, buf)
-    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    pq.write_table(table, buf)
+    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), **extra)
 
 
 def get_table(client, bucket, key):
@@ -164,6 +179,8 @@ def parse_key(prefix, key):
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/raw/part_0.parquet")
     ('ETL', 'raw')
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
+    True
+    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
     True
     """
     parts = key[len(prefix):].split("/")

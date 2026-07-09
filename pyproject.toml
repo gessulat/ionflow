@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.43",
     "duckdb>=1.5.4",
+    "psutil>=7.2.2",
     "pyarrow>=24.0.0",
     "textual>=8.2.8",
     "typer>=0.26.8",

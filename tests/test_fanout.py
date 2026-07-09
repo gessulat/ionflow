@@ -24,6 +24,9 @@ def test_partial_fanout_resume_reruns_only_failed_branch(s3cfg, repo, tmp_path, 
     origin_id, status = con.sql("SELECT run_id, status FROM ledger").fetchone()
     assert status == "failed"
     assert _exec_counts(d) == {0: 1, 1: 1, 2: 1}  # every branch attempted once
+    # failed runs keep their metrics — that's when perf data matters most
+    n = con.sql(f"SELECT count(*) FROM metrics WHERE run_id = '{origin_id}'").fetchone()[0]
+    assert n > 0
 
     # resume with the fault cleared
     monkeypatch.setenv("FLAKY_FAIL", "0")

@@ -160,6 +160,23 @@ On startup it re-discovers your flows and warns if a flow's declared table schem
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
 repo isn't configured yet, the TUI opens a setup screen first.
 
+## Resource metrics
+
+Every run records CPU and memory for every step and branch — always on, negligible
+overhead, one small `_metrics.parquet` per run. Sampling is adaptive (1s at start,
+interval doubles when the 1024-sample cap folds the buffer), so even multi-day runs
+stay bounded while peaks are preserved.
+
+```bash
+miniflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
+                                           # max_threads (defaults to the latest run)
+miniflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='scored'"
+```
+
+The same summary appears in the TUI run drill-down ("stats" entry), and the raw
+time series is the `metrics` SQL view (`ts, step, branch, rss, threads, cpu_user,
+cpu_system, run_id`). Failed runs keep their metrics.
+
 ## Resume
 
 ```bash

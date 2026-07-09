@@ -6,6 +6,7 @@ import typer
 
 from . import git, storage
 from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config, write_config
+from .query import step_stats
 
 app = typer.Typer(add_completion=False, help="miniflow: minimal flows on S3")
 
@@ -122,8 +123,22 @@ def ls(flow: str):
 
 @app.command()
 def query(flow: str, sql: str):
-    """Run a SQL query against FLOW's tables (views: each step + `ledger`)."""
+    """Run a SQL query against FLOW's tables (views: each step + `ledger` + `metrics`)."""
     _load(flow).duck(_config_or_setup()).sql(sql).show()
+
+
+@app.command()
+def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the latest run")):
+    """Per-step resource usage (duration, peak memory, cores, threads) for a run."""
+    con = _load(flow).duck(_config_or_setup())
+    if run_id is None:
+        latest = con.sql("SELECT run_id FROM ledger ORDER BY started DESC LIMIT 1").fetchone()
+        if latest is None:
+            typer.echo("no runs recorded")
+            raise typer.Exit(1)
+        run_id = latest[0]
+    typer.echo(f"run {run_id}")
+    step_stats(con, run_id).show()
 
 
 @app.command()
