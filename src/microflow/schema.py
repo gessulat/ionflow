@@ -141,6 +141,24 @@ class Table:
     def arrow_schema(cls):
         return pa.schema(_arrow_fields(cls._columns))
 
+    @classmethod
+    def make(cls, name, cols, **constraints):
+        """Build a Table subclass programmatically (wide/generated schemas).
+
+        `cols` maps column name -> type object (real types, not strings —
+        there is no module scope to resolve forward references against);
+        `constraints` attach per column the way defaults do in a class body.
+
+        >>> Wide = Table.make("Wide", {"id": int, "f0": float | None}, id=pk)
+        >>> Wide.columns()["id"].primary_key
+        True
+        >>> Wide.arrow_schema().field("f0").nullable
+        True
+        """
+        if unknown := set(constraints) - set(cols):
+            raise TypeError(f"constraints for unknown columns: {sorted(unknown)}")
+        return type(name, (cls,), {"__annotations__": dict(cols), **constraints})
+
 
 class LedgerColumns:
     """Per-flow ledger columns, populated during a run (all nullable).

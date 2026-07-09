@@ -62,6 +62,7 @@ microflow query myproj.flows:Training \
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `= pk` / `= check(...)` / `= field(...)`); compiles to DuckDB DDL
   + pyarrow schema. Column types must be importable at module scope (get_type_hints).
+  `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`.

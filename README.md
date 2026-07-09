@@ -116,6 +116,10 @@ class ETLFlow(Flow):
         return scored.aggregate("count(*) AS n_groups, sum(total) AS grand_total")
 ```
 
+Wide or generated schemas don't have to be written out by hand —
+`Table.make("FullAnnotation", {"peptide": str, **{f"frag_{i}": float | None for i in range(200)}})`
+builds the same kind of class programmatically.
+
 Step inputs arrive as **DuckDB relations**, so you can stay in SQL (`.aggregate`,
 `.filter`, `.project`) or drop to a DataFrame with `.pl()` / `.df()` / `.to_arrow_table()`
 and return any of those.

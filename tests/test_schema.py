@@ -55,6 +55,15 @@ def test_constraint_helpers_and_nullability():
     assert cols["d"].nullable and cols["d"].check == "d >= 0"
 
 
+def test_make_builds_table_dynamically():
+    cols = {"id": int, **{f"frag_{i}": float | None for i in range(3)}}
+    Wide = Table.make("Wide", cols, id=pk)
+    assert list(Wide.columns()) == ["id", "frag_0", "frag_1", "frag_2"]
+    assert Wide.ddl("wide").count("DOUBLE") == 3
+    with pytest.raises(TypeError, match="unknown columns"):
+        Table.make("Bad", {"a": int}, typo=pk)
+
+
 def test_empty_table_rejected():
     with pytest.raises(TypeError):
 
