@@ -1,6 +1,6 @@
 import pytest
 
-from flows import EmptyFanFlow, FlakyFlow, RetryFlow
+from flows import EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow
 
 
 def _exec_counts(d):
@@ -49,6 +49,17 @@ def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkey
     con = RetryFlow.duck(s3cfg)
     # success entails each branch failed once first: work() only returns after its marker exists
     assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (2, 2)
+
+
+def test_steps_read_side_inputs_via_config(s3cfg, repo):
+    from microflow.storage import s3_client
+
+    s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key="side/n", Body=b"3")
+    run_id = SideInputFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    con = SideInputFlow.duck(s3cfg)
+    # 3 branches (fan-out sized by the side read), each doubled by n=3 (branch-side read)
+    assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (3, 9)
 
 
 def test_empty_fanout_completes(s3cfg, repo):

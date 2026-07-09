@@ -77,6 +77,7 @@ def _branch_worker(payload):
     con = compute_connection()
     client = s3_client(cfg)
     flow = flow_cls()
+    flow.config = cfg
     step = flow_cls._dag.steps[payload["step"]]
     run_id, branch = payload["run_id"], payload["branch"]
     # own sampler only in a separate process; in thread mode the orchestrator's
@@ -138,6 +139,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     client = s3_client(config)
     con = compute_connection()
     flow = flow_cls()
+    flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
     custom_fields = flow_cls.ledger_fields()

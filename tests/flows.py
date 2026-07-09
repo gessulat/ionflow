@@ -11,6 +11,7 @@ import uuid
 import pyarrow as pa
 
 from microflow import Branch, Collect, Fanout, Flow, Table
+from microflow.storage import s3_client
 
 
 class Src(Table):
@@ -67,6 +68,25 @@ class RetryFlow(Flow):
             marker.touch()
             raise RuntimeError(f"transient failure on g={g}")
         return parts.project("g, g * 2 AS doubled")
+
+    def agg(self, work: Collect[Out]) -> Agg:
+        return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
+def _side_n(config):
+    """The side input: an int stored in the bucket outside any run folder."""
+    return int(s3_client(config).get_object(Bucket=config.bucket, Key="side/n")["Body"].read())
+
+
+class SideInputFlow(Flow):
+    """Reads a side object via self.config — in a root step and inside a branch."""
+
+    def items(self) -> Fanout[Part]:
+        return [pa.table({"g": [g]}) for g in range(_side_n(self.config))]
+
+    def work(self, items: Branch[Part]) -> Out:
+        n = _side_n(self.config)  # branch workers bind config on their own flow instance
+        return items.project(f"g, g * {n} AS doubled")
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, sum(doubled) AS total")

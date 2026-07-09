@@ -9,11 +9,15 @@ class Flow:
     A step's parameter names are its upstream steps; its return annotation is
     the output table schema. No `self.next()`, no scheduler — just an S3 bucket.
 
+    During a run, `self.config` is the active Config, so steps can reach the
+    bucket for side reads (see "side inputs" in the README).
+
     Every subclass registers itself in `Flow._registry` on definition, so the
     TUI can list all flows in a project once their modules are imported.
     """
 
     _registry: dict[str, type] = {}
+    config = None  # bound by the runner (orchestrator and branch workers)
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)

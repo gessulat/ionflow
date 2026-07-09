@@ -65,7 +65,8 @@ microflow query myproj.flows:Training \
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
-- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`.
+- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`; the runner
+  binds `self.config` during a run (side reads from the bucket).
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume, in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed).
