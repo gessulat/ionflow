@@ -137,6 +137,36 @@ or from the shell:
 microflow run mymodule:ETLFlow
 ```
 
+## Parameters
+
+Typed run inputs, declared like everything else — annotations on an inner class.
+A bare type is required; a class value is the default.
+
+```python
+from microflow import FlowParams
+
+class Training(Flow):
+    class Params(FlowParams):
+        dataset: str          # required
+        batch_size: int = 32
+
+    def load(self) -> Raw:
+        return read(self.dataset)          # params are bound to self
+```
+
+```bash
+microflow run mymodule:Training -p dataset=d1 -p batch_size=64
+```
+
+```python
+Training.run(params={"dataset": "d1"})
+```
+
+Every param becomes a **ledger column** (queryable per run, recorded from the moment
+the run starts) and is stored in the run's meta; `resume` always reuses the origin
+run's params. Types are limited to `int`/`float`/`str`/`bool` so params round-trip
+JSON, parquet, and the command line.
+
 ## Query every run as one database
 
 `duck()` returns a DuckDB connection with a **view per step table** plus a `ledger` view.

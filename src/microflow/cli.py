@@ -100,10 +100,33 @@ def setup():
         typer.echo(f"Run `git add {CONFIG_DIR}/{CONFIG_FILE}` and commit to share it with your team.")
 
 
+def _parse_params(cols, pairs):
+    """Parse repeated `-p KEY=VALUE` flags using the flow's declared param types."""
+    out = {}
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        if not sep:
+            raise typer.BadParameter(f"expected KEY=VALUE, got '{pair}'")
+        if key not in cols:
+            raise typer.BadParameter(f"unknown param '{key}' (declared: {', '.join(cols) or 'none'})")
+        dtype = cols[key].dtype
+        try:
+            out[key] = {"true": True, "false": False}[raw.lower()] if dtype is bool else dtype(raw)
+        except (KeyError, ValueError):
+            raise typer.BadParameter(f"param '{key}': expected {dtype.__name__}, got '{raw}'")
+    return out
+
+
 @app.command()
-def run(flow: str, repo: str = "."):
+def run(
+    flow: str,
+    repo: str = ".",
+    param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
+):
     """Run FLOW (given as 'module:ClassName')."""
-    typer.echo(_load(flow).run(_config_or_setup(), repo=repo))
+    cls = _load(flow)
+    params = _parse_params(cls.params_columns(), param)
+    typer.echo(cls.run(_config_or_setup(), repo=repo, params=params))
 
 
 @app.command()

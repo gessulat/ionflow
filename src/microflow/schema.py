@@ -83,8 +83,11 @@ def _strip_optional(hint):
     return hint, False
 
 
-def _arrow_fields(columns):
-    return [pa.field(n, _ARROW[c.dtype], nullable=c.nullable) for n, c in columns.items()]
+def _arrow_fields(columns, nullable=None):
+    return [
+        pa.field(n, _ARROW[c.dtype], nullable=c.nullable if nullable is None else nullable)
+        for n, c in columns.items()
+    ]
 
 
 def _columns_of(cls, force_nullable=False):
@@ -180,3 +183,63 @@ class LedgerColumns:
     @classmethod
     def arrow_fields(cls):
         return _arrow_fields(cls._columns)
+
+
+class FlowParams:
+    """Typed run inputs: annotations declare types, class values are defaults.
+
+    A bare type is required; a default (or `T | None`) makes it optional.
+    Only int/float/str/bool — params must round-trip JSON meta, ledger
+    parquet, and `-p key=value` CLI flags.
+
+    >>> class P(FlowParams):
+    ...     dataset: str
+    ...     batch_size: int = 32
+    >>> P.resolve({"dataset": "d1"})
+    {'dataset': 'd1', 'batch_size': 32}
+    >>> P.resolve({})
+    Traceback (most recent call last):
+        ...
+    ValueError: missing required param: dataset
+    """
+
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+        cls._columns = _columns_of(cls)
+        for name, col in cls._columns.items():
+            if col.dtype not in (int, float, str, bool):
+                raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
+
+    @classmethod
+    def columns(cls):
+        return cls._columns
+
+    @classmethod
+    def arrow_fields(cls):
+        """Ledger fields, all nullable: older runs predate any given param."""
+        return _arrow_fields(cls._columns, nullable=True)
+
+    @classmethod
+    def resolve(cls, given=None):
+        """Merge `given` over the defaults; validate names, presence, and types."""
+        given = given or {}
+        if unknown := set(given) - set(cls._columns):
+            raise ValueError(f"unknown params: {sorted(unknown)}")
+        out = {}
+        for name, col in cls._columns.items():
+            if name in given:
+                v = given[name]
+            elif hasattr(cls, name):
+                v = getattr(cls, name)
+            else:
+                raise ValueError(f"missing required param: {name}")
+            if col.dtype is float and isinstance(v, int):
+                v = float(v)
+            if v is None and not col.nullable:
+                raise TypeError(f"param '{name}' may not be None")
+            if v is not None and not isinstance(v, col.dtype):
+                raise TypeError(
+                    f"param '{name}': expected {col.dtype.__name__}, got {type(v).__name__}"
+                )
+            out[name] = v
+        return out

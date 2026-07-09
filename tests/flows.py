@@ -10,7 +10,7 @@ import uuid
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, Table
+from microflow import Branch, Collect, Fanout, Flow, FlowParams, Table
 from microflow.storage import s3_client
 
 
@@ -68,6 +68,25 @@ class RetryFlow(Flow):
             marker.touch()
             raise RuntimeError(f"transient failure on g={g}")
         return parts.project("g, g * 2 AS doubled")
+
+    def agg(self, work: Collect[Out]) -> Agg:
+        return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
+class ParamFlow(Flow):
+    """Params bound on self, both in the orchestrator and inside branch workers."""
+
+    class Params(FlowParams):
+        mult: int = 1
+
+    def source(self) -> Src:
+        return pa.table({"g": [0, 1]})
+
+    def parts(self, source: Src) -> Fanout[Part]:
+        return [source.filter(f"g = {g}") for g in (0, 1)]
+
+    def work(self, parts: Branch[Part]) -> Out:
+        return parts.project(f"g, g * {self.mult} AS doubled")  # param read in a branch
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, sum(doubled) AS total")

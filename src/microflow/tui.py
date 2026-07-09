@@ -123,7 +123,7 @@ class OverviewScreen(Screen):
                 con = cls.duck(self.config)
                 self._cons[name] = con
                 rel = con.sql("SELECT * FROM ledger ORDER BY started DESC")
-                _fill(table, rel, LEDGER_COLS + list(cls.ledger_columns()))
+                _fill(table, rel, LEDGER_COLS + list(cls.params_columns()) + list(cls.ledger_columns()))
             except Exception as e:  # noqa: BLE001 — show the failure in the tab, don't crash
                 table.add_columns("error")
                 table.add_row(str(e))

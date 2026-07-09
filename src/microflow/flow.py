@@ -1,4 +1,4 @@
-from . import query, runner
+from . import ledger, query, runner
 from .config import Config
 from .dag import build_dag
 
@@ -22,6 +22,9 @@ class Flow:
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
         cls._dag = build_dag(cls)
+        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | ledger.STD_COLS | {"config"}
+        if collisions := set(cls.params_columns()) & taken:
+            raise TypeError(f"params collide with steps/ledger columns/config: {sorted(collisions)}")
         Flow._registry[cls.__name__] = cls
 
     @classmethod
@@ -50,3 +53,25 @@ class Flow:
         """pyarrow fields for the extra ledger columns ([] if none)."""
         ledger = getattr(cls, "Ledger", None)
         return ledger.arrow_fields() if ledger else []
+
+    @classmethod
+    def params_columns(cls):
+        """The flow's declared params ({} if no inner Params class)."""
+        params = getattr(cls, "Params", None)
+        return params.columns() if params else {}
+
+    @classmethod
+    def params_fields(cls):
+        """pyarrow ledger fields for the params ([] if none)."""
+        params = getattr(cls, "Params", None)
+        return params.arrow_fields() if params else []
+
+    @classmethod
+    def resolve_params(cls, given=None):
+        """Full param dict from `given` + defaults; {} for flows without Params."""
+        params = getattr(cls, "Params", None)
+        if params is None:
+            if given:
+                raise ValueError(f"{cls.__name__} declares no Params")
+            return {}
+        return params.resolve(given)

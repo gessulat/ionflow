@@ -78,6 +78,8 @@ def _branch_worker(payload):
     client = s3_client(cfg)
     flow = flow_cls()
     flow.config = cfg
+    for k, v in payload["params"].items():
+        setattr(flow, k, v)
     step = flow_cls._dag.steps[payload["step"]]
     run_id, branch = payload["run_id"], payload["branch"]
     # own sampler only in a separate process; in thread mode the orchestrator's
@@ -99,7 +101,7 @@ def _branch_worker(payload):
     return branch, sampler.stop() if sampler else []
 
 
-def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries):
+def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries, params):
     """Run branches in parallel; return (succeeded indices, first error, samples).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
@@ -115,6 +117,7 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "run_id": run_id,
         "sample": use_processes,
         "retries": retries,
+        "params": params,
     }
     pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
     done, error, samples = [], None, []
@@ -131,7 +134,9 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
 
 
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0):
+        branch_retries=0, params=None):
+    if origin_run_id and params:
+        raise ValueError("resume reuses the origin run's params; do not pass params")
     commit = require_clean(repo)
     started = _now()
     run_id = _new_run_id(started)
@@ -142,7 +147,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
-    custom_fields = flow_cls.ledger_fields()
+    custom_fields = flow_cls.params_fields() + flow_cls.ledger_fields()
 
     completed = set()
     if origin_run_id:
@@ -164,6 +169,14 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             completed.update(ex.map(copy_part, origin.get("steps_complete", [])))
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
+        params = origin.get("params") or {}
+        if dropped := set(params) - set(flow_cls.params_columns()):
+            warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}")
+            params = {k: v for k, v in params.items() if k not in dropped}
+
+    params = flow_cls.resolve_params(params)
+    for k, v in params.items():
+        setattr(flow, k, v)
 
     def flush(finished=None, custom=None):
         meta = {
@@ -173,6 +186,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             "commit": commit,
             "origin_run_id": origin_run_id,
             "steps_complete": sorted(completed),
+            "params": params,
             "custom": custom or {},
         }
         ledger.write_meta(client, config.bucket, layout.meta(run_id), meta)
@@ -184,6 +198,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 "run_id": run_id, "status": status, "started": started,
                 "finished": finished, "commit": commit,
                 "origin_run_id": origin_run_id, "steps_complete": sorted(completed),
+                **params,
                 **(custom or {}),
             },
             custom_fields,
@@ -214,7 +229,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     sampler.mark(None if use_processes else name)
                     done, error, samples = _run_branches(
                         flow_cls, config, run_id, step, todo, max_workers, use_processes,
-                        branch_retries,
+                        branch_retries, params,
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
                     branch_samples += samples

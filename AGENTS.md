@@ -63,10 +63,12 @@ microflow query myproj.flows:Training \
   `T | None` = nullable, `= pk` / `= check(...)` / `= field(...)`); compiles to DuckDB DDL
   + pyarrow schema. Column types must be importable at module scope (get_type_hints).
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
+  `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`; the runner
-  binds `self.config` during a run (side reads from the bucket).
+  binds `self.config` and all params during a run. Params become ledger columns
+  (written from run start); resume reuses the origin's params from `_meta.json`.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume, in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed).

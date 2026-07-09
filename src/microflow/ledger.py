@@ -17,6 +17,8 @@ _STD_FIELDS = [
     pa.field("origin_run_id", pa.string()),
 ]
 
+STD_COLS = {f.name for f in _STD_FIELDS}  # names params/custom columns must not take
+
 _MISSING = {"NoSuchKey", "404"}
 _PRECONDITION = {"PreconditionFailed", "412"}
 
