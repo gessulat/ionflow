@@ -55,6 +55,24 @@ def test_constraint_helpers_and_nullability():
     assert cols["d"].nullable and cols["d"].check == "d >= 0"
 
 
+def test_list_columns():
+    class Emb(Table):
+        id: int = pk
+        vec: list[float]
+        tags: list[str] | None
+
+    ddl = Emb.ddl("emb")
+    assert "vec DOUBLE[] NOT NULL" in ddl
+    assert "tags VARCHAR[]" in ddl and "tags VARCHAR[] NOT NULL" not in ddl
+    schema = Emb.arrow_schema()
+    assert schema.field("vec").type == pa.list_(pa.float64())
+    assert schema.field("tags").nullable
+    with pytest.raises(TypeError):
+
+        class Bare(Table):
+            x: list  # element type required
+
+
 def test_make_builds_table_dynamically():
     cols = {"id": int, **{f"frag_{i}": float | None for i in range(3)}}
     Wide = Table.make("Wide", cols, id=pk)

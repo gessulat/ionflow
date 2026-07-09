@@ -25,6 +25,28 @@ _ARROW = {
 }
 
 
+def _duckdb_type(dtype):
+    """DuckDB type for a scalar or (nested) list annotation.
+
+    List elements are always nullable (DuckDB/Arrow semantics), so
+    `list[T | None]` is unsupported rather than redundant.
+
+    >>> _duckdb_type(list[float])
+    'DOUBLE[]'
+    >>> _duckdb_type(list[list[int]])
+    'BIGINT[][]'
+    """
+    if typing.get_origin(dtype) is list:
+        return _duckdb_type(typing.get_args(dtype)[0]) + "[]"
+    return _DUCKDB[dtype]
+
+
+def _arrow_type(dtype):
+    if typing.get_origin(dtype) is list:
+        return pa.list_(_arrow_type(typing.get_args(dtype)[0]))
+    return _ARROW[dtype]
+
+
 class _Field:
     """Column constraints attached as an annotation default (`id: int = pk`)."""
 
@@ -54,15 +76,17 @@ class Column:
     """
 
     def __init__(self, dtype, *, nullable=False, primary_key=False, check=None):
-        if dtype not in _DUCKDB:
-            raise TypeError(f"unsupported column dtype: {dtype!r}")
+        try:
+            _duckdb_type(dtype)
+        except KeyError:
+            raise TypeError(f"unsupported column dtype: {dtype!r}") from None
         self.dtype = dtype
         self.primary_key = primary_key
         self.nullable = False if primary_key else nullable
         self.check = check
 
     def duckdb_type(self):
-        return _DUCKDB[self.dtype]
+        return _duckdb_type(self.dtype)
 
     def ddl(self, name):
         parts = [name, self.duckdb_type()]
@@ -85,7 +109,7 @@ def _strip_optional(hint):
 
 def _arrow_fields(columns, nullable=None):
     return [
-        pa.field(n, _ARROW[c.dtype], nullable=c.nullable if nullable is None else nullable)
+        pa.field(n, _arrow_type(c.dtype), nullable=c.nullable if nullable is None else nullable)
         for n, c in columns.items()
     ]
 

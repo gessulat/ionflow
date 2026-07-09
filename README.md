@@ -117,6 +117,10 @@ class ETLFlow(Flow):
         return scored.aggregate("count(*) AS n_groups, sum(total) AS grand_total")
 ```
 
+Columns can be lists: `embedding: list[float]` maps to DuckDB `DOUBLE[]` /
+Arrow `list<double>` (nesting works too), so vectors don't need to be widened
+into hundreds of scalar columns.
+
 Wide or generated schemas don't have to be written out by hand —
 `Table.make("FullAnnotation", {"peptide": str, **{f"frag_{i}": float | None for i in range(200)}})`
 builds the same kind of class programmatically.

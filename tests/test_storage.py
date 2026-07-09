@@ -24,6 +24,22 @@ def test_connect_uses_credential_chain_without_keys():
     assert provider == "credential_chain"
 
 
+def test_write_part_roundtrips_list_columns(s3cfg):
+    class Emb(Table):
+        id: int
+        vec: list[float]
+
+    con = storage.compute_connection()
+    client = storage.s3_client(s3cfg)
+    data = pa.table({"id": [1, 2], "vec": [[1.0, 2.0], [3.0]]})
+    key = "mf/E/runs/run_id=r/e/part_0.parquet"
+    storage.write_part(con, client, s3cfg.bucket, key, data, Emb)
+    assert storage.get_table(client, s3cfg.bucket, key).column("vec").to_pylist() == [
+        [1.0, 2.0],
+        [3.0],
+    ]
+
+
 def test_object_age_uses_server_clock(s3cfg):
     client = storage.s3_client(s3cfg)
     client.put_object(Bucket=s3cfg.bucket, Key="x", Body=b"1")
