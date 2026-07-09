@@ -2,18 +2,15 @@ import inspect
 import typing
 from dataclasses import dataclass
 
-T = typing.TypeVar("T")
-
-
-class Fanout(typing.Generic[T]):
+class Fanout[T]:
     """Return marker: step yields N branch outputs."""
 
 
-class Branch(typing.Generic[T]):
+class Branch[T]:
     """Param marker: step runs once per branch of the named fan-out step."""
 
 
-class Collect(typing.Generic[T]):
+class Collect[T]:
     """Param marker: step receives all branch outputs of the named step."""
 
 

@@ -22,15 +22,11 @@ STD_COLS = {f.name for f in _STD_FIELDS}  # names params/custom columns must not
 _PRECONDITION = {"PreconditionFailed", "412"}
 
 
-def _code(err):
-    return err.response["Error"]["Code"]
-
-
 def _get_or_none(client, bucket, key):
     try:
         return client.get_object(Bucket=bucket, Key=key)
     except ClientError as e:
-        if _code(e) in storage.MISSING_KEY_CODES:
+        if storage.error_code(e) in storage.MISSING_KEY_CODES:
             return None
         raise
 
@@ -65,7 +61,7 @@ def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_c
             _write(client, bucket, key, rows, list(custom_fields), etag)
             return
         except ClientError as e:
-            if _code(e) in _PRECONDITION:
+            if storage.error_code(e) in _PRECONDITION:
                 continue
             raise
         except (pa.ArrowInvalid, pa.ArrowTypeError):  # old rows don't fit the current schema
@@ -75,7 +71,7 @@ def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_c
                 _write(client, bucket, key, [dict(row)], list(custom_fields), etag)
                 return
             except ClientError as e:
-                if _code(e) in _PRECONDITION:  # lost the CAS race; re-read and retry
+                if storage.error_code(e) in _PRECONDITION:  # lost the CAS race; re-read and retry
                     continue
                 raise
     raise RuntimeError(f"ledger CAS failed after {retries} retries: {key}")

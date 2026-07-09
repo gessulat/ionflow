@@ -1,7 +1,9 @@
 import datetime as dt
 import io
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from itertools import batched
 from urllib.parse import urlparse
 
 import boto3
@@ -17,7 +19,12 @@ MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object ab
 
 def utc_now():
     """Naive UTC now — the project's single timestamp convention."""
-    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    return dt.datetime.now(dt.UTC).replace(tzinfo=None)
+
+
+def error_code(err):
+    """AWS error code from a botocore ClientError."""
+    return err.response["Error"]["Code"]
 
 
 @dataclass
@@ -190,9 +197,9 @@ def get_table(client, bucket, key):
 def delete_prefix(client, bucket, prefix):
     """Delete every object under `prefix`; returns the number deleted."""
     keys = list_keys(client, bucket, prefix)
-    for i in range(0, len(keys), 1000):  # DeleteObjects caps at 1000 keys
+    for batch in batched(keys, 1000):  # DeleteObjects caps at 1000 keys
         client.delete_objects(
-            Bucket=bucket, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]}
+            Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]}
         )
     return len(keys)
 
@@ -206,7 +213,7 @@ def object_age(client, bucket, key):
     try:
         r = client.head_object(Bucket=bucket, Key=key)
     except ClientError as e:
-        if e.response["Error"]["Code"] in MISSING_KEY_CODES:
+        if error_code(e) in MISSING_KEY_CODES:
             return None
         raise
     server_now = parsedate_to_datetime(r["ResponseMetadata"]["HTTPHeaders"]["date"])
@@ -239,7 +246,7 @@ def parse_key(prefix, key):
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
     True
     """
-    parts = key[len(prefix):].split("/")
+    parts = key.removeprefix(prefix).split("/")
     if parts[1:] == ["ledger.parquet"]:
         return parts[0], None
     if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
@@ -249,9 +256,11 @@ def parse_key(prefix, key):
 
 def load_relation(con, client, bucket, keys):
     """In-memory DuckDB relation over the given parts (read via boto3)."""
-    tables = [get_table(client, bucket, k) for k in keys]
-    at = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
-    return con.from_arrow(at)
+    if len(keys) == 1:
+        return con.from_arrow(get_table(client, bucket, keys[0]))
+    with ThreadPoolExecutor(max_workers=16) as ex:  # independent GETs, IO-bound
+        tables = list(ex.map(lambda k: get_table(client, bucket, k), keys))
+    return con.from_arrow(pa.concat_tables(tables))
 
 
 def empty_relation(con, table):

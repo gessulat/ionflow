@@ -33,6 +33,8 @@ class Flow:
     _registry: dict[str, type] = {}
     config = None  # bound by the runner (orchestrator and branch workers)
     prototype = False  # True (or the Prototype mixin) relaxes the guarantees; see Prototype
+    Ledger = None  # subclass: `class Ledger(LedgerColumns)` — extra ledger columns
+    Params = None  # subclass: `class Params(FlowParams)` — typed run inputs
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -60,33 +62,28 @@ class Flow:
     @classmethod
     def ledger_columns(cls):
         """The flow's declared extra ledger columns ({} if no inner Ledger class)."""
-        ledger = getattr(cls, "Ledger", None)
-        return ledger.columns() if ledger else {}
+        return cls.Ledger.columns() if cls.Ledger else {}
 
     @classmethod
     def ledger_fields(cls):
         """pyarrow fields for the extra ledger columns ([] if none)."""
-        ledger = getattr(cls, "Ledger", None)
-        return ledger.arrow_fields() if ledger else []
+        return cls.Ledger.arrow_fields() if cls.Ledger else []
 
     @classmethod
     def params_columns(cls):
         """The flow's declared params ({} if no inner Params class)."""
-        params = getattr(cls, "Params", None)
-        return params.columns() if params else {}
+        return cls.Params.columns() if cls.Params else {}
 
     @classmethod
     def params_fields(cls):
         """pyarrow ledger fields for the params ([] if none)."""
-        params = getattr(cls, "Params", None)
-        return params.arrow_fields() if params else []
+        return cls.Params.arrow_fields() if cls.Params else []
 
     @classmethod
     def resolve_params(cls, given=None):
         """Full param dict from `given` + defaults; {} for flows without Params."""
-        params = getattr(cls, "Params", None)
-        if params is None:
+        if cls.Params is None:
             if given:
                 raise ValueError(f"{cls.__name__} declares no Params")
             return {}
-        return params.resolve(given)
+        return cls.Params.resolve(given)

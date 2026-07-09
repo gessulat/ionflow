@@ -68,13 +68,13 @@ def schema_drift(flow_cls, con, config, samples):
         if name not in samples:
             continue
         declared = {n: c.duckdb_type() for n, c in step.output_table.columns().items()}
-        persisted = dict(
-            (r[0], r[1])
+        persisted = {
+            r[0]: r[1]
             for r in con.sql(
                 f"DESCRIBE SELECT * FROM read_parquet('{storage.uri(config, samples[name])}', "
                 "hive_partitioning=false)"
             ).fetchall()
-        )
+        }
         for col, dtype in declared.items():
             if col not in persisted:
                 issues.append(f"{flow_cls.__name__}.{name}: missing column '{col}'")
@@ -92,11 +92,11 @@ def startup_warnings(flows, config, with_data, samples):
     for name in sorted(with_data - set(flows)):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
     con = storage.connect(config)  # one connection serves every flow's drift check
-    for name in flows:
-        if name not in with_data or flows[name].prototype:  # scratch churns by design
+    for name, cls in flows.items():
+        if name not in with_data or cls.prototype:  # scratch churns by design
             continue
         try:
-            warnings += schema_drift(flows[name], con, config, samples.get(name, {}))
+            warnings += schema_drift(cls, con, config, samples.get(name, {}))
         except Exception as e:  # noqa: BLE001
             warnings.append(f"{name}: schema check failed: {e}")
     return warnings
