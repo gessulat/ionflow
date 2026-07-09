@@ -85,12 +85,20 @@ def _branch_worker(payload):
     if payload["sample"]:
         sampler = metrics.Sampler().start()
         sampler.mark(step.name, branch)
-    result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-    write_part(con, client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
+    retries = payload["retries"]
+    for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
+        # transient step errors count too, and boto3 already retries at the HTTP layer
+        try:
+            result = _call(con, client, cfg, layout, flow, step, run_id, branch)
+            write_part(con, client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
+            break
+        except Exception:
+            if attempt == retries:
+                raise
     return branch, sampler.stop() if sampler else []
 
 
-def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes):
+def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries):
     """Run branches in parallel; return (succeeded indices, first error, samples).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
@@ -105,6 +113,7 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes)
         "step": step.name,
         "run_id": run_id,
         "sample": use_processes,
+        "retries": retries,
     }
     pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
     done, error, samples = [], None, []
@@ -120,7 +129,8 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes)
     return done, error, samples
 
 
-def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True):
+def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
+        branch_retries=0):
     commit = require_clean(repo)
     started = _now()
     run_id = _new_run_id(started)
@@ -201,7 +211,8 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     # pool-wait must not be attributed to it (step stays NULL)
                     sampler.mark(None if use_processes else name)
                     done, error, samples = _run_branches(
-                        flow_cls, config, run_id, step, todo, max_workers, use_processes
+                        flow_cls, config, run_id, step, todo, max_workers, use_processes,
+                        branch_retries,
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
                     branch_samples += samples

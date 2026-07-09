@@ -1,6 +1,6 @@
 import pytest
 
-from flows import EmptyFanFlow, FlakyFlow
+from flows import EmptyFanFlow, FlakyFlow, RetryFlow
 
 
 def _exec_counts(d):
@@ -40,6 +40,15 @@ def test_partial_fanout_resume_reruns_only_failed_branch(s3cfg, repo, tmp_path, 
     assert row == (3, 6)
     st = con.sql(f"SELECT status FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
     assert st == "complete"
+
+
+def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("RETRY_DIR", str(tmp_path))
+    run_id = RetryFlow.run(s3cfg, repo=repo, use_processes=False, branch_retries=1)
+
+    con = RetryFlow.duck(s3cfg)
+    # success entails each branch failed once first: work() only returns after its marker exists
+    assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (2, 2)
 
 
 def test_empty_fanout_completes(s3cfg, repo):

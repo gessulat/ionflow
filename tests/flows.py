@@ -51,6 +51,27 @@ class FlakyFlow(Flow):
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
 
 
+class RetryFlow(Flow):
+    """Every branch fails on its first attempt (marker files in RETRY_DIR count them)."""
+
+    def source(self) -> Src:
+        return pa.table({"g": [0, 1]})
+
+    def parts(self, source: Src) -> Fanout[Part]:
+        return [source.filter(f"g = {g}") for g in (0, 1)]
+
+    def work(self, parts: Branch[Part]) -> Out:
+        g = parts.project("g").fetchone()[0]
+        marker = pathlib.Path(os.environ["RETRY_DIR"], f"tried_{g}")
+        if not marker.exists():
+            marker.touch()
+            raise RuntimeError(f"transient failure on g={g}")
+        return parts.project("g, g * 2 AS doubled")
+
+    def agg(self, work: Collect[Out]) -> Agg:
+        return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
 class EmptyFanFlow(Flow):
     """Fan-out that yields zero branches."""
 

@@ -67,7 +67,8 @@ microflow query myproj.flows:Training \
   `Collect` markers; validated at class definition.
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume, git gate, run status (running|complete|failed).
+  per-branch resume, in-worker branch retries (`branch_retries`), git gate,
+  run status (running|complete|failed).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
   `_metrics.parquet` per run, written by the orchestrator on success AND failure.
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
