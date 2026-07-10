@@ -41,7 +41,14 @@ def _count_of(completed, step):
     return sum(1 for k in completed if _split(k)[0] == step)
 
 
-def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
+def _fair_share(workers):
+    """Per-worker DuckDB caps: workers x per-worker share ~ the machine (cores, 80% RAM)."""
+    cores = os.cpu_count() or 1
+    memory_mb = int(psutil.virtual_memory().total * 0.8) // workers // 2**20
+    return max(1, cores // workers), memory_mb
+
+
+def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
         keys = sorted(list_keys(client, cfg.bucket, layout.step_dir(run_id, dep) + "/"))
         if not keys:  # empty fan-out: hand the reducer a typed empty table
@@ -58,7 +65,7 @@ def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch, dep_tab
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
     dag = flow.__class__._dag
     kwargs = {
-        dep: _input_relation(
+        dep: _step_input(
             con, client, cfg, layout, run_id, dep, kind, branch,
             dag.steps[dep].output_table,
         )
@@ -75,7 +82,7 @@ def _import(file, name):
 
 
 def _branch_worker(payload):
-    threads = payload["threads"]
+    threads, memory_mb = _fair_share(payload["workers"])
     if payload["sample"]:  # own process: cap BLAS/OpenMP before the flow's imports
         # spawn imports numpy/torch fresh in this process, so the caps take effect;
         # setdefault keeps any explicit user setting. Never in thread mode — that
@@ -87,7 +94,7 @@ def _branch_worker(payload):
     # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
     # under proto's dirty-tree freedom) must not split the run across namespaces
     layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
-    con = connect(cfg, threads=threads, memory_mb=payload["memory_mb"])
+    con = connect(cfg, threads=threads, memory_mb=memory_mb)
     client = s3_client(cfg)
     flow = flow_cls()
     flow.config = cfg
@@ -108,7 +115,8 @@ def _branch_worker(payload):
         # transient step errors count too, and boto3 already retries at the HTTP layer
         try:
             result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-            write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
+            write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
+                       step.output_table, threads=threads, memory_mb=memory_mb)
             break
         except Exception:
             if attempt == retries:
@@ -136,9 +144,7 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "retries": retries,
         "params": params,
         "proto": flow_cls.prototype,
-        "threads": max(1, cores // workers),  # workers x per-worker threads ~ cores
-        # workers x per-worker memory ~ DuckDB's own default budget (80% of RAM)
-        "memory_mb": int(psutil.virtual_memory().total * 0.8) // workers // 2**20,
+        "workers": workers,  # workers derive their own caps: same machine, one formula
     }
     if use_processes:
         # spawn, never fork: the orchestrator is multi-threaded here (sampler,

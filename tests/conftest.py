@@ -9,12 +9,9 @@ import pytest
 
 # Start + warm the moto server in a background thread at import time, so the
 # heavy imports (boto3) and botocore's first-client JSON load overlap with
-# collection instead of stalling each worker's first S3 test.
-#
-# The server runs in a SEPARATE PROCESS, never in-process: DuckDB httpfs
-# relation binds (e.g. `rel.filter(...)` inside a step) starve an in-process
-# werkzeug server — the HEAD only gets served once DuckDB's timeout gives up,
-# wedging every runner test for minutes.
+# collection instead of stalling each worker's first S3 test. The server runs
+# as a subprocess, never in-process: DuckDB httpfs relation binds starve an
+# in-process werkzeug server (see AGENTS.md, Testing).
 _moto = {}
 
 

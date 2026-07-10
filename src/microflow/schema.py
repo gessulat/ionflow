@@ -169,6 +169,44 @@ class Table:
         return pa.schema(_arrow_fields(cls._columns))
 
     @classmethod
+    def cast_sql(cls, source):
+        """SELECT casting `source` to this schema (extra columns dropped).
+
+        >>> class C(Table):
+        ...     a: int
+        >>> C.cast_sql("_src")
+        'SELECT CAST(a AS BIGINT) AS a FROM _src'
+        """
+        cols = ", ".join(f"CAST({n} AS {c.duckdb_type()}) AS {n}" for n, c in cls._columns.items())
+        return f"SELECT {cols} FROM {source}"
+
+    @classmethod
+    def violation_scans(cls):
+        """(label, count-of-violations SQL) per constraint, for one scan.
+
+        A CHECK passes on NULL (SQL semantics), so violations are `(expr) IS
+        FALSE`; PRIMARY KEY NULLs are caught by its NOT NULL, so DISTINCT-
+        counting handles uniqueness alone (the row-value form covers composite
+        keys).
+
+        >>> class V(Table):
+        ...     id: int = primary_key
+        ...     score: float | None = check("score >= 0")
+        >>> [label for label, _ in V.violation_scans()]
+        ['id NOT NULL', 'CHECK (score >= 0)', 'PRIMARY KEY (id)']
+        """
+        scans = []
+        for n, c in cls._columns.items():
+            if not c.nullable:
+                scans.append((f"{n} NOT NULL", f"count(*) FILTER (WHERE {n} IS NULL)"))
+            if c.check:
+                scans.append((f"CHECK ({c.check})", f"count(*) FILTER (WHERE ({c.check}) IS FALSE)"))
+        if pk := [n for n, c in cls._columns.items() if c.primary_key]:
+            cols = ", ".join(pk)
+            scans.append((f"PRIMARY KEY ({cols})", f"count(*) - count(DISTINCT ({cols}))"))
+        return scans
+
+    @classmethod
     def make(cls, name, cols, **constraints):
         """Build a Table subclass programmatically (wide/generated schemas).
 

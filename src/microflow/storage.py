@@ -3,6 +3,7 @@ import io
 import os
 import shutil
 import tempfile
+import weakref
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from itertools import batched
@@ -17,6 +18,7 @@ from botocore.exceptions import ClientError
 METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
+MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
 
 
 class ConstraintViolation(RuntimeError):
@@ -119,22 +121,31 @@ def uri(cfg, key):
     return f"s3://{cfg.bucket}/{key}"
 
 
-def connect(cfg, threads=None, memory_mb=None):
-    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
+def _local_connection(threads=None, memory_mb=None):
+    """Fresh DuckDB instance with a private spill dir (removed with the connection).
 
-    Uses explicit keys when the config carries them (MinIO/tests), otherwise the
-    standard AWS credential chain. Every connection gets a private temp_directory
-    so operators spill to disk instead of erroring; `threads` / `memory_mb` cap
-    the instance for pooled workers (each connection is its own DuckDB instance
-    that would otherwise claim all cores and 80% of RAM).
+    `threads` / `memory_mb` cap the instance for pooled workers — each DuckDB
+    instance would otherwise claim all cores and 80% of RAM.
     """
     con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs")
-    con.execute(f"SET temp_directory = '{tempfile.mkdtemp(prefix='microflow-duck-')}'")
+    spill = tempfile.mkdtemp(prefix="microflow-duck-")
+    weakref.finalize(con, shutil.rmtree, spill, ignore_errors=True)
+    con.execute(f"SET temp_directory = '{spill}'")
     if threads:
         con.execute(f"SET threads TO {threads}")
     if memory_mb:
         con.execute(f"SET memory_limit = '{memory_mb}MB'")
+    return con
+
+
+def connect(cfg, threads=None, memory_mb=None):
+    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
+
+    Uses explicit keys when the config carries them (MinIO/tests), otherwise the
+    standard AWS credential chain.
+    """
+    con = _local_connection(threads, memory_mb)
+    con.execute("INSTALL httpfs; LOAD httpfs")
     parts = ["TYPE s3", f"REGION '{cfg.region}'"]
     if cfg.access_key:
         parts += [f"KEY_ID '{cfg.access_key}'", f"SECRET '{cfg.secret_key}'"]
@@ -154,12 +165,11 @@ def connect(cfg, threads=None, memory_mb=None):
 def to_arrow(obj) -> pa.Table:
     """Materialize a step return value into a pyarrow Table.
 
-    Accepts a DuckDB relation, polars/pandas DataFrame, or pyarrow Table.
+    Accepts a polars/pandas DataFrame or pyarrow Table (DuckDB relations are
+    intercepted by `write_part` and streamed, never materialized).
     """
     if isinstance(obj, pa.Table):
         return obj
-    if hasattr(obj, "to_arrow_table"):  # duckdb relation
-        return obj.to_arrow_table()
     if hasattr(obj, "to_arrow"):  # polars
         return obj.to_arrow()
     if hasattr(obj, "__dataframe__"):  # pandas
@@ -167,28 +177,9 @@ def to_arrow(obj) -> pa.Table:
     raise TypeError(f"cannot convert {type(obj)} to a table")
 
 
-def _constraint_scans(table):
-    """(label, count-of-violations SQL) per declared constraint, for one scan.
-
-    A CHECK passes on NULL (SQL semantics), so violations are `(expr) IS FALSE`;
-    PRIMARY KEY NULLs are caught by its NOT NULL, so DISTINCT-counting handles
-    uniqueness alone (the row-value form covers composite keys).
-    """
-    scans = []
-    for n, c in table.columns().items():
-        if not c.nullable:
-            scans.append((f"{n} NOT NULL", f"count(*) FILTER (WHERE {n} IS NULL)"))
-        if c.check:
-            scans.append((f"CHECK ({c.check})", f"count(*) FILTER (WHERE ({c.check}) IS FALSE)"))
-    if pk := [n for n, c in table.columns().items() if c.primary_key]:
-        cols = ", ".join(pk)
-        scans.append((f"PRIMARY KEY ({cols})", f"count(*) - count(DISTINCT ({cols}))"))
-    return scans
-
-
 def _validate_part(con, table, path, key):
     """One aggregate scan of the written file; raise listing every violation."""
-    scans = _constraint_scans(table)
+    scans = table.violation_scans()
     if not scans:
         return
     counts = con.execute(
@@ -198,7 +189,7 @@ def _validate_part(con, table, path, key):
         raise ConstraintViolation(f"{key}: " + "; ".join(bad))
 
 
-def write_part(client, bucket, key, data, table):
+def write_part(client, bucket, key, data, table, threads=None, memory_mb=None):
     """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.
 
     The COPY runs on a fresh local connection fed by an arrow batch reader —
@@ -208,33 +199,27 @@ def write_part(client, bucket, key, data, table):
     parts can exceed S3's 5GB single-PUT cap). Types are enforced by the cast
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
     `table=None` (untyped prototype step) skips both — the schema is whatever
-    the data infers.
+    the data infers. `threads`/`memory_mb` keep pooled workers within their
+    share during the write, the pipeline's memory/CPU peak.
     """
-    if isinstance(data, duckdb.DuckDBPyRelation):
-        names, src = data.columns, data.to_arrow_reader(BATCH_ROWS)
-    else:
-        src = to_arrow(data)
-        names = src.column_names
-    if table is not None and (missing := set(table.columns()) - set(names)):
+    src = data.to_arrow_reader(BATCH_ROWS) if isinstance(data, duckdb.DuckDBPyRelation) else to_arrow(data)
+    if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
-    con = duckdb.connect()
+    con = _local_connection(threads, memory_mb)
     con.register("_src", src)
-    if table is None:
-        select = "SELECT * FROM _src"
-    else:
-        cols = ", ".join(f"CAST({n} AS {c.duckdb_type()}) AS {n}" for n, c in table.columns().items())
-        select = f"SELECT {cols} FROM _src"
-    tmp_dir = tempfile.mkdtemp(prefix="microflow-part-")
-    try:
+    select = "SELECT * FROM _src" if table is None else table.cast_sql("_src")
+    with tempfile.TemporaryDirectory(prefix="microflow-part-") as tmp_dir:
         path = os.path.join(tmp_dir, "part.parquet")
         con.execute(
             f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})"
         )
         if table is not None:
             _validate_part(con, table, path, key)
-        client.upload_file(path, bucket, key)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if os.path.getsize(path) < MULTIPART_THRESHOLD:
+            with open(path, "rb") as f:
+                client.put_object(Bucket=bucket, Key=key, Body=f.read())
+        else:
+            client.upload_file(path, bucket, key)
 
 
 def put_parquet(client, bucket, key, table, **extra):
@@ -315,8 +300,7 @@ def input_relation(con, cfg, keys):
     hive_partitioning stays off: part paths contain `run_id=...`, which would
     otherwise inject a run_id column into step inputs.
     """
-    uris = [uri(cfg, k) for k in keys]
-    return con.read_parquet(uris if len(uris) > 1 else uris[0], hive_partitioning=False)
+    return con.read_parquet([uri(cfg, k) for k in keys], hive_partitioning=False)
 
 
 def empty_relation(con, table):
