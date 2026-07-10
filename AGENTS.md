@@ -71,7 +71,9 @@ microflow query myproj.flows:Training \
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
-- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`; the runner
+- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`, keyed by
+  `flow_id()` = module-qualified class name — also the S3 namespace (rename/move a
+  class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
   `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git

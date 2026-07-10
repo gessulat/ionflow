@@ -97,7 +97,8 @@ def test_stale_running_detection(s3cfg):
     con.execute(
         f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{storage.uri(s3cfg, layout.ledger)}')"
     )
-    rel = query.ledger_with_liveness(type("F", (), {}), s3cfg, con)
+    stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the layout above
+    rel = query.ledger_with_liveness(stub, s3cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())
     assert statuses == {"dead": "running (stale?)", "alive": "running"}
 

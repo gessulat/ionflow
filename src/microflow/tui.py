@@ -25,6 +25,15 @@ from .config import Config, ConfigMissing, write_config
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 
 
+def _slug(flow_id):
+    """Widget-id-safe form of a flow_id (Textual ids forbid the dots).
+
+    Injective: "-" cannot appear in a module or class name, so distinct
+    flow_ids never collide.
+    """
+    return flow_id.replace(".", "-")
+
+
 def _fill(table, relation, columns=None):
     """Fill a DataTable from a DuckDB relation (all columns, or a named subset)."""
     pairs = [
@@ -57,7 +66,7 @@ class RunDetailScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Label(f"{self.flow_cls.__name__} · run {self.run_id}")
+        yield Label(f"{self.flow_cls.flow_id()} · run {self.run_id}")
         yield Horizontal(
             ListView(
                 ListItem(Label("▸ stats"), id=f"step-{self.STATS}"),
@@ -108,13 +117,13 @@ class OverviewScreen(Screen):
             yield Static("No flows found. Set `flows` in .microflow/config to your flows package.")
         with TabbedContent():
             for name, cls in self.flows.items():
-                with TabPane(name + (" [proto]" if cls.prototype else ""), id=f"flow-{name}"):
-                    yield FlowTable(cursor_type="row", id=f"table-{name}")
+                with TabPane(name + (" [proto]" if cls.prototype else ""), id=f"flow-{_slug(name)}"):
+                    yield FlowTable(cursor_type="row", id=f"table-{_slug(name)}")
         yield Footer()
 
     def on_mount(self) -> None:
         for name, cls in self.flows.items():
-            table = self.query_one(f"#table-{name}", FlowTable)
+            table = self.query_one(f"#table-{_slug(name)}", FlowTable)
             if name not in self.with_data:
                 table.add_columns("info")
                 table.add_row("no runs yet")
@@ -129,12 +138,17 @@ class OverviewScreen(Screen):
                 table.add_row(str(e))
         self._focus_active_table()
 
+    def _active_flow(self):
+        """flow_id of the active tab (from its slugged widget id)."""
+        slug = self.query_one(TabbedContent).active.removeprefix("flow-")
+        return next((n for n in self.flows if _slug(n) == slug), None)
+
     def _focus_active_table(self) -> None:
         if not self.flows:
             return
-        name = self.query_one(TabbedContent).active.removeprefix("flow-")
+        slug = self.query_one(TabbedContent).active.removeprefix("flow-")
         try:
-            self.query_one(f"#table-{name}", FlowTable).focus()
+            self.query_one(f"#table-{slug}", FlowTable).focus()
         except Exception:  # noqa: BLE001
             pass
 
@@ -148,7 +162,7 @@ class OverviewScreen(Screen):
         self.query_one(Tabs).action_previous_tab()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        name = self.query_one(TabbedContent).active.removeprefix("flow-")
+        name = self._active_flow()
         con = self._cons.get(name)
         if con is None:
             return

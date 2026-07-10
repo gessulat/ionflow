@@ -59,8 +59,12 @@ class Layout:
 
     @classmethod
     def for_flow(cls, config, flow_cls):
-        """The layout a flow class writes to — the one place the flag is read."""
-        return cls(config.prefix, flow_cls.__name__, getattr(flow_cls, "prototype", False))
+        """The layout a flow class writes to — the one place identity and flag are read.
+
+        `flow` is the module-qualified `flow_id()`, so same-named classes in
+        different modules never share a namespace or ledger.
+        """
+        return cls(config.prefix, flow_cls.flow_id(), getattr(flow_cls, "prototype", False))
 
     @property
     def root(self):

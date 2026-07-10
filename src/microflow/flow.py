@@ -26,8 +26,9 @@ class Flow:
     During a run, `self.config` is the active Config, so steps can reach the
     bucket for side reads (see "side inputs" in the README).
 
-    Every subclass registers itself in `Flow._registry` on definition, so the
-    TUI can list all flows in a project once their modules are imported.
+    Every subclass registers itself in `Flow._registry` on definition (keyed
+    by `flow_id()`), so the TUI can list all flows in a project once their
+    modules are imported.
     """
 
     _registry: dict[str, type] = {}
@@ -42,7 +43,17 @@ class Flow:
         taken = set(cls._dag.steps) | set(cls.ledger_columns()) | ledger.BASE_COLS | {"config"}
         if collisions := set(cls.params_columns()) & taken:
             raise TypeError(f"params collide with steps/ledger columns/config: {sorted(collisions)}")
-        Flow._registry[cls.__name__] = cls
+        Flow._registry[cls.flow_id()] = cls
+
+    @classmethod
+    def flow_id(cls):
+        """Durable identity: module-qualified class name — the S3 namespace and registry key.
+
+        Renaming a flow class OR moving it to another module makes it a new
+        flow (old runs stay under the old id). Flows defined in `__main__` or
+        a REPL get an unstable id; define flows in importable modules.
+        """
+        return f"{cls.__module__}.{cls.__name__}"
 
     @classmethod
     def run(cls, config=None, repo=".", **kw):

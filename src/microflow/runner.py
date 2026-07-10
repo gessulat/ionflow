@@ -91,9 +91,11 @@ def _branch_worker(payload):
             os.environ.setdefault(var, str(threads))
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
-    # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
-    # under proto's dirty-tree freedom) must not split the run across namespaces
-    layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
+    # identity and namespace travel in the payload, never derived here: the
+    # re-imported class's __module__ is the loader's ("_mf_flow"), so its own
+    # flow_id() is wrong; and a mid-run edit flipping `prototype` must not
+    # split the run across namespaces
+    layout = Layout(cfg.prefix, payload["flow_id"], payload["proto"])
     con = connect(cfg, threads=threads, memory_mb=memory_mb)
     client = s3_client(cfg)
     flow = flow_cls()
@@ -137,7 +139,8 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
     payload = {
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
-        "flow": flow_cls.__name__,
+        "flow": flow_cls.__name__,  # for getattr after the file import
+        "flow_id": flow_cls.flow_id(),  # for the Layout; see _branch_worker
         "step": step.name,
         "run_id": run_id,
         "sample": use_processes,

@@ -73,9 +73,10 @@ def test_prototype_runs_in_scratch_and_allows_dirty_git(s3cfg, clean_repo):
     run_id = ProtoFlow.run(s3cfg, repo=clean_repo, use_processes=False)
 
     client = storage.s3_client(s3cfg)
-    scratch = storage.list_keys(client, s3cfg.bucket, f"{s3cfg.prefix}/_proto/ProtoFlow/")
+    fid = ProtoFlow.flow_id()  # module-qualified: flows.ProtoFlow
+    scratch = storage.list_keys(client, s3cfg.bucket, f"{s3cfg.prefix}/_proto/{fid}/")
     assert any("numbers/part_0.parquet" in k for k in scratch)  # untyped step persisted
-    assert not storage.list_keys(client, s3cfg.bucket, f"{s3cfg.prefix}/ProtoFlow/")
+    assert not storage.list_keys(client, s3cfg.bucket, f"{s3cfg.prefix}/{fid}/")
 
     con = ProtoFlow.duck(s3cfg)
     assert con.sql(f"SELECT x FROM numbers WHERE run_id = '{run_id}' ORDER BY x").fetchall() == [
@@ -91,7 +92,7 @@ def test_clean_wipes_scratch_only(s3cfg, repo):
     client = storage.s3_client(s3cfg)
     client.put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Other/ledger.parquet", Body=b"")
 
-    root = f"{s3cfg.prefix}/_proto/ProtoFlow/"
+    root = f"{s3cfg.prefix}/_proto/{ProtoFlow.flow_id()}/"
     assert storage.delete_prefix(client, s3cfg.bucket, root) > 0
     assert not storage.list_keys(client, s3cfg.bucket, root)
     # stable data outside the scratch prefix is untouched
