@@ -1,23 +1,46 @@
+import atexit
+import socket
 import subprocess
+import sys
 import threading
+import time
 
 import pytest
 
 # Start + warm the moto server in a background thread at import time, so the
-# heavy imports (boto3/moto), Flask's lazy URL-map build, and botocore's
-# first-client JSON load all overlap with collection instead of stalling the
-# xdist controller boot and each worker's first S3 test (~0.4s apiece).
+# heavy imports (boto3) and botocore's first-client JSON load overlap with
+# collection instead of stalling each worker's first S3 test.
+#
+# The server runs in a SEPARATE PROCESS, never in-process: DuckDB httpfs
+# relation binds (e.g. `rel.filter(...)` inside a step) starve an in-process
+# werkzeug server — the HEAD only gets served once DuckDB's timeout gives up,
+# wedging every runner test for minutes.
 _moto = {}
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _warm():
     import boto3
-    from moto.server import ThreadedMotoServer
 
-    server = ThreadedMotoServer(port=0, verbose=False)
-    server.start()
-    host, port = server.get_host_and_port()
-    _moto["endpoint"] = f"http://{host}:{port}"
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    atexit.register(proc.kill)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    _moto["endpoint"] = f"http://127.0.0.1:{port}"
     boto3.client(
         "s3", endpoint_url=_moto["endpoint"], region_name="us-east-1",
         aws_access_key_id="warm", aws_secret_access_key="warm",
@@ -56,7 +79,7 @@ def repo(tmp_path_factory):
 @pytest.fixture(scope="session")
 def moto_endpoint():
     _warmup.join()
-    return _moto["endpoint"]  # daemon thread; no stop() — saves ~0.5s teardown
+    return _moto["endpoint"]  # subprocess; killed via atexit
 
 
 @pytest.fixture

@@ -17,8 +17,10 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
   CLI end-to-end, process-pool run, and both resume tests. `-m ""` includes them.
   Anything touching `runner.py`, `cli.py`, or resume semantics MUST pass `-m ""`.
 - Doctests live in modules and run automatically (`--doctest-modules` in addopts).
-- S3 is faked with an in-process moto server (started+warmed at conftest import,
-  never stopped — it's a daemon thread). Each test gets a unique bucket; no cleanup.
+- S3 is faked with a moto server **subprocess** (started+warmed at conftest import,
+  killed atexit). Each test gets a unique bucket; no cleanup. It must NEVER run
+  in-process: DuckDB httpfs relation binds (any `rel.filter(...)` in a step)
+  starve an in-process werkzeug server and wedge runner tests for minutes.
 - `repo` fixture = session-scoped git repo, for tests that only *read* git.
   Use `clean_repo` (function-scoped) if the test mutates the repo or its cwd.
 - The TUI has no automated tests (deliberate — human-tested). Don't add TUI tests.
