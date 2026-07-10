@@ -152,9 +152,9 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         # so forked children inherit OpenMP/BLAS/CUDA state mid-flight (hangs,
         # "cannot re-initialize CUDA"). Spawn on 3.12/3.13 Linux too, where the
         # stdlib default is still fork.
-        pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"))
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
     else:
-        pool = ThreadPoolExecutor(max_workers=max_workers)
+        pool = ThreadPoolExecutor(max_workers=workers)
     done, error, samples = [], None, []
     with pool as ex:
         futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
