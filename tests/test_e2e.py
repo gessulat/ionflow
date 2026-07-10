@@ -71,17 +71,14 @@ def test_dirty_git_refused(s3cfg, tmp_path):
 
 
 def test_resume_refuses_commit_drift(s3cfg, clean_repo):
-    import subprocess
     from pathlib import Path
 
+    from conftest import _git
     from flows import EmptyFanFlow
 
     origin = EmptyFanFlow.run(s3cfg, repo=clean_repo, use_processes=False)
     Path(clean_repo, "flow.py").write_text("# changed\n")
-    subprocess.run(
-        ["git", "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix"],
-        cwd=clean_repo, check=True, capture_output=True,
-    )
+    _git(clean_repo, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix")
 
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
         EmptyFanFlow.resume(origin, s3cfg, repo=clean_repo, use_processes=False)

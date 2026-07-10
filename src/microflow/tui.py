@@ -139,9 +139,8 @@ class OverviewScreen(Screen):
         self._focus_active_table()
 
     def _active_flow(self):
-        """flow_id of the active tab (from its slugged widget id)."""
-        slug = self.query_one(TabbedContent).active.removeprefix("flow-")
-        return next((n for n in self.flows if _slug(n) == slug), None)
+        """flow_id of the active tab — inverts _slug ("-" never occurs in a flow_id)."""
+        return self.query_one(TabbedContent).active.removeprefix("flow-").replace("-", ".")
 
     def _focus_active_table(self) -> None:
         if not self.flows:

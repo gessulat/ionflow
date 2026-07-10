@@ -111,9 +111,11 @@ def _branch_worker(payload):
     sampler = None
     if payload["sample"]:
         metrics_key = layout.metrics_branch(run_id, step.name, branch)
-        sampler = metrics.Sampler(
-            flush=lambda rows: metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
-        ).start()
+
+        def flush_metrics(rows):
+            metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+
+        sampler = metrics.Sampler(flush=flush_metrics).start()
         sampler.mark(step.name, branch)
     retries = payload["retries"]
     try:
@@ -129,9 +131,8 @@ def _branch_worker(payload):
                     raise
     finally:
         if sampler:  # final superset write, on failure too — that's where perf data matters most
-            rows = sampler.stop()
             try:
-                metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+                flush_metrics(sampler.stop())
             except Exception:  # noqa: BLE001 — metrics must never mask the branch's outcome
                 pass
     return branch

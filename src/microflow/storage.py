@@ -15,7 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; invisible to parse_key
+METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
+# depth (like _meta.json), which is what keeps them invisible to parse_key
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
@@ -303,6 +304,23 @@ def parse_key(prefix, key):
     if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
         return parts[0], parts[3]
     return None
+
+
+def is_metrics_key(key):
+    """True for metrics objects — the orchestrator's or a branch worker's.
+
+    The positive complement of parse_key's exclusion, kept beside the key
+    scheme so recognition can't drift from construction.
+
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics.parquet")
+    True
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet")
+    True
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/raw/part_0.parquet")
+    False
+    """
+    name = key.rsplit("/", 1)[-1]
+    return name.startswith(METRICS_PREFIX) and name.endswith(".parquet")
 
 
 def input_relation(con, cfg, keys):
