@@ -276,6 +276,11 @@ A **new** `run_id` is created; completed step outputs are copied from the origin
 (server-side, no re-compute) and execution restarts at the first incomplete step. A
 partially-failed fan-out re-runs only its failed branches.
 
+If HEAD differs from the origin run's commit, resume **refuses by default** — reused
+steps would keep their old-code outputs, mixing two commits in one run. Pass
+`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately;
+prototype flows only warn, since they relinquish provenance anyway.
+
 ## Storage layout
 
 ```

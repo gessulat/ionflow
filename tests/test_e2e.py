@@ -70,6 +70,28 @@ def test_dirty_git_refused(s3cfg, tmp_path):
         ETLFlow.run(s3cfg, repo=str(tmp_path))
 
 
+def test_resume_refuses_commit_drift(s3cfg, clean_repo):
+    import subprocess
+    from pathlib import Path
+
+    from flows import EmptyFanFlow
+
+    origin = EmptyFanFlow.run(s3cfg, repo=clean_repo, use_processes=False)
+    Path(clean_repo, "flow.py").write_text("# changed\n")
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix"],
+        cwd=clean_repo, check=True, capture_output=True,
+    )
+
+    with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
+        EmptyFanFlow.resume(origin, s3cfg, repo=clean_repo, use_processes=False)
+    with pytest.warns(UserWarning, match="different commit"):
+        resumed = EmptyFanFlow.resume(
+            origin, s3cfg, repo=clean_repo, use_processes=False, allow_commit_drift=True
+        )
+    assert resumed != origin
+
+
 @pytest.mark.slow
 def test_resume_reuses_completed_steps(s3cfg, repo):
     origin = ETLFlow.run(s3cfg, repo=repo, use_processes=False)

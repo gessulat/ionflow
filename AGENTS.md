@@ -79,7 +79,8 @@ microflow query myproj.flows:Training \
   `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git
   allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume, in-worker branch retries (`branch_retries`), git gate,
+  per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
+  warn), in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
   `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker

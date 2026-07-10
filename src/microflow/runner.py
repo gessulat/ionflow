@@ -171,8 +171,12 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
     return done, error, samples
 
 
+class CommitDriftError(RuntimeError):
+    """Resume refused: HEAD differs from the origin run's commit."""
+
+
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0, params=None):
+        branch_retries=0, params=None, allow_commit_drift=False):
     if origin_run_id and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
@@ -196,6 +200,14 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
+            # a mixed-commit run must be a visible, deliberate choice; prototypes
+            # already relinquish provenance, so they stay warn-only
+            if not (allow_commit_drift or flow_cls.prototype):
+                raise CommitDriftError(
+                    f"origin run {origin_run_id} is at commit {origin.get('commit')}, HEAD is "
+                    f"{commit}; reused steps would keep old-code outputs. Pass "
+                    "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
+                )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         def copy_part(k):
             name, br = _split(k)
