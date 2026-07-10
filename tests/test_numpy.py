@@ -3,6 +3,7 @@
 The flows are module-level so branch workers can re-import them by file path.
 """
 
+import duckdb
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -176,8 +177,6 @@ class Shaped3(Table):
 
 
 def test_shaped_enforces_shape_at_write(s3cfg):
-    import duckdb
-
     client = s3_client(s3cfg)
     good = {"v": np.zeros((2, 3), dtype=np.float32)}
     storage.write_part(client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_0.parquet", good, Shaped3)
@@ -198,11 +197,7 @@ def test_shaped_enforces_shape_at_write(s3cfg):
 
 
 def _input(table):
-    import duckdb
-
-    con = duckdb.connect()
-    con.register("_t", table)
-    return storage.StepInput(con.sql("SELECT * FROM _t"))
+    return storage.StepInput(duckdb.connect().from_arrow(table))
 
 
 def test_np_scalar_column_keeps_dtype():
@@ -234,8 +229,6 @@ def test_np_nulls_raise():
 
 
 def test_step_input_delegates_to_the_relation():
-    import duckdb
-
     inp = _input(pa.table({"x": [1, 2, 3]}))
     filtered = inp.filter("x > 1")  # delegated; returns a plain relation
     assert isinstance(filtered, duckdb.DuckDBPyRelation)

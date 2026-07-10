@@ -1,5 +1,4 @@
 import datetime as dt
-import re
 import types
 import typing
 
@@ -53,8 +52,8 @@ if np is not None:
 class Shaped:
     """Marker base for fixed-shape array columns; build annotations with `shaped(...)`."""
 
-    dtype: typing.ClassVar = None
-    shape: typing.ClassVar[tuple] = ()
+    dtype: typing.ClassVar
+    shape: typing.ClassVar[tuple]
 
 
 def shaped(dtype, *shape):
@@ -101,13 +100,13 @@ def _duckdb_type(dtype):
     return _DUCKDB[dtype]
 
 
-def is_vector(dtype):
-    """True for column types whose cells are arrays (`list[T]`, `shaped(...)`).
-
-    >>> is_vector(list[float]), is_vector(float)
-    (True, False)
-    """
-    return typing.get_origin(dtype) is list or _is_shaped(dtype)
+def _persisted_type(dtype):
+    """DuckDB type as parquet round-trips it: fixed arrays come back as plain lists."""
+    if _is_shaped(dtype):
+        return _persisted_type(dtype.dtype) + "[]" * len(dtype.shape)
+    if typing.get_origin(dtype) is list:
+        return _persisted_type(typing.get_args(dtype)[0]) + "[]"
+    return _DUCKDB[dtype]
 
 
 def _arrow_type(dtype):
@@ -171,7 +170,15 @@ class Column:
         >>> Column(shaped(float, 3)).persisted_type()
         'DOUBLE[]'
         """
-        return re.sub(r"\[\d+\]", "[]", self.duckdb_type())
+        return _persisted_type(self.dtype)
+
+    def is_vector(self):
+        """True when cells are arrays (`list[T]` / `shaped(...)`), not scalars.
+
+        >>> Column(list[float]).is_vector(), Column(float).is_vector()
+        (True, False)
+        """
+        return typing.get_origin(self.dtype) is list or _is_shaped(self.dtype)
 
     def ddl(self, name):
         parts = [name, self.duckdb_type()]

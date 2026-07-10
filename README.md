@@ -168,7 +168,7 @@ class DSP(Flow):
 - **Reading:** inputs are still lazy relations (`.filter`, `.aggregate`, ...);
   `.np("col")` materializes one column as an ndarray — scalars 1D with their
   stored dtype, rectangular list columns stacked to `(N, d, ...)` — and `.np()`
-  returns every column as a dict. Ragged or NULL-bearing columns raise instead
+  returns every column as a dict in one scan. Ragged or NULL-bearing columns raise instead
   of degrading to object arrays. Filter/project first when the input is large.
 - **Shapes:** `shaped(np.float32, 4096)` compiles to a DuckDB fixed array
   (`FLOAT[4096]`), so shape violations fail at write time. Parquet round-trips

@@ -15,8 +15,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from .schema import is_vector
-
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover
@@ -205,7 +203,7 @@ def _ndarray_table(arr, table):
         )
     cols = table.columns()
     names = list(cols)
-    if len(names) == 1 and (arr.ndim == 1 or is_vector(cols[names[0]].dtype)):
+    if len(names) == 1 and (arr.ndim == 1 or cols[names[0]].is_vector()):
         return pa.table({names[0]: _column_array(names[0], arr)})
     if arr.ndim == 2 and arr.shape[1] == len(names):
         return pa.table({n: _column_array(n, arr[:, i]) for i, n in enumerate(names)})
@@ -269,9 +267,9 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None):
     the data infers. `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak.
     """
-    if isinstance(data, StepInput):  # identity step: an input returned unchanged
-        data = data.rel
-    src = data.to_arrow_reader(BATCH_ROWS) if isinstance(data, duckdb.DuckDBPyRelation) else to_arrow(data, table)
+    # capability dispatch: covers relations and StepInput (which delegates
+    # to_arrow_reader to its relation) without per-wrapper unwrap branches
+    src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
     if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
     con = _local_connection(threads, memory_mb)
@@ -374,9 +372,8 @@ def _np_column(name, arr):
         )
     t = arr.type
     if pa.types.is_fixed_size_list(t):
-        inner = _np_column(name, arr.flatten())
-        return inner.reshape(len(arr), t.list_size, *inner.shape[1:])
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        d = t.list_size
+    elif pa.types.is_list(t) or pa.types.is_large_list(t):
         lengths = arr.value_lengths().to_numpy(zero_copy_only=False)
         d = int(lengths[0]) if len(lengths) else 0
         if (lengths != d).any():
@@ -384,9 +381,10 @@ def _np_column(name, arr):
                 f"column '{name}' is ragged (list lengths {lengths.min()}..{lengths.max()}); "
                 ".np() needs a rectangular column"
             )
-        inner = _np_column(name, arr.flatten())
-        return inner.reshape(len(arr), d, *inner.shape[1:])
-    return arr.to_numpy(zero_copy_only=False)
+    else:
+        return arr.to_numpy(zero_copy_only=False)
+    inner = _np_column(name, arr.flatten())
+    return inner.reshape(len(arr), d, *inner.shape[1:])
 
 
 class StepInput:
@@ -413,8 +411,9 @@ class StepInput:
         """
         if np is None:
             raise ModuleNotFoundError("numpy is required for .np(); pip install numpy")
-        if column is None:
-            return {c: self.np(c) for c in self.rel.columns}
+        if column is None:  # one scan for all columns, not one pipeline per column
+            tbl = self.rel.to_arrow_table()
+            return {n: _np_column(n, tbl.column(i)) for i, n in enumerate(tbl.column_names)}
         arr = self.rel.project(f'"{column}"').to_arrow_table().column(0)
         return _np_column(column, arr)
 

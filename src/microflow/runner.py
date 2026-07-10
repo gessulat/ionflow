@@ -57,19 +57,19 @@ def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
                 raise RuntimeError(
                     f"empty fan-out from untyped step '{dep}'; declare its Table to type the empty input"
                 )
-            return StepInput(empty_relation(con, dep_table))
+            return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
-    return StepInput(input_relation(con, cfg, keys))
+    return input_relation(con, cfg, keys)
 
 
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
     dag = flow.__class__._dag
     kwargs = {
-        dep: _step_input(
+        dep: StepInput(_step_input(
             con, client, cfg, layout, run_id, dep, kind, branch,
             dag.steps[dep].output_table,
-        )
+        ))
         for dep, kind in step.param_kinds.items()
     }
     return step.method(flow, **kwargs)
