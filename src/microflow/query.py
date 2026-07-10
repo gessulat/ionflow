@@ -20,7 +20,7 @@ def _empty_view_sql(table):
     `table=None` (untyped prototype step) yields a run_id-only empty view.
     """
     cols = [] if table is None else [
-        f"NULL::{c.duckdb_type()} AS {name}" for name, c in table.columns().items()
+        f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()
     ]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 

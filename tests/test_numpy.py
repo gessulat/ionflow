@@ -7,7 +7,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, storage
+from microflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped, storage
 from microflow.storage import Layout, get_table, s3_client, to_arrow
 
 # --- schema: numpy dtype annotations ---
@@ -147,6 +147,53 @@ def test_nan_is_a_value_not_null(s3cfg):
     assert np.isnan(get_table(client, s3cfg.bucket, key).column("x").to_pylist()[0])
 
 
+# --- shaped(...): fixed-shape array columns ---
+
+
+def test_shaped_compiles_to_fixed_types():
+    class T(Table):
+        v: shaped(np.float32, 3)
+        m: shaped(np.int16, 4, 3)  # cells are (4, 3) arrays
+
+    cols = T.columns()
+    assert cols["v"].duckdb_type() == "FLOAT[3]"
+    assert cols["m"].duckdb_type() == "SMALLINT[3][4]"  # DuckDB suffixes read inside-out
+    assert cols["v"].persisted_type() == "FLOAT[]"  # parquet round-trips fixed as list
+    s = T.arrow_schema()
+    assert s.field("v").type == pa.list_(pa.float32(), 3)
+    assert s.field("m").type == pa.list_(pa.list_(pa.int16(), 3), 4)
+
+
+def test_shaped_rejects_bad_dimensions():
+    with pytest.raises(TypeError, match="positive int"):
+        shaped(np.float32)
+    with pytest.raises(TypeError, match="positive int"):
+        shaped(np.float32, 0)
+
+
+class Shaped3(Table):
+    v: shaped(np.float32, 3)
+
+
+def test_shaped_enforces_shape_at_write(s3cfg):
+    import duckdb
+
+    client = s3_client(s3cfg)
+    good = {"v": np.zeros((2, 3), dtype=np.float32)}
+    storage.write_part(client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_0.parquet", good, Shaped3)
+    with pytest.raises(duckdb.ConversionException, match="size 4 to array of size 3"):
+        storage.write_part(
+            client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_1.parquet",
+            {"v": np.zeros((2, 4), dtype=np.float32)}, Shaped3,
+        )
+    # ragged variable lists can't satisfy a fixed shape either
+    with pytest.raises(duckdb.ConversionException, match="length"):
+        storage.write_part(
+            client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_2.parquet",
+            pa.table({"v": pa.array([[1.0, 2.0]], pa.list_(pa.float32()))}), Shaped3,
+        )
+
+
 # --- StepInput: .np() on step inputs ---
 
 
@@ -209,7 +256,7 @@ def test_write_part_accepts_an_input_returned_unchanged(s3cfg):
 
 class Spectra(Table):
     frame: np.int32
-    spectrum: list[np.float32]
+    spectrum: shaped(np.float32, 16)
 
 
 class Peak(Table):
@@ -247,8 +294,13 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     assert con.sql(f"SELECT n FROM counted WHERE run_id = '{run_id}'").fetchone()[0] == 4
     peaks = con.sql(f"SELECT peak FROM peaks WHERE run_id = '{run_id}'").fetchall()
     assert all(p > 0 for (p,) in peaks)
-    # narrow dtypes survived the whole pipeline onto S3
+    # narrow dtypes survived the whole pipeline onto S3 (fixed shape persists as list)
     layout = Layout(s3cfg.prefix, "SignalFlow")
     schema = get_table(s3_client(s3cfg), s3cfg.bucket, layout.part(run_id, "spectra")).schema
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
+    # the drift check compares against the persisted (list) form: no false positive
+    from microflow import discovery
+
+    _, samples, _ = discovery.scan_runs(s3cfg)
+    assert discovery.schema_drift(SignalFlow, con, s3cfg, samples["SignalFlow"]) == []
