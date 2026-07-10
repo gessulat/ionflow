@@ -3,10 +3,9 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from flows import ProtoFlow
 
 from microflow import Flow, ledger, storage
-
-from flows import ProtoFlow
 
 
 def test_untyped_step_rejected_outside_prototype():
@@ -110,7 +109,7 @@ def test_ledger_reset_on_conflict(s3cfg):
     )
     row = {"run_id": "b", "status": "complete", "started": started, "x": "now-a-string"}
     fields = [pa.field("x", pa.string())]
-    with pytest.raises(Exception):  # stable flows: schema conflicts must surface
+    with pytest.raises(Exception):  # noqa: B017 — any error is right; the reset path must not run
         ledger.upsert_run(client, s3cfg.bucket, key, row, fields)
     ledger.upsert_run(client, s3cfg.bucket, key, row, fields, reset_on_conflict=True)
     rows = ledger.read_all(client, s3cfg.bucket, key)

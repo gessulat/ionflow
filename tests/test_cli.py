@@ -1,6 +1,6 @@
-import pytest
 import tomllib
 
+import pytest
 from typer.testing import CliRunner
 
 from microflow import cli, config

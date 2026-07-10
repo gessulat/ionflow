@@ -12,7 +12,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-
 METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 

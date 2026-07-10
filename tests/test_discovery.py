@@ -47,8 +47,9 @@ def test_flows_with_data(s3cfg):
 
 
 def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
-    from microflow import storage
     from tui_flows.pipeline import Alpha
+
+    from microflow import storage
 
     Alpha.run(s3cfg, repo=repo, use_processes=False)
     con = storage.connect(s3cfg)

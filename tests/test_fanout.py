@@ -1,5 +1,4 @@
 import pytest
-
 from flows import EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow
 
 

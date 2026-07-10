@@ -144,9 +144,9 @@ def to_table(rows):
     >>> to_table([(1.0, "a", None, 1, 2, 0.1, 0.2)]).schema.equals(SCHEMA)
     True
     """
-    columns = list(zip(*rows))
+    columns = list(zip(*rows, strict=True))
     ts = pa.array((int(t * 1e6) for t in columns[0]), SCHEMA.types[0])
-    rest = [pa.array(c, t) for c, t in zip(columns[1:], SCHEMA.types[1:])]
+    rest = [pa.array(c, t) for c, t in zip(columns[1:], SCHEMA.types[1:], strict=True)]
     return pa.Table.from_arrays([ts, *rest], schema=SCHEMA)
 
 

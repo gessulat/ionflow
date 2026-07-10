@@ -39,9 +39,9 @@ def _config_or_setup():
             typer.echo("microflow isn't configured for this repo yet — let's set it up.\n")
             setup()
             typer.echo("\nSetup complete. Commit the change shown above, then re-run.")
-            raise typer.Exit(0)
+            raise typer.Exit(0) from None
         typer.echo("No microflow config found. Run `microflow setup`.")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     if not storage.aws_credentials_available():
         typer.echo(
             "No AWS credentials found. Provide them via environment variables, "
@@ -113,7 +113,7 @@ def _parse_params(cols, pairs):
         try:
             out[key] = {"true": True, "false": False}[raw.lower()] if dtype is bool else dtype(raw)
         except (KeyError, ValueError):
-            raise typer.BadParameter(f"param '{key}': expected {dtype.__name__}, got '{raw}'")
+            raise typer.BadParameter(f"param '{key}': expected {dtype.__name__}, got '{raw}'") from None
     return out
 
 

@@ -1,9 +1,8 @@
 import pytest
 
+from examples.etl import ETLFlow
 from microflow import runner
 from microflow.git import DirtyRepoError
-
-from examples.etl import ETLFlow
 
 
 def test_run_end_to_end(s3cfg, repo):

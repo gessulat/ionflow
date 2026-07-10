@@ -2,6 +2,7 @@ import inspect
 import typing
 from dataclasses import dataclass
 
+
 class Fanout[T]:
     """Return marker: step yields N branch outputs."""
 

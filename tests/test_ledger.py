@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 
 from microflow import ledger, storage
 
+
 def _client(cfg):
     return storage.s3_client(cfg)
 

@@ -14,8 +14,8 @@ from .storage import (
     Layout,
     compute_connection,
     empty_relation,
-    load_relation,
     list_keys,
+    load_relation,
     s3_client,
     utc_now,
     write_part,
@@ -182,7 +182,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
-            warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code")
+            warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         def copy_part(k):
             name, br = _split(k)
             client.copy_object(
@@ -198,7 +198,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             setattr(flow, k, v)
         params = origin.get("params") or {}
         if dropped := set(params) - set(flow_cls.params_columns()):
-            warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}")
+            warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}", stacklevel=2)
             params = {k: v for k, v in params.items() if k not in dropped}
 
     params = flow_cls.resolve_params(params)
