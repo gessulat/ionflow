@@ -15,7 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
+METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; invisible to parse_key
+METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
 MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
@@ -83,9 +84,13 @@ class Layout:
     def metrics(self, run_id):
         return f"{self.run_dir(run_id)}/{METRICS_FILE}"
 
+    def metrics_branch(self, run_id, step, branch):
+        """A branch worker's own metrics object — one writer per key, no CAS needed."""
+        return f"{self.run_dir(run_id)}/{METRICS_PREFIX}_{step}_{branch}.parquet"
+
     @property
     def metrics_glob(self):
-        return f"{self.root}/runs/*/{METRICS_FILE}"
+        return f"{self.root}/runs/*/{METRICS_PREFIX}*.parquet"  # orchestrator + branch objects
 
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
@@ -288,6 +293,8 @@ def parse_key(prefix, key):
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
     True
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
+    True
+    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet") is None
     True
     """
     parts = key.removeprefix(prefix).split("/")

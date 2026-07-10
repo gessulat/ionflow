@@ -106,33 +106,44 @@ def _branch_worker(payload):
     run_id, branch = payload["run_id"], payload["branch"]
     # own sampler only in a separate process; in thread mode the orchestrator's
     # sampler already covers this process (a second one would double-count CPU).
-    # Never with flush=: _metrics.parquet has ONE writer (the orchestrator, no
-    # CAS on that key) — branch samples return through the pool result channel.
+    # Each worker flushes to its OWN metrics key (one writer per object, no CAS),
+    # so branch samples survive a run killed mid-branch up to the last flush.
     sampler = None
     if payload["sample"]:
-        sampler = metrics.Sampler().start()
+        metrics_key = layout.metrics_branch(run_id, step.name, branch)
+        sampler = metrics.Sampler(
+            flush=lambda rows: metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+        ).start()
         sampler.mark(step.name, branch)
     retries = payload["retries"]
-    for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
-        # transient step errors count too, and boto3 already retries at the HTTP layer
-        try:
-            result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-            write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
-                       step.output_table, threads=threads, memory_mb=memory_mb)
-            break
-        except Exception:
-            if attempt == retries:
-                raise
-    return branch, sampler.stop() if sampler else []
+    try:
+        for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
+            # transient step errors count too, and boto3 already retries at the HTTP layer
+            try:
+                result = _call(con, client, cfg, layout, flow, step, run_id, branch)
+                write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
+                           step.output_table, threads=threads, memory_mb=memory_mb)
+                break
+            except Exception:
+                if attempt == retries:
+                    raise
+    finally:
+        if sampler:  # final superset write, on failure too — that's where perf data matters most
+            rows = sampler.stop()
+            try:
+                metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+            except Exception:  # noqa: BLE001 — metrics must never mask the branch's outcome
+                pass
+    return branch
 
 
 def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries, params):
-    """Run branches in parallel; return (succeeded indices, first error, samples).
+    """Run branches in parallel; return (succeeded indices, first error).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
-    branches' parts durably on S3 for a later resume to reuse. Branch workers
-    return their metric samples with the result, so the orchestrator can write
-    one metrics object per run.
+    branches' parts durably on S3 for a later resume to reuse. Process-mode
+    workers write their own per-branch metrics objects; the `metrics` view
+    unions them with the orchestrator's.
     """
     cores = os.cpu_count() or 1
     workers = min(max_workers or cores, len(todo))
@@ -158,17 +169,15 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
     else:
         pool = ThreadPoolExecutor(max_workers=workers)
-    done, error, samples = [], None, []
+    done, error = [], None
     with pool as ex:
         futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
         for fut in as_completed(futures):
             try:
-                branch, rows = fut.result()
-                done.append(branch)
-                samples += rows
+                done.append(fut.result())
             except Exception as e:  # noqa: BLE001 — surface the first, keep the rest
                 error = error or e
-    return done, error, samples
+    return done, error
 
 
 class CommitDriftError(RuntimeError):
@@ -264,11 +273,10 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
 
     sampler = metrics.Sampler(flush=flush_metrics).start()
-    branch_samples = []
 
     def write_metrics():
         try:
-            flush_metrics(sampler.stop() + branch_samples)
+            flush_metrics(sampler.stop())
         except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
             pass
 
@@ -283,12 +291,11 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)
                     sampler.mark(None if use_processes else name)
-                    done, error, samples = _run_branches(
+                    done, error = _run_branches(
                         flow_cls, config, run_id, step, todo, max_workers, use_processes,
                         branch_retries, params,
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
-                    branch_samples += samples
                     if error:
                         raise error
             elif step.is_fanout:

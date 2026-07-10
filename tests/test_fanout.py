@@ -41,6 +41,33 @@ def test_partial_fanout_resume_reruns_only_failed_branch(s3cfg, repo, tmp_path, 
     assert st == "complete"
 
 
+@pytest.mark.slow
+def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
+    """A failing process-mode branch still writes its own metrics object."""
+    d = tmp_path / "exec"
+    d.mkdir()
+    monkeypatch.setenv("FLAKY_DIR", str(d))
+    monkeypatch.setenv("FLAKY_FAIL", "1")
+
+    with pytest.raises(RuntimeError):
+        FlakyFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=3)
+
+    from microflow import storage
+
+    keys = storage.list_keys(
+        storage.s3_client(s3cfg), s3cfg.bucket, f"{s3cfg.prefix}/{FlakyFlow.flow_id()}/runs/"
+    )
+    # branch 1 raised, yet its worker's final (finally) write landed
+    assert any(k.endswith("_metrics_work_1.parquet") for k in keys)
+
+    con = FlakyFlow.duck(s3cfg)
+    run_id = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
+    branches = {r[0] for r in con.sql(
+        f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
+    ).fetchall()}
+    assert branches == {0, 1, 2}  # failed branch included
+
+
 def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("RETRY_DIR", str(tmp_path))
     run_id = RetryFlow.run(s3cfg, repo=repo, use_processes=False, branch_retries=1)

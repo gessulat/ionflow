@@ -1,6 +1,6 @@
 from . import metrics
 from .storage import (
-    METRICS_FILE,
+    METRICS_PREFIX,
     Layout,
     connect,
     list_keys,
@@ -33,7 +33,8 @@ def _scan_parts(client, config, layout):
         parsed = parse_key(ns_prefix, key)
         if parsed and parsed[1]:
             steps.add(parsed[1])
-        has_metrics = has_metrics or key.endswith("/" + METRICS_FILE)
+        name = key.rsplit("/", 1)[-1]  # orchestrator's file or a branch worker's
+        has_metrics = has_metrics or (name.startswith(METRICS_PREFIX) and name.endswith(".parquet"))
     return steps, has_metrics
 
 

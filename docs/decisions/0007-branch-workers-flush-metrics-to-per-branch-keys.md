@@ -1,27 +1,30 @@
-# 0007 — Branch workers should flush metrics to per-branch keys
+# 0007 — Branch workers flush metrics to per-branch keys
 
-Status: accepted, not yet implemented (2026-07-10)
+Status: accepted and implemented (2026-07-10)
 
 ## Context
 
-Branch workers sample themselves but only hand their rows back through the
-pool result channel when the branch completes; the orchestrator merges them
-into the single `_metrics.parquet`. A run killed mid-branch therefore loses
-all branch samples — the 60s heartbeat flush carries only orchestrator rows.
-Failed runs are exactly where per-branch memory/CPU data matters most.
+Branch workers used to hand their samples back through the pool result
+channel on completion; the orchestrator merged them into the single
+`_metrics.parquet`. A run killed mid-branch therefore lost all branch
+samples — and failed runs are exactly where per-branch memory/CPU data
+matters most.
 
 ## Decision
 
-Branch workers should flush periodically to their own keys (e.g.
-`_metrics_<step>_<branch>.parquet` in the run folder), preserving the
-one-writer-per-object invariant — no CAS needed, each process owns its key.
-The result-channel merge can stay for the happy path or be replaced by the
-per-branch objects.
+Each process-mode worker flushes periodically (and finally, on success or
+failure) to its own `_metrics_<step>_<branch>.parquet` in the run folder.
+The result-channel merge is gone: the `metrics` view globs
+`_metrics*.parquet`, unioning the orchestrator's object with the workers'.
+One-writer-per-object holds — each process owns its key, no CAS.
 
 ## Consequences
 
-- The `metrics` view's glob must include the per-branch objects (and
-  `parse_key` must keep them invisible to run scans, like `_metrics.parquet`).
-- Many small S3 PUTs during wide fan-outs; bounded by the flush interval.
-- The orchestrator's heartbeat remains the run's liveness signal — per-branch
-  flushes are for crash-durable data, not staleness detection.
+- Failed and killed branches keep their samples up to the last flush; the
+  worker's final write happens in a `finally`, swallowing its own errors so
+  metrics never mask the branch's outcome.
+- Wide fan-outs mean more small S3 PUTs, bounded by the 60s flush interval.
+- The orchestrator's `_metrics.parquet` remains the run's only liveness
+  heartbeat; branch objects are data, not staleness signals.
+- These keys stay invisible to `parse_key` (run-dir level, like `_meta.json`),
+  so run scans and drift checks never see them.

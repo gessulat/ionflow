@@ -90,9 +90,11 @@ microflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
-- `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
-  `_metrics.parquet` per run, written by the orchestrator on success AND failure,
-  flushed every 60s mid-run (heartbeat + crash-durable metrics).
+- `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
+  orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
+  run heartbeat); process-mode branch workers each flush their own
+  `_metrics_<step>_<branch>.parquet` (crash-durable branch samples); the `metrics`
+  view unions all of them.
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (httpfs write path is unreliable). `write_part` streams: cast-projection COPY
