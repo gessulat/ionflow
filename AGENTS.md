@@ -2,7 +2,9 @@
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
 persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
-See README.md for user-facing docs.
+See README.md for user-facing docs. Design decisions (the *why* behind
+non-obvious choices) live in `docs/decisions/` — check there before changing
+architecture, add a numbered record when you make such a decision.
 
 ## Testing (important)
 
