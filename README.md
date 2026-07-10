@@ -133,6 +133,54 @@ and return any of those. Outputs stream too: validated and written to a local
 temp file, then multipart-uploaded — a step's output can exceed RAM and S3's
 5GB single-PUT limit.
 
+## numpy in, numpy out
+
+Steps that live in numpy — signal processing, point clouds, spectra — need no
+conversion scaffolding in either direction:
+
+```python
+import numpy as np
+from microflow import Flow, Table, check, shaped
+
+class Spectra(Table):
+    frame: np.int32                      # narrow dtypes persist as-is (INTEGER, not BIGINT)
+    spectrum: shaped(np.float32, 4096)   # fixed shape: a wrong-length row fails the write
+
+class Peaks(Table):
+    frame: np.int32
+    peak: np.float32 = check("peak >= 0")
+
+class DSP(Flow):
+    def spectra(self) -> Spectra:
+        iq = load_capture()                                  # (n, 4096) samples
+        return {"frame": np.arange(len(iq), dtype=np.int32),
+                "spectrum": np.abs(np.fft.fft(iq)).astype(np.float32)}
+
+    def peaks(self, spectra: Spectra) -> Peaks:
+        spec = spectra.np("spectrum")                        # (n, 4096) float32, stacked
+        return {"frame": spectra.np("frame"), "peak": spec.max(axis=1)}
+```
+
+- **Returning:** a dict of ndarrays (2D+ values become fixed-size-list columns,
+  zero-copy), a structured array, or a bare ndarray mapped onto the declared
+  columns — all convert automatically, dtypes preserved: `float32` stays `FLOAT`
+  on S3 instead of doubling to `DOUBLE`.
+- **Reading:** inputs are still lazy relations (`.filter`, `.aggregate`, ...);
+  `.np("col")` materializes one column as an ndarray — scalars 1D with their
+  stored dtype, rectangular list columns stacked to `(N, d, ...)` — and `.np()`
+  returns every column as a dict. Ragged or NULL-bearing columns raise instead
+  of degrading to object arrays. Filter/project first when the input is large.
+- **Shapes:** `shaped(np.float32, 4096)` compiles to a DuckDB fixed array
+  (`FLOAT[4096]`), so shape violations fail at write time. Parquet round-trips
+  fixed arrays as plain lists — queries and `.np()` see an ordinary list column.
+- **NaN is a value, not NULL:** a `NOT NULL` float column accepts NaN (SQL
+  semantics — usually what measurement data wants).
+- **Complex arrays** have no parquet type; store `np.real` / `np.imag` as two
+  columns (the error message says so too).
+
+numpy is optional, not a microflow dependency — these paths light up when your
+project has it installed.
+
 ## Run it
 
 ```python
