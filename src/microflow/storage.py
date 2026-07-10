@@ -269,6 +269,8 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None):
     the data infers. `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak.
     """
+    if isinstance(data, StepInput):  # identity step: an input returned unchanged
+        data = data.rel
     src = data.to_arrow_reader(BATCH_ROWS) if isinstance(data, duckdb.DuckDBPyRelation) else to_arrow(data, table)
     if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
@@ -359,6 +361,62 @@ def parse_key(prefix, key):
     if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
         return parts[0], parts[3]
     return None
+
+
+def _np_column(name, arr):
+    """ndarray from an arrow (chunked) array; list columns stack to (N, d, ...)."""
+    if isinstance(arr, pa.ChunkedArray):
+        arr = arr.combine_chunks()
+    if arr.null_count:
+        raise ValueError(
+            f"column '{name}' has NULLs, which have no ndarray slot; "
+            "filter them out first (or materialize with .to_arrow_table())"
+        )
+    t = arr.type
+    if pa.types.is_fixed_size_list(t):
+        inner = _np_column(name, arr.flatten())
+        return inner.reshape(len(arr), t.list_size, *inner.shape[1:])
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        lengths = arr.value_lengths().to_numpy(zero_copy_only=False)
+        d = int(lengths[0]) if len(lengths) else 0
+        if (lengths != d).any():
+            raise ValueError(
+                f"column '{name}' is ragged (list lengths {lengths.min()}..{lengths.max()}); "
+                ".np() needs a rectangular column"
+            )
+        inner = _np_column(name, arr.flatten())
+        return inner.reshape(len(arr), d, *inner.shape[1:])
+    return arr.to_numpy(zero_copy_only=False)
+
+
+class StepInput:
+    """A step's input: the lazy DuckDB relation plus a numpy accessor.
+
+    Everything a relation offers delegates through (`.filter`, `.aggregate`,
+    `.project`, `.df()`, ...) and returns plain relations. `.np()` is the one
+    addition, and it MATERIALIZES what it touches — the relation itself stays
+    lazy, so filter/project first when the input is large.
+    """
+
+    def __init__(self, rel):
+        self.rel = rel
+
+    def __getattr__(self, name):
+        return getattr(self.rel, name)
+
+    def np(self, column=None):
+        """One column as an ndarray, or every column as {name: ndarray}.
+
+        Scalar columns come back 1D with their stored dtype (FLOAT -> float32);
+        rectangular list columns stack to (N, d, ...). Ragged or NULL-bearing
+        columns raise rather than degrade to object arrays.
+        """
+        if np is None:
+            raise ModuleNotFoundError("numpy is required for .np(); pip install numpy")
+        if column is None:
+            return {c: self.np(c) for c in self.rel.columns}
+        arr = self.rel.project(f'"{column}"').to_arrow_table().column(0)
+        return _np_column(column, arr)
 
 
 def input_relation(con, cfg, keys):

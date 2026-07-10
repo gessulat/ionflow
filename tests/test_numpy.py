@@ -147,6 +147,63 @@ def test_nan_is_a_value_not_null(s3cfg):
     assert np.isnan(get_table(client, s3cfg.bucket, key).column("x").to_pylist()[0])
 
 
+# --- StepInput: .np() on step inputs ---
+
+
+def _input(table):
+    import duckdb
+
+    con = duckdb.connect()
+    con.register("_t", table)
+    return storage.StepInput(con.sql("SELECT * FROM _t"))
+
+
+def test_np_scalar_column_keeps_dtype():
+    got = _input(pa.table({"x": pa.array([1, 2], pa.int16())})).np("x")
+    assert got.dtype == np.int16 and got.tolist() == [1, 2]
+
+
+def test_np_list_column_stacks():
+    inp = _input(pa.table({"v": pa.array([[1.0, 2.0], [3.0, 4.0]], pa.list_(pa.float32()))}))
+    got = inp.np("v")
+    assert got.shape == (2, 2) and got.dtype == np.float32
+
+
+def test_np_no_arg_returns_all_columns():
+    got = _input(pa.table({"a": [1], "b": [[1.0, 2.0]]})).np()
+    assert set(got) == {"a", "b"} and got["b"].shape == (1, 2)
+
+
+def test_np_ragged_lists_raise():
+    inp = _input(pa.table({"v": [[1.0], [2.0, 3.0]]}))
+    with pytest.raises(ValueError, match="ragged"):
+        inp.np("v")
+
+
+def test_np_nulls_raise():
+    inp = _input(pa.table({"x": [1.0, None]}))
+    with pytest.raises(ValueError, match="NULL"):
+        inp.np("x")
+
+
+def test_step_input_delegates_to_the_relation():
+    import duckdb
+
+    inp = _input(pa.table({"x": [1, 2, 3]}))
+    filtered = inp.filter("x > 1")  # delegated; returns a plain relation
+    assert isinstance(filtered, duckdb.DuckDBPyRelation)
+    assert inp.aggregate("sum(x) AS s").fetchone()[0] == 6
+
+
+def test_write_part_accepts_an_input_returned_unchanged(s3cfg):
+    # identity step: `def copy(self, raw: Raw) -> Raw: return raw`
+    client = s3_client(s3cfg)
+    key = "mf/F/runs/run_id=r4/pts/part_0.parquet"
+    inp = _input(pa.table({"frame": pa.array([1], pa.int32()), "x": pa.array([2.0], pa.float32())}))
+    storage.write_part(client, s3cfg.bucket, key, inp, Frame)
+    assert get_table(client, s3cfg.bucket, key).column("x").to_pylist() == [2.0]
+
+
 # --- end to end: a numpy-native flow, fan-out included ---
 
 
@@ -178,7 +235,7 @@ class SignalFlow(Flow):
         return [spectra.filter(f"frame = {i}") for i in range(4)]
 
     def peaks(self, frames: Branch[Spectra]) -> Peak:
-        return frames.project("frame, list_aggregate(spectrum, 'max') AS peak")
+        return {"frame": frames.np("frame"), "peak": frames.np("spectrum").max(axis=1)}
 
     def counted(self, peaks: Collect[Peak]) -> Count:
         return peaks.aggregate("count(*) AS n")

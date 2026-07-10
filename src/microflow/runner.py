@@ -14,6 +14,7 @@ from .config import Config
 from .git import commit_or_dirty, require_clean
 from .storage import (
     Layout,
+    StepInput,
     connect,
     empty_relation,
     input_relation,
@@ -56,10 +57,10 @@ def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
                 raise RuntimeError(
                     f"empty fan-out from untyped step '{dep}'; declare its Table to type the empty input"
                 )
-            return empty_relation(con, dep_table)
+            return StepInput(empty_relation(con, dep_table))
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
-    return input_relation(con, cfg, keys)
+    return StepInput(input_relation(con, cfg, keys))
 
 
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
