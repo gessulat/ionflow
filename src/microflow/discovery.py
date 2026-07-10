@@ -67,7 +67,7 @@ def schema_drift(flow_cls, con, config, samples):
     for name, step in flow_cls._dag.steps.items():
         if name not in samples:
             continue
-        declared = {n: c.duckdb_type() for n, c in step.output_table.columns().items()}
+        declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
         persisted = {
             r[0]: r[1]
             for r in con.sql(

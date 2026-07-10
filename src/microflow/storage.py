@@ -15,6 +15,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
+try:  # numpy is optional in core; step returns convert when it's installed
+    import numpy as np
+except ModuleNotFoundError:  # pragma: no cover
+    np = None
+
 METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
@@ -162,14 +167,74 @@ def connect(cfg, threads=None, memory_mb=None):
     return con
 
 
-def to_arrow(obj) -> pa.Table:
+def _column_array(name, value):
+    """Arrow-compatible column from one value; 2D+ ndarrays nest as fixed-size lists.
+
+    NaN is a value, not NULL — a float column full of NaNs passes NOT NULL.
+    """
+    if np is None or not isinstance(value, np.ndarray):
+        return value  # pa.table handles lists, arrow arrays, 1D ndarrays
+    if value.dtype.kind == "c":
+        raise TypeError(
+            f"column '{name}': complex arrays have no parquet type; "
+            "store np.real/np.imag as two columns"
+        )
+    if value.ndim <= 1:
+        return value
+    arr = pa.array(np.ascontiguousarray(value).reshape(-1))
+    for size in value.shape[:0:-1]:  # wrap innermost dimension first
+        arr = pa.FixedSizeListArray.from_arrays(arr, size)
+    return arr
+
+
+def _ndarray_table(arr, table):
+    """Table from a bare ndarray, taking column names from the declared schema.
+
+    Structured arrays carry their own names/dtypes. A plain array maps onto a
+    single declared column (rows = vectors when it's a list column), or
+    positionally onto k columns for an (N, k) array.
+    """
+    if arr.dtype.names:
+        return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
+    if table is None:
+        raise TypeError(
+            "bare ndarray from an untyped step: return {'col': array} or a "
+            "structured array so columns have names"
+        )
+    cols = table.columns()
+    names = list(cols)
+    if len(names) == 1 and (arr.ndim == 1 or cols[names[0]].is_vector()):
+        return pa.table({names[0]: _column_array(names[0], arr)})
+    if arr.ndim == 2 and arr.shape[1] == len(names):
+        return pa.table({n: _column_array(n, arr[:, i]) for i, n in enumerate(names)})
+    raise TypeError(
+        f"cannot map a {arr.shape} ndarray onto {table.__name__}'s columns "
+        f"({', '.join(names)}); return a dict of named arrays instead"
+    )
+
+
+def to_arrow(obj, table=None) -> pa.Table:
     """Materialize a step return value into a pyarrow Table.
 
-    Accepts a polars/pandas DataFrame or pyarrow Table (DuckDB relations are
-    intercepted by `write_part` and streamed, never materialized).
+    Accepts a pyarrow Table, a dict of columns (ndarrays — 2D+ become
+    fixed-size-list columns — lists, or arrow arrays), a numpy structured or
+    bare array (mapped onto `table`'s declared columns), or a polars/pandas
+    DataFrame. numpy dtypes are preserved, so a float32 array stays FLOAT.
+    DuckDB relations are intercepted by `write_part` and streamed, never
+    materialized.
+
+    >>> import numpy as np
+    >>> to_arrow({"x": np.arange(2, dtype=np.int16)}).schema.types
+    [DataType(int16)]
+    >>> str(to_arrow({"v": np.zeros((2, 3), dtype=np.float32)}).schema.types[0])
+    'fixed_size_list<item: float>[3]'
     """
     if isinstance(obj, pa.Table):
         return obj
+    if np is not None and isinstance(obj, np.ndarray):
+        return _ndarray_table(obj, table)
+    if isinstance(obj, dict):
+        return pa.table({n: _column_array(n, v) for n, v in obj.items()})
     if hasattr(obj, "to_arrow"):  # polars
         return obj.to_arrow()
     if hasattr(obj, "__dataframe__"):  # pandas
@@ -202,7 +267,9 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None):
     the data infers. `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak.
     """
-    src = data.to_arrow_reader(BATCH_ROWS) if isinstance(data, duckdb.DuckDBPyRelation) else to_arrow(data)
+    # capability dispatch: covers relations and StepInput (which delegates
+    # to_arrow_reader to its relation) without per-wrapper unwrap branches
+    src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
     if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
     con = _local_connection(threads, memory_mb)
@@ -292,6 +359,63 @@ def parse_key(prefix, key):
     if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
         return parts[0], parts[3]
     return None
+
+
+def _np_column(name, arr):
+    """ndarray from an arrow (chunked) array; list columns stack to (N, d, ...)."""
+    if isinstance(arr, pa.ChunkedArray):
+        arr = arr.combine_chunks()
+    if arr.null_count:
+        raise ValueError(
+            f"column '{name}' has NULLs, which have no ndarray slot; "
+            "filter them out first (or materialize with .to_arrow_table())"
+        )
+    t = arr.type
+    if pa.types.is_fixed_size_list(t):
+        d = t.list_size
+    elif pa.types.is_list(t) or pa.types.is_large_list(t):
+        lengths = arr.value_lengths().to_numpy(zero_copy_only=False)
+        d = int(lengths[0]) if len(lengths) else 0
+        if (lengths != d).any():
+            raise ValueError(
+                f"column '{name}' is ragged (list lengths {lengths.min()}..{lengths.max()}); "
+                ".np() needs a rectangular column"
+            )
+    else:
+        return arr.to_numpy(zero_copy_only=False)
+    inner = _np_column(name, arr.flatten())
+    return inner.reshape(len(arr), d, *inner.shape[1:])
+
+
+class StepInput:
+    """A step's input: the lazy DuckDB relation plus a numpy accessor.
+
+    Everything a relation offers delegates through (`.filter`, `.aggregate`,
+    `.project`, `.df()`, ...) and returns plain relations. `.np()` is the one
+    addition, and it MATERIALIZES what it touches — the relation itself stays
+    lazy, so filter/project first when the input is large.
+    """
+
+    def __init__(self, rel):
+        self.rel = rel
+
+    def __getattr__(self, name):
+        return getattr(self.rel, name)
+
+    def np(self, column=None):
+        """One column as an ndarray, or every column as {name: ndarray}.
+
+        Scalar columns come back 1D with their stored dtype (FLOAT -> float32);
+        rectangular list columns stack to (N, d, ...). Ragged or NULL-bearing
+        columns raise rather than degrade to object arrays.
+        """
+        if np is None:
+            raise ModuleNotFoundError("numpy is required for .np(); pip install numpy")
+        if column is None:  # one scan for all columns, not one pipeline per column
+            tbl = self.rel.to_arrow_table()
+            return {n: _np_column(n, tbl.column(i)) for i, n in enumerate(tbl.column_names)}
+        arr = self.rel.project(f'"{column}"').to_arrow_table().column(0)
+        return _np_column(column, arr)
 
 
 def input_relation(con, cfg, keys):

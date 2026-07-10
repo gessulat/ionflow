@@ -14,6 +14,7 @@ from .config import Config
 from .git import commit_or_dirty, require_clean
 from .storage import (
     Layout,
+    StepInput,
     connect,
     empty_relation,
     input_relation,
@@ -65,10 +66,10 @@ def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
     dag = flow.__class__._dag
     kwargs = {
-        dep: _step_input(
+        dep: StepInput(_step_input(
             con, client, cfg, layout, run_id, dep, kind, branch,
             dag.steps[dep].output_table,
-        )
+        ))
         for dep, kind in step.param_kinds.items()
     }
     return step.method(flow, **kwargs)

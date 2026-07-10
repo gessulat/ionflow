@@ -4,6 +4,11 @@ import typing
 
 import pyarrow as pa
 
+try:  # numpy is optional in core; when installed, np scalar types work as annotations
+    import numpy as np
+except ModuleNotFoundError:  # pragma: no cover
+    np = None
+
 _DUCKDB = {
     int: "BIGINT",
     float: "DOUBLE",
@@ -24,9 +29,58 @@ _ARROW = {
     dt.date: pa.date32(),
 }
 
+if np is not None:
+    # Narrow numerics matter for measurement data: a float32 point cloud stored
+    # as DOUBLE doubles its size on S3 and in every downstream read.
+    _NUMPY = {
+        np.bool_: ("BOOLEAN", pa.bool_()),
+        np.int8: ("TINYINT", pa.int8()),
+        np.int16: ("SMALLINT", pa.int16()),
+        np.int32: ("INTEGER", pa.int32()),
+        np.int64: ("BIGINT", pa.int64()),
+        np.uint8: ("UTINYINT", pa.uint8()),
+        np.uint16: ("USMALLINT", pa.uint16()),
+        np.uint32: ("UINTEGER", pa.uint32()),
+        np.uint64: ("UBIGINT", pa.uint64()),
+        np.float32: ("FLOAT", pa.float32()),
+        np.float64: ("DOUBLE", pa.float64()),
+    }
+    _DUCKDB |= {t: d for t, (d, _) in _NUMPY.items()}
+    _ARROW |= {t: a for t, (_, a) in _NUMPY.items()}
+
+
+class Shaped:
+    """Marker base for fixed-shape array columns; build annotations with `shaped(...)`."""
+
+    dtype: typing.ClassVar
+    shape: typing.ClassVar[tuple]
+
+
+def shaped(dtype, *shape):
+    """Fixed-shape array column: `spectrum: shaped(np.float32, 4096)`.
+
+    Compiles to a DuckDB fixed array / arrow fixed_size_list, so a row with
+    the wrong number of elements fails the write instead of persisting.
+    Parquet has no fixed-size logical type — the shape is enforced at write,
+    and reads (views, `.np()`) see an ordinary list column.
+
+    >>> _duckdb_type(shaped(float, 3))
+    'DOUBLE[3]'
+    >>> _duckdb_type(shaped(float, 4, 3))  # cells are (4, 3) arrays
+    'DOUBLE[3][4]'
+    """
+    if not shape or not all(isinstance(n, int) and n > 0 for n in shape):
+        raise TypeError("shaped(dtype, *shape) needs one or more positive int dimensions")
+    name = f"shaped_{getattr(dtype, '__name__', dtype)}_{'x'.join(map(str, shape))}"
+    return type(name, (Shaped,), {"dtype": dtype, "shape": shape})
+
+
+def _is_shaped(dtype):
+    return isinstance(dtype, type) and issubclass(dtype, Shaped)
+
 
 def _duckdb_type(dtype):
-    """DuckDB type for a scalar or (nested) list annotation.
+    """DuckDB type for a scalar, (nested) list, or fixed-shape annotation.
 
     List elements are always nullable (DuckDB/Arrow semantics), so
     `list[T | None]` is unsupported rather than redundant.
@@ -35,13 +89,32 @@ def _duckdb_type(dtype):
     'DOUBLE[]'
     >>> _duckdb_type(list[list[int]])
     'BIGINT[][]'
+    >>> import numpy as np
+    >>> _duckdb_type(list[np.float32])
+    'FLOAT[]'
     """
+    if _is_shaped(dtype):  # DuckDB array suffixes read inside-out: innermost first
+        return _duckdb_type(dtype.dtype) + "".join(f"[{n}]" for n in reversed(dtype.shape))
     if typing.get_origin(dtype) is list:
         return _duckdb_type(typing.get_args(dtype)[0]) + "[]"
     return _DUCKDB[dtype]
 
 
+def _persisted_type(dtype):
+    """DuckDB type as parquet round-trips it: fixed arrays come back as plain lists."""
+    if _is_shaped(dtype):
+        return _persisted_type(dtype.dtype) + "[]" * len(dtype.shape)
+    if typing.get_origin(dtype) is list:
+        return _persisted_type(typing.get_args(dtype)[0]) + "[]"
+    return _DUCKDB[dtype]
+
+
 def _arrow_type(dtype):
+    if _is_shaped(dtype):
+        t = _arrow_type(dtype.dtype)
+        for n in reversed(dtype.shape):
+            t = pa.list_(t, n)
+        return t
     if typing.get_origin(dtype) is list:
         return pa.list_(_arrow_type(typing.get_args(dtype)[0]))
     return _ARROW[dtype]
@@ -87,6 +160,25 @@ class Column:
 
     def duckdb_type(self):
         return _duckdb_type(self.dtype)
+
+    def persisted_type(self):
+        """Type as parquet round-trips it: fixed arrays come back as plain lists.
+
+        The write-path cast uses `duckdb_type()` (shape enforced there); views
+        and the drift check must compare against what a reader actually sees.
+
+        >>> Column(shaped(float, 3)).persisted_type()
+        'DOUBLE[]'
+        """
+        return _persisted_type(self.dtype)
+
+    def is_vector(self):
+        """True when cells are arrays (`list[T]` / `shaped(...)`), not scalars.
+
+        >>> Column(list[float]).is_vector(), Column(float).is_vector()
+        (True, False)
+        """
+        return typing.get_origin(self.dtype) is list or _is_shaped(self.dtype)
 
     def ddl(self, name):
         parts = [name, self.duckdb_type()]
