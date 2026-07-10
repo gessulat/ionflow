@@ -4,6 +4,7 @@ import uuid
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
+from multiprocessing import get_context
 
 from . import ledger, metrics
 from .config import Config
@@ -124,9 +125,17 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "params": params,
         "proto": flow_cls.prototype,
     }
-    pool = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+    if use_processes:
+        # spawn, never fork: the orchestrator is multi-threaded here (sampler,
+        # DuckDB workers), and non-branch steps ran user code in this process,
+        # so forked children inherit OpenMP/BLAS/CUDA state mid-flight (hangs,
+        # "cannot re-initialize CUDA"). Spawn on 3.12/3.13 Linux too, where the
+        # stdlib default is still fork.
+        pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"))
+    else:
+        pool = ThreadPoolExecutor(max_workers=max_workers)
     done, error, samples = [], None, []
-    with pool(max_workers=max_workers) as ex:
+    with pool as ex:
         futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
         for fut in as_completed(futures):
             try:
