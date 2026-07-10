@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+import os
 import uuid
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -72,12 +73,20 @@ def _import(file, name):
 
 
 def _branch_worker(payload):
+    threads = payload["threads"]
+    if payload["sample"]:  # own process: cap BLAS/OpenMP before the flow's imports
+        # spawn imports numpy/torch fresh in this process, so the caps take effect;
+        # setdefault keeps any explicit user setting. Never in thread mode — that
+        # would mutate the orchestrator's environment.
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ.setdefault(var, str(threads))
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
     # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
     # under proto's dirty-tree freedom) must not split the run across namespaces
     layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
     con = compute_connection()
+    con.execute(f"SET threads TO {threads}")  # else every worker's DuckDB claims all cores
     client = s3_client(cfg)
     flow = flow_cls()
     flow.config = cfg
@@ -114,6 +123,8 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
     return their metric samples with the result, so the orchestrator can write
     one metrics object per run.
     """
+    cores = os.cpu_count() or 1
+    workers = min(max_workers or cores, len(todo))
     payload = {
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
@@ -124,6 +135,7 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "retries": retries,
         "params": params,
         "proto": flow_cls.prototype,
+        "threads": max(1, cores // workers),  # workers x per-worker threads ~ cores
     }
     if use_processes:
         # spawn, never fork: the orchestrator is multi-threaded here (sampler,
