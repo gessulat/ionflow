@@ -125,9 +125,13 @@ Wide or generated schemas don't have to be written out by hand —
 `Table.make("FullAnnotation", {"peptide": str, **{f"frag_{i}": float | None for i in range(200)}})`
 builds the same kind of class programmatically.
 
-Step inputs arrive as **DuckDB relations**, so you can stay in SQL (`.aggregate`,
-`.filter`, `.project`) or drop to a DataFrame with `.pl()` / `.df()` / `.to_arrow_table()`
-and return any of those.
+Step inputs arrive as **lazy DuckDB relations** over the Parquet on S3 — column and
+filter pushdown included, so a step only pulls what its query touches and memory
+stays at the query's working set, not the input's size. Stay in SQL (`.aggregate`,
+`.filter`, `.project`) or materialize with `.pl()` / `.df()` / `.to_arrow_table()`
+and return any of those. Outputs stream too: validated and written to a local
+temp file, then multipart-uploaded — a step's output can exceed RAM and S3's
+5GB single-PUT limit.
 
 ## Run it
 
@@ -294,6 +298,11 @@ concurrent appends.
 
 - **DuckDB-first**, DataFrame-optional. polars/pandas are conveniences, not dependencies.
 - **One level of fan-out** (kept deliberately small).
+- Reading from S3 uses DuckDB's `httpfs` extension, downloaded automatically on
+  first use (one-time, per DuckDB version) — the very first run needs network
+  access to the DuckDB extension repo.
+- Parallel branch workers split the machine fairly: each worker's DuckDB is capped
+  to its share of cores and memory and spills to disk instead of OOMing.
 - **Backends**: AWS S3, MinIO (recent), Cloudflare R2. Backblaze B2 is unsupported (no
   `If-Match` conditional writes).
 - Set custom ledger columns on non-branch (main-process) steps; branch steps run in

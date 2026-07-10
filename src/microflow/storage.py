@@ -1,6 +1,8 @@
 import datetime as dt
 import io
-from concurrent.futures import ThreadPoolExecutor
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from itertools import batched
@@ -14,6 +16,11 @@ from botocore.exceptions import ClientError
 
 METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
+BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
+
+
+class ConstraintViolation(RuntimeError):
+    """A step output violated its declared Table constraints (nothing uploaded)."""
 
 
 def utc_now():
@@ -112,19 +119,22 @@ def uri(cfg, key):
     return f"s3://{cfg.bucket}/{key}"
 
 
-def compute_connection():
-    """In-memory DuckDB connection for validation/compute; no S3 access."""
-    return duckdb.connect()
-
-
-def connect(cfg):
+def connect(cfg, threads=None, memory_mb=None):
     """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
 
     Uses explicit keys when the config carries them (MinIO/tests), otherwise the
-    standard AWS credential chain.
+    standard AWS credential chain. Every connection gets a private temp_directory
+    so operators spill to disk instead of erroring; `threads` / `memory_mb` cap
+    the instance for pooled workers (each connection is its own DuckDB instance
+    that would otherwise claim all cores and 80% of RAM).
     """
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs")
+    con.execute(f"SET temp_directory = '{tempfile.mkdtemp(prefix='microflow-duck-')}'")
+    if threads:
+        con.execute(f"SET threads TO {threads}")
+    if memory_mb:
+        con.execute(f"SET memory_limit = '{memory_mb}MB'")
     parts = ["TYPE s3", f"REGION '{cfg.region}'"]
     if cfg.access_key:
         parts += [f"KEY_ID '{cfg.access_key}'", f"SECRET '{cfg.secret_key}'"]
@@ -157,28 +167,74 @@ def to_arrow(obj) -> pa.Table:
     raise TypeError(f"cannot convert {type(obj)} to a table")
 
 
-def write_part(con, client, bucket, key, data, table):
-    """Validate `data` against `table` schema, then upload parquet via boto3.
+def _constraint_scans(table):
+    """(label, count-of-violations SQL) per declared constraint, for one scan.
 
-    DuckDB enforces types / NOT NULL / CHECK by inserting into a temp table
-    built from the schema DDL; the write itself goes through boto3 (httpfs's
-    write path is unreliable against some S3 stores). `table=None` (untyped
-    prototype step) skips validation — the schema is whatever the data infers.
+    A CHECK passes on NULL (SQL semantics), so violations are `(expr) IS FALSE`;
+    PRIMARY KEY NULLs are caught by its NOT NULL, so DISTINCT-counting handles
+    uniqueness alone (the row-value form covers composite keys).
     """
-    if table is None:
-        put_parquet(client, bucket, key, to_arrow(data))
+    scans = []
+    for n, c in table.columns().items():
+        if not c.nullable:
+            scans.append((f"{n} NOT NULL", f"count(*) FILTER (WHERE {n} IS NULL)"))
+        if c.check:
+            scans.append((f"CHECK ({c.check})", f"count(*) FILTER (WHERE ({c.check}) IS FALSE)"))
+    if pk := [n for n, c in table.columns().items() if c.primary_key]:
+        cols = ", ".join(pk)
+        scans.append((f"PRIMARY KEY ({cols})", f"count(*) - count(DISTINCT ({cols}))"))
+    return scans
+
+
+def _validate_part(con, table, path, key):
+    """One aggregate scan of the written file; raise listing every violation."""
+    scans = _constraint_scans(table)
+    if not scans:
         return
-    con.register("_src", to_arrow(data))
+    counts = con.execute(
+        f"SELECT {', '.join(sql for _, sql in scans)} FROM read_parquet('{path}')"
+    ).fetchone()
+    if bad := [f"{label}: {n} rows" for (label, _), n in zip(scans, counts, strict=True) if n]:
+        raise ConstraintViolation(f"{key}: " + "; ".join(bad))
+
+
+def write_part(client, bucket, key, data, table):
+    """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.
+
+    The COPY runs on a fresh local connection fed by an arrow batch reader —
+    its pipeline must never read httpfs (COPY over a partially consumed httpfs
+    source deadlocks), and the write itself goes through boto3 (httpfs's write
+    path is unreliable against some S3 stores; upload_file does multipart, so
+    parts can exceed S3's 5GB single-PUT cap). Types are enforced by the cast
+    projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
+    `table=None` (untyped prototype step) skips both — the schema is whatever
+    the data infers.
+    """
+    if isinstance(data, duckdb.DuckDBPyRelation):
+        names, src = data.columns, data.to_arrow_reader(BATCH_ROWS)
+    else:
+        src = to_arrow(data)
+        names = src.column_names
+    if table is not None and (missing := set(table.columns()) - set(names)):
+        raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
+    con = duckdb.connect()
+    con.register("_src", src)
+    if table is None:
+        select = "SELECT * FROM _src"
+    else:
+        cols = ", ".join(f"CAST({n} AS {c.duckdb_type()}) AS {n}" for n, c in table.columns().items())
+        select = f"SELECT {cols} FROM _src"
+    tmp_dir = tempfile.mkdtemp(prefix="microflow-part-")
     try:
-        cols = ", ".join(table.columns())
-        con.execute("DROP TABLE IF EXISTS _v")
-        con.execute(table.ddl("_v", temp=True))
-        con.execute(f"INSERT INTO _v ({cols}) SELECT {cols} FROM _src")
-        out = con.sql("SELECT * FROM _v").to_arrow_table()
-        con.execute("DROP TABLE _v")
+        path = os.path.join(tmp_dir, "part.parquet")
+        con.execute(
+            f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})"
+        )
+        if table is not None:
+            _validate_part(con, table, path, key)
+        client.upload_file(path, bucket, key)
     finally:
-        con.unregister("_src")
-    put_parquet(client, bucket, key, out)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def put_parquet(client, bucket, key, table, **extra):
@@ -253,13 +309,14 @@ def parse_key(prefix, key):
     return None
 
 
-def load_relation(con, client, bucket, keys):
-    """In-memory DuckDB relation over the given parts (read via boto3)."""
-    if len(keys) == 1:
-        return con.from_arrow(get_table(client, bucket, keys[0]))
-    with ThreadPoolExecutor(max_workers=16) as ex:  # independent GETs, IO-bound
-        tables = list(ex.map(lambda k: get_table(client, bucket, k), keys))
-    return con.from_arrow(pa.concat_tables(tables))
+def input_relation(con, cfg, keys):
+    """Lazy httpfs relation over the given part keys (pushdown, no download).
+
+    hive_partitioning stays off: part paths contain `run_id=...`, which would
+    otherwise inject a run_id column into step inputs.
+    """
+    uris = [uri(cfg, k) for k in keys]
+    return con.read_parquet(uris if len(uris) > 1 else uris[0], hive_partitioning=False)
 
 
 def empty_relation(con, table):

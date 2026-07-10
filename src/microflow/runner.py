@@ -7,15 +7,17 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from dataclasses import asdict
 from multiprocessing import get_context
 
+import psutil
+
 from . import ledger, metrics
 from .config import Config
 from .git import commit_or_dirty, require_clean
 from .storage import (
     Layout,
-    compute_connection,
+    connect,
     empty_relation,
+    input_relation,
     list_keys,
-    load_relation,
     s3_client,
     utc_now,
     write_part,
@@ -50,7 +52,7 @@ def _input_relation(con, client, cfg, layout, run_id, dep, kind, branch, dep_tab
             return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
-    return load_relation(con, client, cfg.bucket, keys)
+    return input_relation(con, cfg, keys)
 
 
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
@@ -85,8 +87,7 @@ def _branch_worker(payload):
     # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
     # under proto's dirty-tree freedom) must not split the run across namespaces
     layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
-    con = compute_connection()
-    con.execute(f"SET threads TO {threads}")  # else every worker's DuckDB claims all cores
+    con = connect(cfg, threads=threads, memory_mb=payload["memory_mb"])
     client = s3_client(cfg)
     flow = flow_cls()
     flow.config = cfg
@@ -107,7 +108,7 @@ def _branch_worker(payload):
         # transient step errors count too, and boto3 already retries at the HTTP layer
         try:
             result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-            write_part(con, client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
+            write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result, step.output_table)
             break
         except Exception:
             if attempt == retries:
@@ -136,6 +137,8 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "params": params,
         "proto": flow_cls.prototype,
         "threads": max(1, cores // workers),  # workers x per-worker threads ~ cores
+        # workers x per-worker memory ~ DuckDB's own default budget (80% of RAM)
+        "memory_mb": int(psutil.virtual_memory().total * 0.8) // workers // 2**20,
     }
     if use_processes:
         # spawn, never fork: the orchestrator is multi-threaded here (sampler,
@@ -169,7 +172,9 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
     client = s3_client(config)
-    con = compute_connection()
+    # connecting here also installs httpfs once, before any worker pool spawns
+    # (N cold workers would otherwise race the extension download)
+    con = connect(config)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
@@ -268,14 +273,17 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             elif step.is_fanout:
                 if not _count_of(completed, name):  # skip if a prior run already produced it
                     sampler.mark(name)
-                    items = list(_call(con, client, config, layout, flow, step, run_id, None))
-                    for i, item in enumerate(items):
-                        write_part(con, client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
-                        completed.add(_key(name, i))
+                    keys = []
+                    for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
+                        write_part(client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
+                        keys.append(_key(name, i))
+                    # all-or-nothing: a partial fan-out must not look resumable,
+                    # or resume would silently run with fewer branches
+                    completed.update(keys)
             elif _key(name, 0) not in completed:
                 sampler.mark(name)
                 result = _call(con, client, config, layout, flow, step, run_id, None)
-                write_part(con, client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
+                write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
                 completed.add(_key(name, 0))
             flush()
 

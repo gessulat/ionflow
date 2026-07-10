@@ -1,6 +1,5 @@
 import datetime as dt
 
-import duckdb
 import pyarrow as pa
 import pytest
 
@@ -29,11 +28,10 @@ def test_write_part_roundtrips_list_columns(s3cfg):
         id: int
         vec: list[float]
 
-    con = storage.compute_connection()
     client = storage.s3_client(s3cfg)
     data = pa.table({"id": [1, 2], "vec": [[1.0, 2.0], [3.0]]})
     key = "mf/E/runs/run_id=r/e/part_0.parquet"
-    storage.write_part(con, client, s3cfg.bucket, key, data, Emb)
+    storage.write_part(client, s3cfg.bucket, key, data, Emb)
     assert storage.get_table(client, s3cfg.bucket, key).column("vec").to_pylist() == [
         [1.0, 2.0],
         [3.0],
@@ -62,7 +60,7 @@ def test_write_read_roundtrip(s3cfg):
     con = storage.connect(s3cfg)
     client = storage.s3_client(s3cfg)
     storage.write_part(
-        con, client, s3cfg.bucket,
+        client, s3cfg.bucket,
         "mf/ETL/runs/run_id=r1/features/part_0.parquet", _data(), Features,
     )
     rel = con.sql(storage.read_parquet_sql(storage.uri(s3cfg, "mf/ETL/runs/*/features/*.parquet")))
@@ -73,22 +71,20 @@ def test_write_read_roundtrip(s3cfg):
 
 
 def test_check_constraint_rejects_bad_row(s3cfg):
-    con = storage.connect(s3cfg)
     client = storage.s3_client(s3cfg)
     bad = pa.table({"id": [1], "ts": [dt.datetime(2026, 1, 1)], "score": [-1.0]})
-    with pytest.raises(duckdb.ConstraintException):
+    with pytest.raises(storage.ConstraintViolation):
         storage.write_part(
-            con, client, s3cfg.bucket,
+            client, s3cfg.bucket,
             "mf/ETL/runs/run_id=r2/features/part_0.parquet", bad, Features,
         )
 
 
 def test_not_null_rejects(s3cfg):
-    con = storage.connect(s3cfg)
     client = storage.s3_client(s3cfg)
     bad = pa.table({"id": [1], "ts": [None], "score": [0.1]})
-    with pytest.raises(duckdb.ConstraintException):
+    with pytest.raises(storage.ConstraintViolation):
         storage.write_part(
-            con, client, s3cfg.bucket,
+            client, s3cfg.bucket,
             "mf/ETL/runs/run_id=r3/features/part_0.parquet", bad, Features,
         )

@@ -76,13 +76,26 @@ microflow query myproj.flows:Training \
   allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume, in-worker branch retries (`branch_retries`), git gate,
-  run status (running|complete|failed).
+  run status (running|complete|failed). Step inputs are **lazy httpfs relations**
+  (pushdown; memory = query working set, not input size) — always read with
+  `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker
+  DuckDBs are capped (`threads`, `memory_limit` ~ 80% RAM / workers) + spill
+  `temp_directory`. A fan-out counts as completed only when ALL parts are written
+  (partial fan-out must not look resumable). The orchestrator connects before
+  spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
+  never races across cold workers. Missing/unreadable parts now surface lazily
+  inside the step or at write time (duckdb `IOException`), not at input binding.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
   `_metrics.parquet` per run, written by the orchestrator on success AND failure,
   flushed every 60s mid-run (heartbeat + crash-durable metrics).
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
-  (httpfs write path is unreliable); validation = temp table from DDL, then PUT.
+  (httpfs write path is unreliable). `write_part` streams: cast-projection COPY
+  to a local temp file (zstd) on a **fresh local connection**, one constraint
+  scan (NOT NULL / CHECK / PK) of that file, then `upload_file` (multipart —
+  parts may exceed S3's 5GB single-PUT cap). A COPY pipeline must NEVER read
+  httpfs (deadlocks on partially consumed sources); relations are drained
+  through `to_arrow_reader` instead. Violations raise `ConstraintViolation`.
 - `ledger.py`  — append-only `ledger.parquet` via S3 conditional-write (If-Match) CAS;
   per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz in DuckDB).
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
