@@ -4,6 +4,11 @@ import typing
 
 import pyarrow as pa
 
+try:  # numpy is optional in core; when installed, np scalar types work as annotations
+    import numpy as np
+except ModuleNotFoundError:  # pragma: no cover
+    np = None
+
 _DUCKDB = {
     int: "BIGINT",
     float: "DOUBLE",
@@ -24,6 +29,25 @@ _ARROW = {
     dt.date: pa.date32(),
 }
 
+if np is not None:
+    # Narrow numerics matter for measurement data: a float32 point cloud stored
+    # as DOUBLE doubles its size on S3 and in every downstream read.
+    _NUMPY = {
+        np.bool_: ("BOOLEAN", pa.bool_()),
+        np.int8: ("TINYINT", pa.int8()),
+        np.int16: ("SMALLINT", pa.int16()),
+        np.int32: ("INTEGER", pa.int32()),
+        np.int64: ("BIGINT", pa.int64()),
+        np.uint8: ("UTINYINT", pa.uint8()),
+        np.uint16: ("USMALLINT", pa.uint16()),
+        np.uint32: ("UINTEGER", pa.uint32()),
+        np.uint64: ("UBIGINT", pa.uint64()),
+        np.float32: ("FLOAT", pa.float32()),
+        np.float64: ("DOUBLE", pa.float64()),
+    }
+    _DUCKDB |= {t: d for t, (d, _) in _NUMPY.items()}
+    _ARROW |= {t: a for t, (_, a) in _NUMPY.items()}
+
 
 def _duckdb_type(dtype):
     """DuckDB type for a scalar or (nested) list annotation.
@@ -35,10 +59,22 @@ def _duckdb_type(dtype):
     'DOUBLE[]'
     >>> _duckdb_type(list[list[int]])
     'BIGINT[][]'
+    >>> import numpy as np
+    >>> _duckdb_type(list[np.float32])
+    'FLOAT[]'
     """
     if typing.get_origin(dtype) is list:
         return _duckdb_type(typing.get_args(dtype)[0]) + "[]"
     return _DUCKDB[dtype]
+
+
+def is_vector(dtype):
+    """True for column types whose cells are arrays (`list[T]`), not scalars.
+
+    >>> is_vector(list[float]), is_vector(float)
+    (True, False)
+    """
+    return typing.get_origin(dtype) is list
 
 
 def _arrow_type(dtype):
