@@ -14,8 +14,12 @@ class Features(Table):
     score: float = check("score >= 0")
 
 
-def test_connect_uses_credential_chain_without_keys():
+def test_connect_uses_credential_chain_without_keys(monkeypatch):
     # No explicit keys -> DuckDB secret should use the AWS credential chain, not crash.
+    # CREATE SECRET validates the chain eagerly, so pin env credentials for it to
+    # find — CI runners have none anywhere in the chain.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "chain")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "chain")
     con = storage.connect(Config(bucket="b"))
     provider = con.sql(
         "SELECT provider FROM duckdb_secrets() WHERE name = 's'"
