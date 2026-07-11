@@ -66,7 +66,10 @@ microflow query myproj.flows:Training \
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` / `= field(...)`);
   compiles to DuckDB DDL + pyarrow schema. Column types must be importable at module
-  scope (get_type_hints).
+  scope (get_type_hints). numpy scalar types work as annotations (np.float32 -> FLOAT —
+  narrow dtypes persist); `shaped(dtype, *shape)` = fixed array, enforced by the write
+  cast but round-tripped by parquet as a plain list — read-side comparisons (views,
+  drift) must use `Column.persisted_type()`, not `duckdb_type()`.
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
@@ -103,6 +106,11 @@ microflow query myproj.flows:Training \
   parts may exceed S3's 5GB single-PUT cap). A COPY pipeline must NEVER read
   httpfs (deadlocks on partially consumed sources); relations are drained
   through `to_arrow_reader` instead. Violations raise `ConstraintViolation`.
+  `to_arrow` auto-converts numpy step returns (dict of ndarrays — 2D+ nest as
+  fixed-size lists — structured arrays, bare arrays mapped onto declared columns;
+  complex rejected). `StepInput` wraps every step input: delegates to the lazy
+  relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
+  is optional in core (guarded imports), a dev dep for tests.
 - `ledger.py`  — append-only `ledger.parquet` via S3 conditional-write (If-Match) CAS;
   per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz in DuckDB).
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
