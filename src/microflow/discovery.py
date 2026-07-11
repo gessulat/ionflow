@@ -6,7 +6,7 @@ from .flow import Flow
 
 
 def discover_flows(package):
-    """Import `package` and all its submodules, returning its {name: Flow subclass}.
+    """Import `package` and all its submodules, returning its {flow_id: Flow subclass}.
 
     Registration is a side effect of importing (see Flow.__init_subclass__), so
     this walks the whole package to catch flows split across modules, then keeps
@@ -77,12 +77,12 @@ def schema_drift(flow_cls, con, config, samples):
         }
         for col, dtype in declared.items():
             if col not in persisted:
-                issues.append(f"{flow_cls.__name__}.{name}: missing column '{col}'")
+                issues.append(f"{flow_cls.flow_id()}.{name}: missing column '{col}'")
             elif persisted[col] != dtype:
-                issues.append(f"{flow_cls.__name__}.{name}: '{col}' {persisted[col]}→{dtype}")
+                issues.append(f"{flow_cls.flow_id()}.{name}: '{col}' {persisted[col]}→{dtype}")
         for col in persisted:
             if col not in declared:
-                issues.append(f"{flow_cls.__name__}.{name}: unexpected column '{col}'")
+                issues.append(f"{flow_cls.flow_id()}.{name}: unexpected column '{col}'")
     return issues
 
 

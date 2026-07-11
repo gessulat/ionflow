@@ -288,7 +288,7 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     peaks = con.sql(f"SELECT peak FROM peaks WHERE run_id = '{run_id}'").fetchall()
     assert all(p > 0 for (p,) in peaks)
     # narrow dtypes survived the whole pipeline onto S3 (fixed shape persists as list)
-    layout = Layout(s3cfg.prefix, "SignalFlow")
+    layout = Layout.for_flow(s3cfg, SignalFlow)
     schema = get_table(s3_client(s3cfg), s3cfg.bucket, layout.part(run_id, "spectra")).schema
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
@@ -296,4 +296,4 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     from microflow import discovery
 
     _, samples, _ = discovery.scan_runs(s3cfg)
-    assert discovery.schema_drift(SignalFlow, con, s3cfg, samples["SignalFlow"]) == []
+    assert discovery.schema_drift(SignalFlow, con, s3cfg, samples[SignalFlow.flow_id()]) == []

@@ -92,9 +92,11 @@ def _branch_worker(payload):
             os.environ.setdefault(var, str(threads))
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
-    # namespace frozen at run start: a mid-run edit flipping `prototype` (routine
-    # under proto's dirty-tree freedom) must not split the run across namespaces
-    layout = Layout(cfg.prefix, flow_cls.__name__, payload["proto"])
+    # identity and namespace travel in the payload, never derived here: the
+    # re-imported class's __module__ is the loader's ("_mf_flow"), so its own
+    # flow_id() is wrong; and a mid-run edit flipping `prototype` must not
+    # split the run across namespaces
+    layout = Layout(cfg.prefix, payload["flow_id"], payload["proto"])
     con = connect(cfg, threads=threads, memory_mb=memory_mb)
     client = s3_client(cfg)
     flow = flow_cls()
@@ -105,40 +107,53 @@ def _branch_worker(payload):
     run_id, branch = payload["run_id"], payload["branch"]
     # own sampler only in a separate process; in thread mode the orchestrator's
     # sampler already covers this process (a second one would double-count CPU).
-    # Never with flush=: _metrics.parquet has ONE writer (the orchestrator, no
-    # CAS on that key) — branch samples return through the pool result channel.
+    # Each worker flushes to its OWN metrics key (one writer per object, no CAS),
+    # so branch samples survive a run killed mid-branch up to the last flush.
     sampler = None
     if payload["sample"]:
-        sampler = metrics.Sampler().start()
+        metrics_key = layout.metrics_branch(run_id, step.name, branch)
+
+        def flush_metrics(rows):
+            metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+
+        sampler = metrics.Sampler(flush=flush_metrics).start()
         sampler.mark(step.name, branch)
     retries = payload["retries"]
-    for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
-        # transient step errors count too, and boto3 already retries at the HTTP layer
-        try:
-            result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-            write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
-                       step.output_table, threads=threads, memory_mb=memory_mb)
-            break
-        except Exception:
-            if attempt == retries:
-                raise
-    return branch, sampler.stop() if sampler else []
+    try:
+        for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
+            # transient step errors count too, and boto3 already retries at the HTTP layer
+            try:
+                result = _call(con, client, cfg, layout, flow, step, run_id, branch)
+                write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
+                           step.output_table, threads=threads, memory_mb=memory_mb)
+                break
+            except Exception:
+                if attempt == retries:
+                    raise
+    finally:
+        if sampler:  # final superset write, on failure too — that's where perf data matters most
+            try:
+                flush_metrics(sampler.stop())
+            except Exception:  # noqa: BLE001 — metrics must never mask the branch's outcome
+                pass
+    return branch
 
 
 def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries, params):
-    """Run branches in parallel; return (succeeded indices, first error, samples).
+    """Run branches in parallel; return (succeeded indices, first error).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
-    branches' parts durably on S3 for a later resume to reuse. Branch workers
-    return their metric samples with the result, so the orchestrator can write
-    one metrics object per run.
+    branches' parts durably on S3 for a later resume to reuse. Process-mode
+    workers write their own per-branch metrics objects; the `metrics` view
+    unions them with the orchestrator's.
     """
     cores = os.cpu_count() or 1
     workers = min(max_workers or cores, len(todo))
     payload = {
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
-        "flow": flow_cls.__name__,
+        "flow": flow_cls.__name__,  # for getattr after the file import
+        "flow_id": flow_cls.flow_id(),  # for the Layout; see _branch_worker
         "step": step.name,
         "run_id": run_id,
         "sample": use_processes,
@@ -153,24 +168,26 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         # so forked children inherit OpenMP/BLAS/CUDA state mid-flight (hangs,
         # "cannot re-initialize CUDA"). Spawn on 3.12/3.13 Linux too, where the
         # stdlib default is still fork.
-        pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"))
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
     else:
-        pool = ThreadPoolExecutor(max_workers=max_workers)
-    done, error, samples = [], None, []
+        pool = ThreadPoolExecutor(max_workers=workers)
+    done, error = [], None
     with pool as ex:
         futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
         for fut in as_completed(futures):
             try:
-                branch, rows = fut.result()
-                done.append(branch)
-                samples += rows
+                done.append(fut.result())
             except Exception as e:  # noqa: BLE001 — surface the first, keep the rest
                 error = error or e
-    return done, error, samples
+    return done, error
+
+
+class CommitDriftError(RuntimeError):
+    """Resume refused: HEAD differs from the origin run's commit."""
 
 
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0, params=None):
+        branch_retries=0, params=None, allow_commit_drift=False):
     if origin_run_id and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
@@ -194,6 +211,14 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
+            # a mixed-commit run must be a visible, deliberate choice; prototypes
+            # already relinquish provenance, so they stay warn-only
+            if not (allow_commit_drift or flow_cls.prototype):
+                raise CommitDriftError(
+                    f"origin run {origin_run_id} is at commit {origin.get('commit')}, HEAD is "
+                    f"{commit}; reused steps would keep old-code outputs. Pass "
+                    "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
+                )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         def copy_part(k):
             name, br = _split(k)
@@ -250,11 +275,10 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
 
     sampler = metrics.Sampler(flush=flush_metrics).start()
-    branch_samples = []
 
     def write_metrics():
         try:
-            flush_metrics(sampler.stop() + branch_samples)
+            flush_metrics(sampler.stop())
         except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
             pass
 
@@ -269,12 +293,11 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)
                     sampler.mark(None if use_processes else name)
-                    done, error, samples = _run_branches(
+                    done, error = _run_branches(
                         flow_cls, config, run_id, step, todo, max_workers, use_processes,
                         branch_retries, params,
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
-                    branch_samples += samples
                     if error:
                         raise error
             elif step.is_fanout:

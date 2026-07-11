@@ -1,8 +1,8 @@
 from . import metrics
 from .storage import (
-    METRICS_FILE,
     Layout,
     connect,
+    is_metrics_key,
     list_keys,
     object_age,
     parse_key,
@@ -33,7 +33,7 @@ def _scan_parts(client, config, layout):
         parsed = parse_key(ns_prefix, key)
         if parsed and parsed[1]:
             steps.add(parsed[1])
-        has_metrics = has_metrics or key.endswith("/" + METRICS_FILE)
+        has_metrics = has_metrics or is_metrics_key(key)
     return steps, has_metrics
 
 

@@ -20,7 +20,9 @@ try:  # numpy is optional in core; step returns convert when it's installed
 except ModuleNotFoundError:  # pragma: no cover
     np = None
 
-METRICS_FILE = "_metrics.parquet"  # per-run resource samples; invisible to parse_key
+METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
+# depth (like _meta.json), which is what keeps them invisible to parse_key
+METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
 MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
@@ -64,8 +66,12 @@ class Layout:
 
     @classmethod
     def for_flow(cls, config, flow_cls):
-        """The layout a flow class writes to — the one place the flag is read."""
-        return cls(config.prefix, flow_cls.__name__, getattr(flow_cls, "prototype", False))
+        """The layout a flow class writes to — the one place identity and flag are read.
+
+        `flow` is the module-qualified `flow_id()`, so same-named classes in
+        different modules never share a namespace or ledger.
+        """
+        return cls(config.prefix, flow_cls.flow_id(), getattr(flow_cls, "prototype", False))
 
     @property
     def root(self):
@@ -84,9 +90,13 @@ class Layout:
     def metrics(self, run_id):
         return f"{self.run_dir(run_id)}/{METRICS_FILE}"
 
+    def metrics_branch(self, run_id, step, branch):
+        """A branch worker's own metrics object — one writer per key, no CAS needed."""
+        return f"{self.run_dir(run_id)}/{METRICS_PREFIX}_{step}_{branch}.parquet"
+
     @property
     def metrics_glob(self):
-        return f"{self.root}/runs/*/{METRICS_FILE}"
+        return f"{self.root}/runs/*/{METRICS_PREFIX}*.parquet"  # orchestrator + branch objects
 
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
@@ -352,6 +362,8 @@ def parse_key(prefix, key):
     True
     >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
     True
+    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet") is None
+    True
     """
     parts = key.removeprefix(prefix).split("/")
     if parts[1:] == ["ledger.parquet"]:
@@ -359,6 +371,23 @@ def parse_key(prefix, key):
     if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
         return parts[0], parts[3]
     return None
+
+
+def is_metrics_key(key):
+    """True for metrics objects — the orchestrator's or a branch worker's.
+
+    The positive complement of parse_key's exclusion, kept beside the key
+    scheme so recognition can't drift from construction.
+
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics.parquet")
+    True
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet")
+    True
+    >>> is_metrics_key("mf/ETL/runs/run_id=r1/raw/part_0.parquet")
+    False
+    """
+    name = key.rsplit("/", 1)[-1]
+    return name.startswith(METRICS_PREFIX) and name.endswith(".parquet")
 
 
 def _np_column(name, arr):

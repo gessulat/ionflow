@@ -130,9 +130,20 @@ def run(
 
 
 @app.command()
-def resume(flow: str, origin_run_id: str, repo: str = "."):
+def resume(
+    flow: str,
+    origin_run_id: str,
+    repo: str = ".",
+    allow_commit_drift: bool = typer.Option(
+        False, "--allow-commit-drift",
+        help="Resume even though HEAD differs from the origin run's commit "
+             "(reused steps keep their old-code outputs)",
+    ),
+):
     """Resume FLOW from a previous run, reusing its completed steps."""
-    typer.echo(_load(flow).resume(origin_run_id, _config_or_setup(), repo=repo))
+    typer.echo(_load(flow).resume(
+        origin_run_id, _config_or_setup(), repo=repo, allow_commit_drift=allow_commit_drift,
+    ))
 
 
 @app.command()

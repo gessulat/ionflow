@@ -301,7 +301,7 @@ class Scratch(Prototype, Flow):     # or: prototype = True as a class attribute
 
 Prototype flows:
 
-- run in a **scratch namespace** (`<prefix>/_proto/<Flow>/…`) — stable views, drift
+- run in a **scratch namespace** (`<prefix>/_proto/<flow_id>/…`) — stable views, drift
   checks, and other clients never see the churn, and stable data is never touched;
 - may run from a **dirty git tree** (ledger records `dirty:<sha>`);
 - may **omit step output schemas** (untyped steps can't fan out — annotate
@@ -324,12 +324,17 @@ A **new** `run_id` is created; completed step outputs are copied from the origin
 (server-side, no re-compute) and execution restarts at the first incomplete step. A
 partially-failed fan-out re-runs only its failed branches.
 
+If HEAD differs from the origin run's commit, resume **refuses by default** — reused
+steps would keep their old-code outputs, mixing two commits in one run. Pass
+`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately;
+prototype flows only warn, since they relinquish provenance anyway.
+
 ## Storage layout
 
 ```
-s3://<bucket>/<prefix>/<FlowName>/
-  ledger.parquet                           # append-only run ledger (updated via S3 CAS)
-  runs/
+s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
+  ledger.parquet                           #   e.g. mymodule.ETLFlow
+  runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
       raw/part_0.parquet
@@ -341,6 +346,11 @@ s3://<bucket>/<prefix>/<FlowName>/
 Run folders are immutable, which is why no catalog database is needed — DuckDB reads the
 Parquet directly and the ledger uses an S3 conditional-write (`If-Match`) for safe
 concurrent appends.
+
+A flow's durable identity is its **module-qualified class name** (`flow_id`), so
+same-named classes in different modules never share data. The flip side: renaming a
+flow class *or* moving it to another module makes it a new flow — old runs stay under
+the old id.
 
 ## Notes & limits
 

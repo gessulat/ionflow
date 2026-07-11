@@ -2,7 +2,9 @@
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
 persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
-See README.md for user-facing docs.
+See README.md for user-facing docs. Design decisions (the *why* behind
+non-obvious choices) live in `docs/decisions/` — check there before changing
+architecture, add a numbered record when you make such a decision.
 
 ## Testing (important)
 
@@ -72,13 +74,16 @@ microflow query myproj.flows:Training \
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
-- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`; the runner
+- `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`, keyed by
+  `flow_id()` = module-qualified class name — also the S3 namespace (rename/move a
+  class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
   `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git
   allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume, in-worker branch retries (`branch_retries`), git gate,
+  per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
+  warn), in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
   `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker
@@ -88,9 +93,11 @@ microflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
-- `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch); one
-  `_metrics.parquet` per run, written by the orchestrator on success AND failure,
-  flushed every 60s mid-run (heartbeat + crash-durable metrics).
+- `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
+  orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
+  run heartbeat); process-mode branch workers each flush their own
+  `_metrics_<step>_<branch>.parquet` (crash-durable branch samples); the `metrics`
+  view unions all of them.
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (httpfs write path is unreliable). `write_part` streams: cast-projection COPY

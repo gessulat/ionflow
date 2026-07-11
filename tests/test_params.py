@@ -27,7 +27,7 @@ def test_resume_ignores_dropped_origin_params(s3cfg, repo):
     origin = EmptyFanFlow.run(s3cfg, repo=repo, use_processes=False)
     # simulate a param recorded by older code, since removed from the declaration
     client = storage.s3_client(s3cfg)
-    key = storage.Layout(s3cfg.prefix, "EmptyFanFlow").meta(origin)
+    key = storage.Layout.for_flow(s3cfg, EmptyFanFlow).meta(origin)
     meta = ledger.read_meta(client, s3cfg.bucket, key)
     ledger.write_meta(client, s3cfg.bucket, key, {**meta, "params": {"gone": 1}})
 

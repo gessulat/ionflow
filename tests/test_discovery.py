@@ -24,15 +24,15 @@ def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "mypkg", [("a", "FlowA"), ("b", "FlowB")])
     monkeypatch.syspath_prepend(str(tmp_path))
     flows = discovery.discover_flows("mypkg")
-    assert set(flows) == {"FlowA", "FlowB"}
-    assert flows["FlowA"].__name__ == "FlowA"
+    assert set(flows) == {"mypkg.a.FlowA", "mypkg.b.FlowB"}  # keys are flow_ids
+    assert flows["mypkg.a.FlowA"].flow_id() == "mypkg.a.FlowA"
 
 
 def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "pkgx", [("m", "OnlyX")])
     monkeypatch.syspath_prepend(str(tmp_path))
     flows = discovery.discover_flows("pkgx")
-    assert set(flows) == {"OnlyX"}  # other packages' flows are filtered out
+    assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
 
 
 def test_flows_with_data(s3cfg):
@@ -54,9 +54,9 @@ def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
     Alpha.run(s3cfg, repo=repo, use_processes=False)
     con = storage.connect(s3cfg)
     _, samples, _ = discovery.scan_runs(s3cfg)
-    assert discovery.schema_drift(Alpha, con, s3cfg, samples["Alpha"]) == []
+    assert discovery.schema_drift(Alpha, con, s3cfg, samples[Alpha.flow_id()]) == []
 
     # pretend the code now declares `x` as text instead of the stored bigint
     monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = discovery.schema_drift(Alpha, con, s3cfg, samples["Alpha"])
+    issues = discovery.schema_drift(Alpha, con, s3cfg, samples[Alpha.flow_id()])
     assert any("data" in i and "x" in i for i in issues)
