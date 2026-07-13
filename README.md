@@ -248,12 +248,22 @@ Bare `microflow` (no subcommand) opens an interactive terminal UI:
 microflow                       # or: microflow tui myproject.flows
 ```
 
+![The runs table: five runs of the ETL example flow, with status and the flow's custom n_rows ledger column](docs/screenshots/tui-runs.svg)
+
 - one **tab per Flow** in your project (point `microflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
 - each tab is a table of that flow's runs: `run_id`, `status`, `started`, `finished`, **plus
   that flow's custom ledger columns**,
 - `Tab` cycles flows; `j`/`k`/PageUp/PageDown move the row cursor,
 - **Enter** drills into a run to preview each step's output table; **Esc** goes back.
+
+The drill-down opens on the run's resource stats (the same numbers as `microflow stats`):
+
+![Run drill-down: per-step seconds, peak RSS, average cores, threads and processes](docs/screenshots/tui-run-stats.svg)
+
+and selecting a step previews its output table — here `scored`, one row per fan-out branch:
+
+![Step output preview: the scored step's GroupScore table](docs/screenshots/tui-step-preview.svg)
 
 On startup it re-discovers your flows and warns if a flow's declared table schema has drifted
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
