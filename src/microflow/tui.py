@@ -223,6 +223,7 @@ class MicroflowTUI(App):
         self._flows_override = flows_override
 
     def on_mount(self) -> None:
+        self.theme = "dracula"
         try:
             cfg = self._config or Config.load()
         except ConfigMissing:
