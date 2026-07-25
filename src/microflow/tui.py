@@ -217,10 +217,9 @@ class MicroflowTUI(App):
     TITLE = "microflow"
     BINDINGS = [Binding("q", "quit", "Quit")]
 
-    def __init__(self, config=None, flows_override=None):
+    def __init__(self, config=None):
         super().__init__()
         self._config = config
-        self._flows_override = flows_override
 
     def on_mount(self) -> None:
         self.theme = "dracula"
@@ -229,8 +228,6 @@ class MicroflowTUI(App):
         except ConfigMissing:
             self.push_screen(SetupScreen())
             return
-        if self._flows_override:
-            cfg.flows = self._flows_override
         self.push_screen(self.overview_screen(cfg))
 
     def overview_screen(self, cfg) -> OverviewScreen:
@@ -249,5 +246,5 @@ class MicroflowTUI(App):
         return OverviewScreen(cfg, flows, warnings, with_data)
 
 
-def run_tui(config=None, flows_override=None):
-    MicroflowTUI(config, flows_override).run()
+def run_tui(config=None):
+    MicroflowTUI(config).run()

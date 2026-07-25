@@ -251,7 +251,7 @@ microflow ls mymodule:ETLFlow
 Bare `microflow` (no subcommand) opens an interactive terminal UI:
 
 ```bash
-microflow                       # or: microflow tui myproject.flows
+microflow
 ```
 
 ![The runs table: five runs of the ETL example flow, with status and the flow's custom n_rows ledger column](docs/screenshots/tui-runs.svg)

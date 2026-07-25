@@ -15,13 +15,9 @@ app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
 def _default(ctx: typer.Context):
     """Launch the TUI when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        _launch_tui()
+        from . import tui as _tui
 
-
-def _launch_tui(flows=None):
-    from . import tui as _tui
-
-    _tui.run_tui(flows_override=flows)  # config resolution is the TUI's own job
+        _tui.run_tui()  # config resolution (incl. the flows package) is the TUI's own job
 
 
 def _load(spec):
@@ -206,12 +202,6 @@ def clean(
         raise typer.Exit(0)
     n = storage.delete_prefix(storage.s3_client(cfg), cfg.bucket, layout.root + "/")
     typer.echo(f"deleted {n} objects under {target}")
-
-
-@app.command()
-def tui(flows: str = typer.Argument(None, help="Flows package (overrides config)")):
-    """Launch the interactive terminal UI."""
-    _launch_tui(flows)
 
 
 def main():
