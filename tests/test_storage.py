@@ -1,5 +1,6 @@
 import datetime as dt
 
+import duckdb
 import pyarrow as pa
 import pytest
 
@@ -99,3 +100,28 @@ def test_not_null_rejects(s3cfg):
             bad,
             Features,
         )
+
+
+@pytest.mark.slow
+def test_httpfs_write_unsafe_canary(s3cfg):
+    """Assert the upstream behavior that forces the boto3-writes rule (ADR 0013).
+
+    A `COPY TO s3://` that errors mid-stream still finalizes its multipart
+    upload — httpfs closes the file handle with no abort-on-error path — so a
+    corrupt part becomes visible on S3, which microflow's completeness and
+    resume logic would trust. If this test FAILS after a DuckDB upgrade,
+    native writes have become failure-atomic: supersede ADR 0013 before
+    deleting the canary.
+    """
+    con = storage.connect(s3cfg)
+    with pytest.raises(duckdb.Error):
+        con.execute(
+            "COPY (SELECT CASE WHEN range = 900000 THEN error('boom') "
+            "ELSE range::VARCHAR END AS v FROM range(1000000)) "
+            f"TO '{storage.uri(s3cfg, 'mf/CANARY/failed.parquet')}' "
+            "(FORMAT PARQUET, ROW_GROUP_SIZE 10000)"
+        )
+    leftovers = storage.list_keys(storage.s3_client(s3cfg), s3cfg.bucket, "mf/CANARY/")
+    assert leftovers == ["mf/CANARY/failed.parquet"], (
+        "failed COPY TO s3:// no longer leaves a partial object — revisit ADR 0013"
+    )
