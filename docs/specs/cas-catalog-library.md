@@ -229,6 +229,42 @@ from failed/rebased commits. Rules:
   can never be reaped before its commit lands. This is standard Iceberg
   orphan-cleanup practice.
 
+### 5.6 Schema migrations
+
+Schema evolution is a first-class use case, not an extension: in DuckLake a
+schema change is a **metadata-only catalog operation** — no data files are
+rewritten — so under this design a migration is just another `commit(fn)`
+whose closure runs `ALTER TABLE`. Per the
+[schema evolution docs](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution),
+DuckLake supports adding columns (with `DEFAULT`, old files read the
+default/NULL), dropping and renaming columns, **lossless type promotion**
+(e.g. INT32→INT64; narrowing is rejected), and all of the above on nested
+struct fields. Columns are tracked by field id, so a rename does not orphan
+existing data, and time travel keeps working — old snapshots retain the
+schema they were written with.
+
+Properties the CAS register adds on top:
+
+- **Migrations are serialized against all other commits** — a migration can
+  never interleave with a half-written data commit.
+- **Migration + backfill is one atomic commit**: `fn` can `ALTER TABLE` and
+  populate the new column in the same transaction; readers see either the
+  old schema or the fully migrated one. This extends across tables
+  (DuckLake multi-table transactions), which most server-based setups
+  cannot do atomically.
+- **Concurrent conflicts fail loudly at commit time, not silently.** If a
+  migration lands first, a concurrent writer's rebase replays its closure
+  against the *migrated* catalog: a `ducklake_add_data_files` registering
+  Parquet with the old schema, or a second conflicting `ALTER`, errors
+  inside `fn` instead of corrupting anything.
+
+Two rules for migration closures: they must stay replayable like any other
+`fn` (an `ALTER` re-applied on rebase should either succeed or fail loudly
+— never check-then-skip in a way that masks a conflicting concurrent
+migration), and changes beyond lossless promotion (semantic type changes,
+narrowing) must be expressed as add-new-column + backfill + drop-old —
+which the atomic-commit property above makes safe to do in one step.
+
 ## 6. Public API (target)
 
 ```python
@@ -711,6 +747,7 @@ DuckLake:
 [manifesto](https://ducklake.select/manifesto/) ·
 [FAQ](https://ducklake.select/faq) ·
 [choosing a catalog database](https://ducklake.select/docs/stable/duckdb/usage/choosing_a_catalog_database) ·
+[schema evolution](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution) ·
 [unsupported features](https://ducklake.select/docs/stable/duckdb/unsupported_features) ·
 [Frozen DuckLakes](https://ducklake.select/2025/10/24/frozen-ducklake/) ·
 [public DuckLake on object storage](https://ducklake.select/docs/stable/duckdb/guides/public_ducklake_on_object_storage) ·
