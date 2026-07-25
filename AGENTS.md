@@ -34,7 +34,7 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 uv sync                       # install (uv-managed, Python >=3.12)
 uv run microflow               # bare command opens the TUI
 uv run microflow setup         # wizard: writes .microflow/config (TOML)
-uv run microflow run examples.etl:ETLFlow
+uv run microflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
 uv run microflow run myproj:Annotate --incremental   # keyed resume from latest complete run
 uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run

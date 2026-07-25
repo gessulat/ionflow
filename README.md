@@ -193,6 +193,11 @@ or from the shell:
 microflow run mymodule:ETLFlow
 ```
 
+Sizing knobs (both `run` and `resume`, mirroring the Python API): `--max-workers N`
+caps parallel branch workers — peak memory is roughly workers × one branch's working
+set — `--threads` runs branches in threads instead of processes, and
+`--branch-retries N` retries a failed branch in its worker before giving up.
+
 ## Parameters
 
 Typed run inputs, declared like everything else — annotations on an inner class.

@@ -117,6 +117,11 @@ def _parse_params(cols, pairs):
     return out
 
 
+_MAX_WORKERS = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)")
+_USE_PROCESSES = typer.Option(
+    True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
+)
+_BRANCH_RETRIES = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch")
 _ALLOW_COMMIT_DRIFT = typer.Option(
     False, "--allow-commit-drift",
     help="Resume even though HEAD differs from the origin run's commit "
@@ -135,6 +140,9 @@ def run(
              "fan-out item key is unchanged, compute only the rest",
     ),
     allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
+    max_workers: int = _MAX_WORKERS,
+    use_processes: bool = _USE_PROCESSES,
+    branch_retries: int = _BRANCH_RETRIES,
 ):
     """Run FLOW (given as 'module:ClassName')."""
     cls = _load(flow)
@@ -142,6 +150,7 @@ def run(
     typer.echo(cls.run(
         _config_or_setup(), repo=repo, params=params, incremental=incremental,
         allow_commit_drift=allow_commit_drift,
+        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
     ))
 
 
@@ -151,10 +160,14 @@ def resume(
     origin_run_id: str,
     repo: str = ".",
     allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
+    max_workers: int = _MAX_WORKERS,
+    use_processes: bool = _USE_PROCESSES,
+    branch_retries: int = _BRANCH_RETRIES,
 ):
     """Resume FLOW from a previous run, reusing its completed steps."""
     typer.echo(_load(flow).resume(
         origin_run_id, _config_or_setup(), repo=repo, allow_commit_drift=allow_commit_drift,
+        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
     ))
 
 

@@ -1,6 +1,7 @@
 # 0001 — Fan-out: spawn processes in production, keep thread mode for tests
 
-Status: accepted (2026-07-10)
+Status: accepted (2026-07-10). The "CLI does not expose it" clause is
+superseded by [0010](0010-cli-exposes-thread-mode.md).
 
 ## Context
 
