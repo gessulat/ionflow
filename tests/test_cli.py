@@ -9,11 +9,12 @@ runner = CliRunner()
 
 
 @pytest.mark.slow
-def test_cli_run_and_query(s3cfg, repo, monkeypatch):
+def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
+    monkeypatch.chdir(clean_repo)  # the CLI treats cwd as the git repo
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
     monkeypatch.setattr("microflow.storage.aws_credentials_available", lambda: True)
 
-    r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow", "--repo", repo])
+    r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow"])
     assert r.exit_code == 0, r.output
     run_id = r.output.strip()
 

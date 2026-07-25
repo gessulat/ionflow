@@ -120,7 +120,6 @@ def _parse_params(cols, pairs):
 @app.command()
 def run(
     flow: str,
-    repo: str = ".",
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
     resume: str = typer.Option(
         None, "--resume", metavar="RUN_ID|latest",
@@ -139,11 +138,11 @@ def run(
     ),
     branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch"),
 ):
-    """Run FLOW (given as 'module:ClassName')."""
+    """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
     typer.echo(cls.run(
-        _config_or_setup(), repo=repo, params=params, resume=resume,
+        _config_or_setup(), params=params, resume=resume,
         allow_commit_drift=allow_commit_drift,
         max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
     ))
