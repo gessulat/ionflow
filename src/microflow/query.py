@@ -19,9 +19,7 @@ def _empty_view_sql(table):
     `run_id` goes last, matching where hive partitioning puts it in real views.
     `table=None` (untyped prototype step) yields a run_id-only empty view.
     """
-    cols = [] if table is None else [
-        f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()
-    ]
+    cols = [] if table is None else [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
@@ -98,8 +96,7 @@ def ledger_with_liveness(flow_cls, config, con=None):
         return con.sql("SELECT * FROM ledger")
     ids = ", ".join(f"'{r}'" for r in stale)
     return con.sql(
-        f"SELECT * REPLACE (CASE WHEN run_id IN ({ids}) "
-        "THEN 'running (stale?)' ELSE status END AS status) FROM ledger"
+        f"SELECT * REPLACE (CASE WHEN run_id IN ({ids}) THEN 'running (stale?)' ELSE status END AS status) FROM ledger"
     )
 
 
@@ -123,7 +120,5 @@ def duck(flow_cls, config):
     else:
         metrics_body = _empty_view_sql(metrics.Sample)
     con.execute(f"CREATE VIEW metrics AS {metrics_body}")
-    con.execute(
-        f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')"
-    )
+    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')")
     return con

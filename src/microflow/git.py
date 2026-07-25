@@ -6,9 +6,7 @@ class DirtyRepoError(RuntimeError):
 
 
 def _git(repo, *args):
-    r = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True
-    )
+    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout.strip()
@@ -30,9 +28,7 @@ def require_clean(repo="."):
     """Return HEAD commit hash, or raise if the working tree is dirty."""
     status = _git(repo, "status", "--porcelain")
     if status:
-        raise DirtyRepoError(
-            "refusing to run with a dirty working tree:\n" + status
-        )
+        raise DirtyRepoError("refusing to run with a dirty working tree:\n" + status)
     return commit_hash(repo)
 
 

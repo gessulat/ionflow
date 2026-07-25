@@ -50,9 +50,7 @@ def publish(flow_cls, config, run_id, step, dest, where=None, force=False):
         raise RuntimeError(f"run {run_id} did not complete; only complete runs publish")
     dest_bucket, dest_key = _parse_dest(config, dest)
     if not force and object_age(client, dest_bucket, dest_key) is not None:
-        raise FileExistsError(
-            f"s3://{dest_bucket}/{dest_key} exists; pass force=True (CLI: --force) to replace it"
-        )
+        raise FileExistsError(f"s3://{dest_bucket}/{dest_key} exists; pass force=True (CLI: --force) to replace it")
     keys = sorted(list_keys(client, config.bucket, layout.step_dir(run_id, step) + "/"))
     con = connect(config)
     if keys:
@@ -73,7 +71,5 @@ def publish(flow_cls, config, run_id, step, dest, where=None, force=False):
         "commit": meta.get("commit"),
         "published_at": utc_now().isoformat(),
     }
-    client.put_object(
-        Bucket=dest_bucket, Key=manifest_key(dest_key), Body=json.dumps(manifest).encode()
-    )
+    client.put_object(Bucket=dest_bucket, Key=manifest_key(dest_key), Body=json.dumps(manifest).encode())
     return manifest

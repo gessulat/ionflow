@@ -59,9 +59,12 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
     keys = storage.list_keys(storage.s3_client(s3cfg), s3cfg.bucket, layout.root + "/runs/")
     # branch 1 raised, yet its worker's final (finally) write landed
     assert layout.metrics_branch(run_id, "work", 1) in keys
-    branches = {r[0] for r in con.sql(
-        f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
-    ).fetchall()}
+    branches = {
+        r[0]
+        for r in con.sql(
+            f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
+        ).fetchall()
+    }
     assert branches == {0, 1, 2}  # failed branch included
 
 

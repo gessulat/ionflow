@@ -27,7 +27,8 @@ def _warm():
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     atexit.register(proc.kill)
     deadline = time.monotonic() + 30
@@ -39,8 +40,11 @@ def _warm():
             time.sleep(0.05)
     _moto["endpoint"] = f"http://127.0.0.1:{port}"
     boto3.client(
-        "s3", endpoint_url=_moto["endpoint"], region_name="us-east-1",
-        aws_access_key_id="warm", aws_secret_access_key="warm",
+        "s3",
+        endpoint_url=_moto["endpoint"],
+        region_name="us-east-1",
+        aws_access_key_id="warm",
+        aws_secret_access_key="warm",
     ).list_buckets()
 
 

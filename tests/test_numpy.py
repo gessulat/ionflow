@@ -35,6 +35,7 @@ def test_numpy_dtypes_compile_to_ddl_and_arrow():
 def test_numpy_params_still_rejected():
     # params must round-trip JSON/CLI; np scalars stay excluded
     with pytest.raises(TypeError, match="only int/float/str/bool"):
+
         class P(FlowParams):
             x: np.float32
 
@@ -182,14 +183,20 @@ def test_shaped_enforces_shape_at_write(s3cfg):
     storage.write_part(client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_0.parquet", good, Shaped3)
     with pytest.raises(duckdb.ConversionException, match="size 4 to array of size 3"):
         storage.write_part(
-            client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_1.parquet",
-            {"v": np.zeros((2, 4), dtype=np.float32)}, Shaped3,
+            client,
+            s3cfg.bucket,
+            "mf/S/runs/run_id=r/v/part_1.parquet",
+            {"v": np.zeros((2, 4), dtype=np.float32)},
+            Shaped3,
         )
     # ragged variable lists can't satisfy a fixed shape either
     with pytest.raises(duckdb.ConversionException, match="length"):
         storage.write_part(
-            client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_2.parquet",
-            pa.table({"v": pa.array([[1.0, 2.0]], pa.list_(pa.float32()))}), Shaped3,
+            client,
+            s3cfg.bucket,
+            "mf/S/runs/run_id=r/v/part_2.parquet",
+            pa.table({"v": pa.array([[1.0, 2.0]], pa.list_(pa.float32()))}),
+            Shaped3,
         )
 
 

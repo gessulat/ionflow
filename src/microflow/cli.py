@@ -44,8 +44,7 @@ def _config_or_setup():
         raise typer.Exit(1) from None
     if not storage.aws_credentials_available():
         typer.echo(
-            "No AWS credentials found. Provide them via environment variables, "
-            "~/.aws/credentials, or an IAM role."
+            "No AWS credentials found. Provide them via environment variables, ~/.aws/credentials, or an IAM role."
         )
         raise typer.Exit(1)
     return cfg
@@ -72,17 +71,19 @@ def setup():
     cur = read_config(str(root))
     bucket = typer.prompt("S3 bucket", default=cur.get("bucket"))
     prefix = typer.prompt("Key prefix", default=cur.get("prefix", "microflow"))
-    endpoint = typer.prompt(
-        "S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False
-    )
+    endpoint = typer.prompt("S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False)
     region = typer.prompt("Region", default=cur.get("region", "us-east-1"))
     flows = typer.prompt(
         "Flows package for the TUI (e.g. myproject.flows, blank to skip)",
-        default=cur.get("flows", ""), show_default=False,
+        default=cur.get("flows", ""),
+        show_default=False,
     )
     cfg = Config(
-        bucket=bucket, prefix=prefix, endpoint_url=endpoint or None,
-        region=region, flows=flows or None,
+        bucket=bucket,
+        prefix=prefix,
+        endpoint_url=endpoint or None,
+        region=region,
+        flows=flows or None,
     )
 
     if not storage.aws_credentials_available():
@@ -118,14 +119,12 @@ def _parse_params(cols, pairs):
 
 
 _MAX_WORKERS = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)")
-_USE_PROCESSES = typer.Option(
-    True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
-)
+_USE_PROCESSES = typer.Option(True, "--processes/--threads", help="Run fan-out branches in worker processes or threads")
 _BRANCH_RETRIES = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch")
 _ALLOW_COMMIT_DRIFT = typer.Option(
-    False, "--allow-commit-drift",
-    help="Resume even though HEAD differs from the origin run's commit "
-         "(reused steps keep their old-code outputs)",
+    False,
+    "--allow-commit-drift",
+    help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
 )
 
 
@@ -135,9 +134,10 @@ def run(
     repo: str = ".",
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
     incremental: bool = typer.Option(
-        False, "--incremental",
+        False,
+        "--incremental",
         help="Resume from the latest complete run: reuse branch outputs whose "
-             "fan-out item key is unchanged, compute only the rest",
+        "fan-out item key is unchanged, compute only the rest",
     ),
     allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
     max_workers: int = _MAX_WORKERS,
@@ -147,11 +147,18 @@ def run(
     """Run FLOW (given as 'module:ClassName')."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
-    typer.echo(cls.run(
-        _config_or_setup(), repo=repo, params=params, incremental=incremental,
-        allow_commit_drift=allow_commit_drift,
-        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
-    ))
+    typer.echo(
+        cls.run(
+            _config_or_setup(),
+            repo=repo,
+            params=params,
+            incremental=incremental,
+            allow_commit_drift=allow_commit_drift,
+            max_workers=max_workers,
+            use_processes=use_processes,
+            branch_retries=branch_retries,
+        )
+    )
 
 
 @app.command()
@@ -165,10 +172,17 @@ def resume(
     branch_retries: int = _BRANCH_RETRIES,
 ):
     """Resume FLOW from a previous run, reusing its completed steps."""
-    typer.echo(_load(flow).resume(
-        origin_run_id, _config_or_setup(), repo=repo, allow_commit_drift=allow_commit_drift,
-        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
-    ))
+    typer.echo(
+        _load(flow).resume(
+            origin_run_id,
+            _config_or_setup(),
+            repo=repo,
+            allow_commit_drift=allow_commit_drift,
+            max_workers=max_workers,
+            use_processes=use_processes,
+            branch_retries=branch_retries,
+        )
+    )
 
 
 @app.command()

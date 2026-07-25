@@ -63,8 +63,11 @@ class Flow:
     @classmethod
     def resume(cls, origin_run_id, config=None, repo=".", **kw):
         return runner.run(
-            cls, config or Config.load(), repo=repo,
-            origin_run_id=origin_run_id, **kw,
+            cls,
+            config or Config.load(),
+            repo=repo,
+            origin_run_id=origin_run_id,
+            **kw,
         )
 
     @classmethod

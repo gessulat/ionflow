@@ -34,7 +34,9 @@ def test_update_same_run_replaces(s3cfg):
     key = "mf/ETL/ledger.parquet"
     ledger.upsert_run(c, s3cfg.bucket, key, _row("r1", _dt(1)))
     ledger.upsert_run(
-        c, s3cfg.bucket, key,
+        c,
+        s3cfg.bucket,
+        key,
         _row("r1", _dt(1), finished=_dt(2)),
     )
     rows = ledger.read_all(c, s3cfg.bucket, key)
@@ -56,7 +58,10 @@ def test_custom_columns_stored(s3cfg):
     key = "mf/T/ledger.parquet"
     fields = [pa.field("auc", pa.float64())]
     ledger.upsert_run(
-        c, s3cfg.bucket, key, _row("r1", _dt(1), auc=0.9),
+        c,
+        s3cfg.bucket,
+        key,
+        _row("r1", _dt(1), auc=0.9),
         custom_fields=fields,
     )
     rows = ledger.read_all(c, s3cfg.bucket, key)

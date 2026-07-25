@@ -91,10 +91,19 @@ def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
 def _call(con, client, cfg, layout, flow, step, run_id, branch):
     dag = flow.__class__._dag
     kwargs = {
-        dep: StepInput(_step_input(
-            con, client, cfg, layout, run_id, dep, kind, branch,
-            dag.steps[dep].output_table,
-        ))
+        dep: StepInput(
+            _step_input(
+                con,
+                client,
+                cfg,
+                layout,
+                run_id,
+                dep,
+                kind,
+                branch,
+                dag.steps[dep].output_table,
+            )
+        )
         for dep, kind in step.param_kinds.items()
     }
     return step.method(flow, **kwargs)
@@ -102,6 +111,7 @@ def _call(con, client, cfg, layout, flow, step, run_id, branch):
 
 def _import(file, name):
     spec = importlib.util.spec_from_file_location("_mf_flow", file)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return getattr(mod, name)
@@ -149,8 +159,15 @@ def _branch_worker(payload):
             # transient step errors count too, and boto3 already retries at the HTTP layer
             try:
                 result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-                write_part(client, cfg.bucket, layout.part(run_id, step.name, branch), result,
-                           step.output_table, threads=threads, memory_mb=memory_mb)
+                write_part(
+                    client,
+                    cfg.bucket,
+                    layout.part(run_id, step.name, branch),
+                    result,
+                    step.output_table,
+                    threads=threads,
+                    memory_mb=memory_mb,
+                )
                 break
             except Exception:
                 if attempt == retries:
@@ -211,8 +228,18 @@ class CommitDriftError(RuntimeError):
     """Resume refused: HEAD differs from the origin run's commit."""
 
 
-def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0, params=None, allow_commit_drift=False, incremental=False):
+def run(
+    flow_cls,
+    config,
+    repo=".",
+    origin_run_id=None,
+    max_workers=None,
+    use_processes=True,
+    branch_retries=0,
+    params=None,
+    allow_commit_drift=False,
+    incremental=False,
+):
     if incremental and origin_run_id:
         raise ValueError("pass either origin_run_id or incremental=True, not both")
     if (origin_run_id or incremental) and params:
@@ -245,9 +272,9 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     keyed_downstream = {f: _downstream(dag, f) for f in keyed} if origin_run_id else {}
     deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
     lazy_reuse = {
-        s for s in deferred
-        if s not in keyed
-        and not any(k == "BRANCH" and d in keyed for d, k in dag.steps[s].param_kinds.items())
+        s
+        for s in deferred
+        if s not in keyed and not any(k == "BRANCH" and d in keyed for d, k in dag.steps[s].param_kinds.items())
     }
 
     def copy_part(name, src_branch, dst_branch):
@@ -281,12 +308,11 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         src = {k: j for j, k in enumerate(origin_branch_keys.get(dep) or [])}
         if not src:
             warnings.warn(
-                f"origin run has no branch keys for '{dep}' (predates branch_key?); "
-                f"recomputing every '{name}' branch", stacklevel=3,
+                f"origin run has no branch keys for '{dep}' (predates branch_key?); recomputing every '{name}' branch",
+                stacklevel=3,
             )
         hits = [
-            (i, src[k]) for i in todo
-            if (k := branch_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
+            (i, src[k]) for i in todo if (k := branch_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
         ]
         if hits:
             with ThreadPoolExecutor(max_workers=16) as ex:
@@ -310,9 +336,12 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
         origin_completed = set(origin.get("steps_complete", []))
         origin_branch_keys = origin.get("branch_keys") or {}
         with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
-            completed.update(ex.map(
-                copy_same, [k for k in origin_completed if _split(k)[0] not in deferred],
-            ))
+            completed.update(
+                ex.map(
+                    copy_same,
+                    [k for k in origin_completed if _split(k)[0] not in deferred],
+                )
+            )
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin.get("params") or {}
@@ -340,11 +369,17 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
 
     def upsert(status, finished=None, custom=None):
         ledger.upsert_run(
-            client, config.bucket, layout.ledger,
+            client,
+            config.bucket,
+            layout.ledger,
             {
-                "run_id": run_id, "status": status, "started": started,
-                "finished": finished, "commit": commit,
-                "origin_run_id": origin_run_id, "steps_complete": sorted(completed),
+                "run_id": run_id,
+                "status": status,
+                "started": started,
+                "finished": finished,
+                "commit": commit,
+                "origin_run_id": origin_run_id,
+                "steps_complete": sorted(completed),
                 **params,
                 **(custom or {}),
             },
@@ -354,6 +389,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
 
     flush()
     upsert("running")
+
     def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
         metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
 
@@ -376,16 +412,27 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                 todo = [i for i in range(n) if _key(name, i) not in completed]
                 # key-matched reuse also needs the step's OTHER inputs identical
                 # to the origin's — any other keyed ancestor's change taints them
-                if (todo and origin_run_id and branch_dep in branch_keys
-                        and work_lists_unchanged(name, excluding=branch_dep)):
+                if (
+                    todo
+                    and origin_run_id
+                    and branch_dep in branch_keys
+                    and work_lists_unchanged(name, excluding=branch_dep)
+                ):
                     todo = reuse_matching_branches(name, branch_dep, todo)
                 if todo:
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)
                     sampler.mark(None if use_processes else name)
                     done, error = _run_branches(
-                        flow_cls, config, run_id, step, todo, max_workers, use_processes,
-                        branch_retries, params,
+                        flow_cls,
+                        config,
+                        run_id,
+                        step,
+                        todo,
+                        max_workers,
+                        use_processes,
+                        branch_retries,
+                        params,
                     )
                     completed.update(_key(name, i) for i in done)  # only branches that succeeded
                     if error:
@@ -396,8 +443,14 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     key_col = keyed.get(name)
                     keys, item_keys, seen = [], [], set()
                     for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
-                        value = write_part(client, config.bucket, layout.part(run_id, name, i), item,
-                                           step.output_table, branch_key=key_col)
+                        value = write_part(
+                            client,
+                            config.bucket,
+                            layout.part(run_id, name, i),
+                            item,
+                            step.output_table,
+                            branch_key=key_col,
+                        )
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
