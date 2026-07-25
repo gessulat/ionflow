@@ -176,6 +176,10 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
     """Per-step resource usage (duration, peak memory, cores, threads) for a run."""
     con = _load(flow).duck(_config_or_setup())
     if run_id is None:
+        # newest by start time, ANY status — a failed run's resource usage is
+        # exactly what stats gets asked about. Deliberately different from
+        # `run --resume latest`, which needs the newest COMPLETE run
+        # (runner._latest_complete).
         latest = con.sql("SELECT run_id FROM ledger ORDER BY started DESC LIMIT 1").fetchone()
         if latest is None:
             typer.echo("no runs recorded")

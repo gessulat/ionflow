@@ -62,7 +62,11 @@ def _downstream(dag, root):
 
 
 def _latest_complete(client, config, layout):
-    """run_id of the newest complete run, or None (ledger rows sort by start time)."""
+    """run_id of the newest complete run, or None (ledger rows sort by start time).
+
+    Complete only — resuming must never chain onto a failed or running origin.
+    `stats`' default "latest" is the looser newest-by-start-time of any status.
+    """
     rows = ledger.read_all(client, config.bucket, layout.ledger)
     return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
 
