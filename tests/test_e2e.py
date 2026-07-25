@@ -9,24 +9,24 @@ def test_run_end_to_end(s3cfg, repo):
     run_id = ETLFlow.run(s3cfg, repo=repo, use_processes=False)
     con = ETLFlow.duck(s3cfg)
 
-    # fan-out produced one part per group, aggregated back to a summary
+    # fan-out produced one part per region, aggregated back to a summary
     summary = con.sql(f"SELECT * FROM summary WHERE run_id = '{run_id}'").fetchall()
-    assert summary[0][:2] == (2, 10.0)  # n_groups, grand_total
+    assert summary[0][:2] == (2, 10.0)  # n_regions, grand_total
 
-    # each group scored independently across the fan-out
-    scores = con.sql(
-        f"SELECT grp, total FROM scored WHERE run_id = '{run_id}' ORDER BY grp"
+    # each region totalled independently across the fan-out
+    totals = con.sql(
+        f"SELECT region, total FROM region_totals WHERE run_id = '{run_id}' ORDER BY region"
     ).fetchall()
-    assert scores == [(0, 3.0), (1, 7.0)]
+    assert totals == [("eu", 3.0), ("us", 7.0)]
 
     # ledger row complete with the custom column populated
     row = con.sql(
-        f"SELECT status, finished, n_rows, len(steps_complete) FROM ledger WHERE run_id = '{run_id}'"
+        f"SELECT status, finished, n_orders, len(steps_complete) FROM ledger WHERE run_id = '{run_id}'"
     ).fetchone()
     assert row[0] == "complete"
     assert row[1] is not None
-    assert row[2] == 4  # n_rows custom ledger column
-    assert row[3] == 6  # raw/0, parts/0, parts/1, scored/0, scored/1, summary/0
+    assert row[2] == 4  # n_orders custom ledger column
+    assert row[3] == 6  # orders/0, by_region/0+1, region_totals/0+1, summary/0
 
     # resource metrics: every step sampled at least once; stats derivable
     from microflow import query
@@ -34,7 +34,7 @@ def test_run_end_to_end(s3cfg, repo):
     sampled = {r[0] for r in con.sql(
         f"SELECT DISTINCT step FROM metrics WHERE run_id = '{run_id}'"
     ).fetchall()}
-    assert {"raw", "parts", "scored", "summary"} <= sampled
+    assert {"orders", "by_region", "region_totals", "summary"} <= sampled
     stats = query.step_stats(con, run_id).fetchall()
     assert len(stats) == 4
     assert all(r[2] > 0 for r in stats)  # peak_rss_mb
@@ -51,14 +51,14 @@ def test_run_with_processes(s3cfg, repo):
     # branch workers (separate processes) contribute per-branch samples
     branches = con.sql(
         f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' "
-        "AND step = 'scored' AND branch IS NOT NULL ORDER BY branch"
+        "AND step = 'region_totals' AND branch IS NOT NULL ORDER BY branch"
     ).fetchall()
     assert branches == [(0,), (1,)]
     # stats count workers only; the orchestrator's pool-wait is not the step's cost
     from microflow import query
 
-    scored = [r for r in query.step_stats(con, run_id).fetchall() if r[0] == "scored"][0]
-    assert scored[5] == 2  # processes
+    totals = [r for r in query.step_stats(con, run_id).fetchall() if r[0] == "region_totals"][0]
+    assert totals[5] == 2  # processes
 
 
 def test_dirty_git_refused(s3cfg, tmp_path):

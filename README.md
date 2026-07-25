@@ -62,9 +62,9 @@ region   = "us-east-1"
 
 ## A complete flow
 
-Load rows, **fan out** by group, score each group **in parallel**, then **fan in** to a
-summary. Note there is no wiring code — `scored` depends on `parts` purely because it has
-a parameter named `parts`.
+Load orders, **fan out** by region, total each region **in parallel**, then **fan in**
+to a summary. Note there is no wiring code — `region_totals` depends on `by_region`
+purely because it has a parameter named `by_region`.
 
 ```python
 import pyarrow as pa
@@ -74,48 +74,45 @@ from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
 # A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
 # defaults: `= primary_key`, `= check("...")`, `= field(...)`.
-class Raw(Table):
-    id: int = primary_key
-    grp: int
-    value: float
+class Order(Table):
+    order_id: int = primary_key
+    region: str
+    amount: float
 
 
-class Part(Table):
-    id: int
-    grp: int
-    value: float
-
-
-class GroupScore(Table):
-    grp: int
+class RegionTotal(Table):
+    region: str
     total: float = check("total >= 0")
 
 
 class Summary(Table):
-    n_groups: int
+    n_regions: int
     grand_total: float
 
 
 class ETLFlow(Flow):
     # Extra ledger columns, populated during the run (small metadata only).
     class Ledger(LedgerColumns):
-        n_rows: int
+        n_orders: int
 
-    def raw(self) -> Raw:                                    # root step (only `self`)
-        return pa.table(
-            {"id": [1, 2, 3, 4], "grp": [0, 0, 1, 1], "value": [1.0, 2.0, 3.0, 4.0]}
-        )
+    def orders(self) -> Order:                             # root step (only `self`)
+        return pa.table({
+            "order_id": [1, 2, 3, 4],
+            "region": ["eu", "eu", "us", "us"],
+            "amount": [1.0, 2.0, 3.0, 4.0],
+        })
 
-    def parts(self, raw: Raw) -> Fanout[Part]:              # fan-out: one table per group
-        groups = [r[0] for r in raw.project("grp").distinct().order("grp").fetchall()]
-        return [raw.filter(f"grp = {g}") for g in groups]
+    def by_region(self, orders: Order) -> Fanout[Order]:   # fan-out: one table per region;
+        regions = [r[0] for r in                           # partitioning reuses the schema
+                   orders.project("region").distinct().order("region").fetchall()]
+        return [orders.filter(f"region = '{r}'") for r in regions]
 
-    def scored(self, parts: Branch[Part]) -> GroupScore:   # runs once per branch, in parallel
-        return parts.aggregate("grp, sum(value) AS total")
+    def region_totals(self, by_region: Branch[Order]) -> RegionTotal:   # once per branch,
+        return by_region.aggregate("region, sum(amount) AS total")      # in parallel
 
-    def summary(self, scored: Collect[GroupScore], raw: Raw) -> Summary:   # fan-in
-        self.n_rows = raw.aggregate("count(*) AS c").fetchone()[0]         # -> ledger column
-        return scored.aggregate("count(*) AS n_groups, sum(total) AS grand_total")
+    def summary(self, region_totals: Collect[RegionTotal], orders: Order) -> Summary:  # fan-in
+        self.n_orders = orders.aggregate("count(*) AS c").fetchone()[0]  # -> ledger column
+        return region_totals.aggregate("count(*) AS n_regions, sum(total) AS grand_total")
 ```
 
 Columns can be lists: `embedding: list[float]` maps to DuckDB `DOUBLE[]` /
