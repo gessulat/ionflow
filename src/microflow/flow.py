@@ -83,9 +83,7 @@ class Flow:
     @classmethod
     def custom_ledger_fields(cls):
         """pyarrow ledger fields beyond the base schema: params, then Ledger columns."""
-        return (cls.Params.arrow_fields() if cls.Params else []) + (
-            cls.Ledger.arrow_fields() if cls.Ledger else []
-        )
+        return (cls.Params.arrow_fields() if cls.Params else []) + (cls.Ledger.arrow_fields() if cls.Ledger else [])
 
     @classmethod
     def resolve_params(cls, given=None):

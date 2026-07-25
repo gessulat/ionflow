@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -36,11 +37,7 @@ def _slug(flow_id):
 
 def _fill(table, relation, columns=None):
     """Fill a DataTable from a DuckDB relation (all columns, or a named subset)."""
-    pairs = [
-        (c, relation.columns.index(c))
-        for c in (columns or relation.columns)
-        if c in relation.columns
-    ]
+    pairs = [(c, relation.columns.index(c)) for c in (columns or relation.columns) if c in relation.columns]
     table.clear(columns=True)
     table.add_columns(*[c for c, _ in pairs])
     for row in relation.fetchall():
@@ -191,8 +188,7 @@ class SetupScreen(Screen):
         if event.button.id != "save":
             return
         vals = {
-            key: self.query_one(f"#{key}", Input).value.strip() or default or ""
-            for key, _, default in SETUP_FIELDS
+            key: self.query_one(f"#{key}", Input).value.strip() or default or "" for key, _, default in SETUP_FIELDS
         }
         if not vals["bucket"]:
             self.query_one("#setup-msg", Static).update("Bucket is required.")
@@ -200,7 +196,8 @@ class SetupScreen(Screen):
         cfg = config_from_setup(vals)
         root = git.repo_root()
         write_config(Path(root) if root else Path.cwd(), cfg)
-        self.app.switch_screen(self.app.overview_screen(cfg))
+        app = cast("MicroflowTUI", self.app)
+        app.switch_screen(app.overview_screen(cfg))
 
 
 class MicroflowTUI(App):

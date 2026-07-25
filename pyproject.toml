@@ -7,6 +7,19 @@ authors = [
     { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
 ]
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["pipeline", "workflow", "dataflow", "duckdb", "parquet", "s3", "metaflow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "boto3>=1.43.43",
     "duckdb>=1.5.4",
@@ -15,6 +28,10 @@ dependencies = [
     "textual>=8.2.8",
     "typer>=0.26.8",
 ]
+
+[project.urls]
+Repository = "https://github.com/gessulat/microflow"
+Issues = "https://github.com/gessulat/microflow/issues"
 
 [project.scripts]
 microflow = "microflow.cli:main"
@@ -30,7 +47,15 @@ dev = [
     "pytest>=9.1.1",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.21",
+    "ty>=0.0.63",
 ]
+
+[tool.ty.src]
+# Only the shipped library is checked. Tests/examples use the flow DSL, whose
+# annotations deliberately mean "output schema", not runtime type (a step
+# annotated `-> Summary` returns an arrow table; a `Branch[Part]` param is a
+# lazy relation) — a nominal checker rejects that by design.
+include = ["src"]
 
 [tool.ruff]
 line-length = 120

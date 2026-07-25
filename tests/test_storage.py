@@ -21,9 +21,7 @@ def test_connect_uses_credential_chain_without_keys(monkeypatch):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "chain")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "chain")
     con = storage.connect(Config(bucket="b"))
-    provider = con.sql(
-        "SELECT provider FROM duckdb_secrets() WHERE name = 's'"
-    ).fetchone()[0]
+    provider = con.sql("SELECT provider FROM duckdb_secrets() WHERE name = 's'").fetchone()[0]
     assert provider == "credential_chain"
 
 
@@ -64,8 +62,11 @@ def test_write_read_roundtrip(s3cfg):
     con = storage.connect(s3cfg)
     client = storage.s3_client(s3cfg)
     storage.write_part(
-        client, s3cfg.bucket,
-        "mf/ETL/runs/run_id=r1/features/part_0.parquet", _data(), Features,
+        client,
+        s3cfg.bucket,
+        "mf/ETL/runs/run_id=r1/features/part_0.parquet",
+        _data(),
+        Features,
     )
     rel = con.sql(storage.read_parquet_sql(storage.uri(s3cfg, "mf/ETL/runs/*/features/*.parquet")))
     rows, cols = rel.fetchall(), rel.columns
@@ -79,8 +80,11 @@ def test_check_constraint_rejects_bad_row(s3cfg):
     bad = pa.table({"id": [1], "ts": [dt.datetime(2026, 1, 1)], "score": [-1.0]})
     with pytest.raises(storage.ConstraintViolation):
         storage.write_part(
-            client, s3cfg.bucket,
-            "mf/ETL/runs/run_id=r2/features/part_0.parquet", bad, Features,
+            client,
+            s3cfg.bucket,
+            "mf/ETL/runs/run_id=r2/features/part_0.parquet",
+            bad,
+            Features,
         )
 
 
@@ -89,6 +93,9 @@ def test_not_null_rejects(s3cfg):
     bad = pa.table({"id": [1], "ts": [None], "score": [0.1]})
     with pytest.raises(storage.ConstraintViolation):
         storage.write_part(
-            client, s3cfg.bucket,
-            "mf/ETL/runs/run_id=r3/features/part_0.parquet", bad, Features,
+            client,
+            s3cfg.bucket,
+            "mf/ETL/runs/run_id=r3/features/part_0.parquet",
+            bad,
+            Features,
         )

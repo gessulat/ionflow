@@ -35,11 +35,13 @@ class ETLFlow(Flow):
         n_orders: int
 
     def orders(self) -> Order:
-        return pa.table({
-            "order_id": [1, 2, 3, 4],
-            "region": ["eu", "eu", "us", "us"],
-            "amount": [1.0, 2.0, 3.0, 4.0],
-        })
+        return pa.table(
+            {
+                "order_id": [1, 2, 3, 4],
+                "region": ["eu", "eu", "us", "us"],
+                "amount": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
 
     def by_region(self, orders: Order) -> Fanout[Order]:  # partitioning reuses the schema
         regions = [r[0] for r in orders.project("region").distinct().order("region").fetchall()]

@@ -49,8 +49,7 @@ def _config_or_setup():
         raise typer.Exit(1) from None
     if not storage.aws_credentials_available():
         typer.echo(
-            "No AWS credentials found. Provide them via environment variables, "
-            "~/.aws/credentials, or an IAM role."
+            "No AWS credentials found. Provide them via environment variables, ~/.aws/credentials, or an IAM role."
         )
         raise typer.Exit(1)
     return cfg
@@ -118,15 +117,17 @@ def run(
     flow: str,
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
     resume: str = typer.Option(
-        None, "--resume", metavar="RUN_ID|latest",
+        None,
+        "--resume",
+        metavar="RUN_ID|latest",
         help="Resume from a previous run, reusing its completed steps: an origin "
-             "run_id, or 'latest' for the newest complete run (keyed fan-outs "
-             "recompute only changed items; a first run falls through fresh)",
+        "run_id, or 'latest' for the newest complete run (keyed fan-outs "
+        "recompute only changed items; a first run falls through fresh)",
     ),
     allow_commit_drift: bool = typer.Option(
-        False, "--allow-commit-drift",
-        help="Resume even though HEAD differs from the origin run's commit "
-             "(reused steps keep their old-code outputs)",
+        False,
+        "--allow-commit-drift",
+        help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
     ),
     max_workers: int = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)"),
     use_processes: bool = typer.Option(
@@ -137,11 +138,17 @@ def run(
     """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
-    typer.echo(cls.run(
-        _config_or_setup(), params=params, resume=resume,
-        allow_commit_drift=allow_commit_drift,
-        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
-    ))
+    typer.echo(
+        cls.run(
+            _config_or_setup(),
+            params=params,
+            resume=resume,
+            allow_commit_drift=allow_commit_drift,
+            max_workers=max_workers,
+            use_processes=use_processes,
+            branch_retries=branch_retries,
+        )
+    )
 
 
 @app.command()

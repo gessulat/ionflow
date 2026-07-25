@@ -20,7 +20,7 @@ class Step:
     name: str
     method: typing.Callable
     param_kinds: dict[str, str]  # name -> NORMAL | BRANCH | COLLECT
-    output_table: type
+    output_table: type | None  # None only in prototype flows (schema inferred at write time)
     is_fanout: bool
 
     @property
@@ -78,15 +78,11 @@ def build_dag(cls) -> Dag:
         is_fanout = typing.get_origin(ret) is Fanout
         table = typing.get_args(ret)[0] if is_fanout else ret
         if table is None and not prototype:
-            raise ValueError(
-                f"step '{name}' has no output table annotation (only prototype flows may omit it)"
-            )
+            raise ValueError(f"step '{name}' has no output table annotation (only prototype flows may omit it)")
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():
         for d in s.deps:
             if d not in steps:
-                raise ValueError(
-                    f"step '{s.name}' depends on unknown step '{d}'"
-                )
+                raise ValueError(f"step '{s.name}' depends on unknown step '{d}'")
     return Dag(steps=steps, order=_toposort(steps))

@@ -58,9 +58,7 @@ def test_scan_runs_keeps_namespaces_apart(s3cfg):
 
     client = storage.s3_client(s3cfg)
     client.put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")
-    client.put_object(
-        Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/_proto/Beta/ledger.parquet", Body=b""
-    )
+    client.put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/_proto/Beta/ledger.parquet", Body=b"")
     with_data, samples, proto_with_data = discovery.scan_runs(s3cfg)
     assert with_data == {"Alpha"}  # scratch is invisible to the stable scan
     assert proto_with_data == {"Beta"}
@@ -80,9 +78,7 @@ def test_prototype_runs_in_scratch_and_allows_dirty_git(s3cfg, clean_repo):
     assert not storage.list_keys(client, s3cfg.bucket, stable_root + "/")
 
     con = ProtoFlow.duck(s3cfg)
-    assert con.sql(f"SELECT x FROM numbers WHERE run_id = '{run_id}' ORDER BY x").fetchall() == [
-        (1,), (2,), (3,)
-    ]
+    assert con.sql(f"SELECT x FROM numbers WHERE run_id = '{run_id}' ORDER BY x").fetchall() == [(1,), (2,), (3,)]
     assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{run_id}'").fetchone() == (3, 6)
     commit = con.sql(f"SELECT commit FROM ledger WHERE run_id = '{run_id}'").fetchone()[0]
     assert commit.startswith("dirty:")
@@ -105,7 +101,9 @@ def test_ledger_reset_on_conflict(s3cfg):
     key = "mf/F/ledger.parquet"
     started = dt.datetime(2024, 1, 1)
     ledger.upsert_run(
-        client, s3cfg.bucket, key,
+        client,
+        s3cfg.bucket,
+        key,
         {"run_id": "a", "status": "complete", "started": started, "x": 1},
         [pa.field("x", pa.int64())],
     )

@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover
-    np = None
+    np = None  # ty: ignore[invalid-assignment]
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
 # depth (like _meta.json), which is what keeps them invisible to parse_key
@@ -185,10 +185,7 @@ def _column_array(name, value):
     if np is None or not isinstance(value, np.ndarray):
         return value  # pa.table handles lists, arrow arrays, 1D ndarrays
     if value.dtype.kind == "c":
-        raise TypeError(
-            f"column '{name}': complex arrays have no parquet type; "
-            "store np.real/np.imag as two columns"
-        )
+        raise TypeError(f"column '{name}': complex arrays have no parquet type; store np.real/np.imag as two columns")
     if value.ndim <= 1:
         return value
     arr = pa.array(np.ascontiguousarray(value).reshape(-1))
@@ -208,8 +205,7 @@ def _ndarray_table(arr, table):
         return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
     if table is None:
         raise TypeError(
-            "bare ndarray from an untyped step: return {'col': array} or a "
-            "structured array so columns have names"
+            "bare ndarray from an untyped step: return {'col': array} or a structured array so columns have names"
         )
     cols = table.columns()
     names = list(cols)
@@ -257,9 +253,7 @@ def _validate_part(con, table, path, key):
     scans = table.violation_scans()
     if not scans:
         return
-    counts = con.execute(
-        f"SELECT {', '.join(sql for _, sql in scans)} FROM read_parquet('{path}')"
-    ).fetchone()
+    counts = con.execute(f"SELECT {', '.join(sql for _, sql in scans)} FROM read_parquet('{path}')").fetchone()
     if bad := [f"{label}: {n} rows" for (label, _), n in zip(scans, counts, strict=True) if n]:
         raise ConstraintViolation(f"{key}: " + "; ".join(bad))
 
@@ -271,9 +265,7 @@ def _extract_fanout_key(con, column, path, key):
         f"count(DISTINCT {column}), any_value({column}) FROM read_parquet('{path}')"
     ).fetchone()
     if rows == 0:
-        raise ConstraintViolation(
-            f"{key}: keyed fan-out item is empty; every item needs one '{column}' value"
-        )
+        raise ConstraintViolation(f"{key}: keyed fan-out item is empty; every item needs one '{column}' value")
     if nulls or distinct != 1:
         raise ConstraintViolation(
             f"{key}: fanout key column '{column}' must hold exactly one distinct non-NULL "
@@ -308,9 +300,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     select = "SELECT * FROM _src" if table is None else table.cast_sql("_src")
     with tempfile.TemporaryDirectory(prefix="microflow-part-") as tmp_dir:
         path = os.path.join(tmp_dir, "part.parquet")
-        con.execute(
-            f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})"
-        )
+        con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
         if table is not None:
             _validate_part(con, table, path, key)
         key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
@@ -338,9 +328,7 @@ def delete_prefix(client, bucket, prefix):
     """Delete every object under `prefix`; returns the number deleted."""
     keys = list_keys(client, bucket, prefix)
     for batch in batched(keys, 1000):  # DeleteObjects caps at 1000 keys
-        client.delete_objects(
-            Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]}
-        )
+        client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]})
     return len(keys)
 
 
@@ -486,7 +474,4 @@ def empty_relation(con, table):
 
 def read_parquet_sql(glob_uri):
     """SELECT over a glob, with hive `run_id=` partitioning surfaced as a column."""
-    return (
-        f"SELECT * FROM read_parquet('{glob_uri}', "
-        "hive_partitioning=true, union_by_name=true)"
-    )
+    return f"SELECT * FROM read_parquet('{glob_uri}', hive_partitioning=true, union_by_name=true)"

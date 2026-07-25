@@ -85,18 +85,16 @@ def test_stale_running_detection(s3cfg):
     old = dt.datetime(2020, 1, 1)
     for run_id in ("dead", "alive"):
         ledger.upsert_run(
-            client, s3cfg.bucket, layout.ledger,
+            client,
+            s3cfg.bucket,
+            layout.ledger,
             {"run_id": run_id, "status": "running", "started": old},
         )
     # a fresh metrics flush is the heartbeat; "dead" never wrote one
-    metrics.write_parquet(
-        client, s3cfg.bucket, layout.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)]
-    )
+    metrics.write_parquet(client, s3cfg.bucket, layout.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)])
 
     con = storage.connect(s3cfg)
-    con.execute(
-        f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{storage.uri(s3cfg, layout.ledger)}')"
-    )
+    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{storage.uri(s3cfg, layout.ledger)}')")
     stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the layout above
     rel = query.ledger_with_liveness(stub, s3cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())

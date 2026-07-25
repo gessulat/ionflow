@@ -20,8 +20,11 @@ SETUP_FIELDS = [
 def config_from_setup(vals):
     """Config from setup answers keyed like SETUP_FIELDS (blank optionals -> None)."""
     return Config(
-        bucket=vals["bucket"], prefix=vals["prefix"], endpoint_url=vals["endpoint"] or None,
-        region=vals["region"], flows=vals["flows"] or None,
+        bucket=vals["bucket"],
+        prefix=vals["prefix"],
+        endpoint_url=vals["endpoint"] or None,
+        region=vals["region"],
+        flows=vals["flows"] or None,
     )
 
 
