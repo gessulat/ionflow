@@ -264,7 +264,7 @@ def _validate_part(con, table, path, key):
         raise ConstraintViolation(f"{key}: " + "; ".join(bad))
 
 
-def _extract_branch_key(con, column, path, key):
+def _extract_fanout_key(con, column, path, key):
     """The single distinct value of a fan-out item's key column — its identity."""
     rows, nulls, distinct, value = con.execute(
         f"SELECT count(*), count(*) FILTER (WHERE {column} IS NULL), "
@@ -276,13 +276,13 @@ def _extract_branch_key(con, column, path, key):
         )
     if nulls or distinct != 1:
         raise ConstraintViolation(
-            f"{key}: branch key column '{column}' must hold exactly one distinct non-NULL "
+            f"{key}: fanout key column '{column}' must hold exactly one distinct non-NULL "
             f"value per item (got {distinct} distinct values, {nulls} NULLs)"
         )
     return value
 
 
-def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, branch_key=None):
+def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, fanout_key=None):
     """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.
 
     The COPY runs on a fresh local connection fed by an arrow batch reader —
@@ -293,7 +293,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, b
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
     `table=None` (untyped prototype step) skips both — the schema is whatever
     the data infers. `threads`/`memory_mb` keep pooled workers within their
-    share during the write, the pipeline's memory/CPU peak. `branch_key`
+    share during the write, the pipeline's memory/CPU peak. `fanout_key`
     (a column name, for keyed fan-out parts) validates that the written file
     holds exactly one distinct non-NULL value of that column and returns it;
     otherwise the return value is None.
@@ -313,7 +313,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, b
         )
         if table is not None:
             _validate_part(con, table, path, key)
-        key_value = None if branch_key is None else _extract_branch_key(con, branch_key, path, key)
+        key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
         if os.path.getsize(path) < MULTIPART_THRESHOLD:
             with open(path, "rb") as f:
                 client.put_object(Bucket=bucket, Key=key, Body=f.read())

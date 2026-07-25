@@ -43,10 +43,10 @@ def _count_of(completed, step):
 
 
 def _keyed_fanouts(dag):
-    """Fan-out step name -> its output table's branch_key column, keyed steps only."""
+    """Fan-out step name -> its output table's fanout_key column, keyed steps only."""
     out = {}
     for name, step in dag.steps.items():
-        key_col = getattr(step.output_table, "branch_key_column", None)
+        key_col = getattr(step.output_table, "fanout_key_column", None)
         if step.is_fanout and key_col is not None and key_col():
             out[name] = key_col()
     return out
@@ -242,8 +242,8 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
 
     completed = set()
     keyed = _keyed_fanouts(dag)
-    branch_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
-    origin_completed, origin_branch_keys = set(), {}
+    fanout_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
+    origin_completed, origin_fanout_keys = set(), {}
     # Steps downstream of a keyed fan-out can't be reused upfront: the fan-out
     # re-runs first (the work-list may have changed), branch parts are then
     # matched by item key, and everything else downstream is reused only when
@@ -271,7 +271,7 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
         return all(
-            set(branch_keys.get(f) or []) == set(origin_branch_keys.get(f) or [])
+            set(fanout_keys.get(f) or []) == set(origin_fanout_keys.get(f) or [])
             for f, ds in keyed_downstream.items()
             if f != excluding and name in ds
         )
@@ -284,15 +284,15 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
 
     def reuse_matching_branches(name, dep, todo):
         """Copy origin branch parts whose item key matches; return what's left to compute."""
-        src = {k: j for j, k in enumerate(origin_branch_keys.get(dep) or [])}
+        src = {k: j for j, k in enumerate(origin_fanout_keys.get(dep) or [])}
         if not src:
             warnings.warn(
-                f"origin run has no branch keys for '{dep}' (predates branch_key?); "
+                f"origin run has no fanout keys for '{dep}' (predates fanout_key?); "
                 f"recomputing every '{name}' branch", stacklevel=3,
             )
         hits = [
             (i, src[k]) for i in todo
-            if (k := branch_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
+            if (k := fanout_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
         ]
         if hits:
             with ThreadPoolExecutor(max_workers=16) as ex:
@@ -314,7 +314,7 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         origin_completed = set(origin.get("steps_complete", []))
-        origin_branch_keys = origin.get("branch_keys") or {}
+        origin_fanout_keys = origin.get("fanout_keys") or {}
         with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
             completed.update(ex.map(
                 copy_same, [k for k in origin_completed if _split(k)[0] not in deferred],
@@ -338,7 +338,7 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
             "commit": commit,
             "origin_run_id": origin_run_id,
             "steps_complete": sorted(completed),
-            "branch_keys": branch_keys,
+            "fanout_keys": fanout_keys,
             "params": params,
             "custom": custom or {},
         }
@@ -382,7 +382,7 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
                 todo = [i for i in range(n) if _key(name, i) not in completed]
                 # key-matched reuse also needs the step's OTHER inputs identical
                 # to the origin's — any other keyed ancestor's change taints them
-                if (todo and origin_run_id and branch_dep in branch_keys
+                if (todo and origin_run_id and branch_dep in fanout_keys
                         and work_lists_unchanged(name, excluding=branch_dep)):
                     todo = reuse_matching_branches(name, branch_dep, todo)
                 if todo:
@@ -403,18 +403,18 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
                     keys, item_keys, seen = [], [], set()
                     for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
                         value = write_part(client, config.bucket, layout.part(run_id, name, i), item,
-                                           step.output_table, branch_key=key_col)
+                                           step.output_table, fanout_key=key_col)
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
-                                    f"fan-out '{name}': duplicate branch key {value!r}; the "
+                                    f"fan-out '{name}': duplicate fanout key {value!r}; the "
                                     f"'{key_col}' column must identify each item uniquely"
                                 )
                             seen.add(value)
                             item_keys.append(value)
                         keys.append(_key(name, i))
                     if key_col:
-                        branch_keys[name] = item_keys
+                        fanout_keys[name] = item_keys
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
                     completed.update(keys)

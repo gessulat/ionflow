@@ -348,12 +348,12 @@ prototype flows only warn, since they relinquish provenance anyway.
 ## Incremental runs (growing corpora)
 
 For a corpus that grows file-by-file, declare which column identifies a fan-out item —
-its **branch key** — and resume stops matching branches by position and starts matching
+its **fanout key** — and resume stops matching branches by position and starts matching
 them by identity:
 
 ```python
 class RawFile(Table):
-    path: str = field(branch_key=True)   # one distinct value per fan-out item
+    path: str = fanout_key               # one distinct value per fan-out item
     size: int
 
 class Annotate(Flow):
@@ -423,7 +423,7 @@ the old id.
 
 A ten-minute tour. One small flow — count words across a growing set of documents —
 touches everything above: typed tables with constraints, fan-out/fan-in, params,
-custom ledger columns, querying, resource stats, incremental runs via a branch key,
+custom ledger columns, querying, resource stats, incremental runs via a fanout key,
 and publishing. Save it as `tutorial.py` in a configured repo (`microflow setup`),
 commit, and follow along.
 
@@ -434,7 +434,7 @@ import pyarrow as pa
 
 from microflow import (
     Branch, Collect, Fanout, Flow, FlowParams,
-    LedgerColumns, Table, check, field, primary_key,
+    LedgerColumns, Table, check, fanout_key, primary_key,
 )
 
 # Stand-in for external inputs. Real flows would list files in a bucket or
@@ -446,7 +446,7 @@ CORPUS = {
 
 
 class Doc(Table):
-    path: str = field(branch_key=True)  # item identity -> incremental resume
+    path: str = fanout_key              # item identity -> incremental resume
     text: str
 
 
@@ -537,7 +537,7 @@ $ microflow stats tutorial:WordFlow
 The raw time series is the `metrics` view (`SELECT ts, rss FROM metrics WHERE step='counts'`).
 
 **4. Grow the corpus.** Add a document to `CORPUS`, commit, and run incrementally.
-Because `Doc.path` is the **branch key**, resume matches branches by identity, not
+Because `Doc.path` is the **fanout key**, resume matches branches by identity, not
 position: the two old documents' outputs are server-side copied, only `cat.txt` is
 counted, and the fan-in recomputes because the key set changed:
 

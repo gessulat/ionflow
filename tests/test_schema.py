@@ -3,7 +3,7 @@ import datetime as dt
 import pyarrow as pa
 import pytest
 
-from microflow.schema import Table, check, field, primary_key
+from microflow.schema import Table, check, fanout_key, field, primary_key
 
 
 class Features(Table):
@@ -82,33 +82,33 @@ def test_make_builds_table_dynamically():
         Table.make("Bad", {"a": int}, typo=primary_key)
 
 
-def test_branch_key_marker():
+def test_fanout_key_marker():
     class Item(Table):
-        path: str = field(branch_key=True)
+        path: str = fanout_key  # the shortcut; field(fanout_key=True) below covers combos
         size: int
 
-    assert Item.branch_key_column() == "path"
-    assert Table.make("NoKey", {"a": int}).branch_key_column() is None
+    assert Item.fanout_key_column() == "path"
+    assert Table.make("NoKey", {"a": int}).fanout_key_column() is None
 
 
-def test_branch_key_rejects_two_columns():
+def test_fanout_key_rejects_two_columns():
     with pytest.raises(TypeError, match="only one column"):
 
         class Two(Table):
-            a: str = field(branch_key=True)
-            b: str = field(branch_key=True)
+            a: str = field(fanout_key=True)
+            b: str = field(fanout_key=True)
 
 
-def test_branch_key_rejects_unsuitable_columns():
+def test_fanout_key_rejects_unsuitable_columns():
     with pytest.raises(TypeError, match="str or an integer"):
 
         class Floaty(Table):
-            a: float = field(branch_key=True)
+            a: float = field(fanout_key=True)
 
     with pytest.raises(TypeError, match="nullable"):
 
         class Nully(Table):
-            a: str | None = field(branch_key=True)
+            a: str | None = field(fanout_key=True)
 
 
 def test_empty_table_rejected():
