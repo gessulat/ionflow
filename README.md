@@ -234,8 +234,8 @@ Views glob every run, so a new run shows up with nothing to sync — `run_id` is
 ```python
 con = ETLFlow.duck()
 con.sql("SELECT run_id, grand_total FROM summary ORDER BY run_id").show()
-con.sql("SELECT grp, total FROM scored WHERE run_id = ? ", params=[run_id]).show()
-con.sql("SELECT run_id, started, finished, n_rows FROM ledger").show()
+con.sql("SELECT region, total FROM region_totals WHERE run_id = ? ", params=[run_id]).show()
+con.sql("SELECT run_id, started, finished, n_orders FROM ledger").show()
 ```
 
 ```bash
@@ -251,7 +251,7 @@ Bare `microflow` (no subcommand) opens an interactive terminal UI:
 microflow
 ```
 
-![The runs table: five runs of the ETL example flow, with status and the flow's custom n_rows ledger column](docs/screenshots/tui-runs.svg)
+![The runs table: five runs of the ETL example flow, with status and the flow's custom n_orders ledger column](docs/screenshots/tui-runs.svg)
 
 - one **tab per Flow** in your project (point `microflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
@@ -264,9 +264,9 @@ The drill-down opens on the run's resource stats (the same numbers as `microflow
 
 ![Run drill-down: per-step seconds, peak RSS, average cores, threads and processes](docs/screenshots/tui-run-stats.svg)
 
-and selecting a step previews its output table — here `scored`, one row per fan-out branch:
+and selecting a step previews its output table — here `region_totals`, one row per fan-out branch:
 
-![Step output preview: the scored step's GroupScore table](docs/screenshots/tui-step-preview.svg)
+![Step output preview: the region_totals step's RegionTotal table](docs/screenshots/tui-step-preview.svg)
 
 On startup it re-discovers your flows and warns if a flow's declared table schema has drifted
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
@@ -282,7 +282,7 @@ stay bounded while peaks are preserved.
 ```bash
 microflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
                                            # max_threads (defaults to the latest run)
-microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='scored'"
+microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='region_totals'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
@@ -401,9 +401,9 @@ s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class na
   runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
-      raw/part_0.parquet
-      parts/part_0.parquet  parts/part_1.parquet
-      scored/part_0.parquet scored/part_1.parquet
+      orders/part_0.parquet
+      by_region/part_0.parquet      by_region/part_1.parquet
+      region_totals/part_0.parquet  region_totals/part_1.parquet
       summary/part_0.parquet
 ```
 
