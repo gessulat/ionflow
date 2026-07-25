@@ -36,11 +36,7 @@ def _slug(flow_id):
 
 def _fill(table, relation, columns=None):
     """Fill a DataTable from a DuckDB relation (all columns, or a named subset)."""
-    pairs = [
-        (c, relation.columns.index(c))
-        for c in (columns or relation.columns)
-        if c in relation.columns
-    ]
+    pairs = [(c, relation.columns.index(c)) for c in (columns or relation.columns) if c in relation.columns]
     table.clear(columns=True)
     table.add_columns(*[c for c, _ in pairs])
     for row in relation.fetchall():
@@ -195,8 +191,7 @@ class SetupScreen(Screen):
         if event.button.id != "save":
             return
         vals = {
-            name: self.query_one(f"#{name}", Input).value.strip() or default or None
-            for name, _, default in self.FIELDS
+            name: self.query_one(f"#{name}", Input).value.strip() or default or None for name, _, default in self.FIELDS
         }
         if not vals["bucket"]:
             self.query_one("#setup-msg", Static).update("Bucket is required.")

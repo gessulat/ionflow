@@ -40,9 +40,7 @@ def test_flows_with_data(s3cfg):
 
     assert discovery.flows_with_data(s3cfg) == set()
     # key presence is all that matters here; no need for a full flow run
-    storage.s3_client(s3cfg).put_object(
-        Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b""
-    )
+    storage.s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")
     assert discovery.flows_with_data(s3cfg) == {"Alpha"}
 
 

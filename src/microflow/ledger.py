@@ -82,9 +82,7 @@ def read_all(client, bucket, key):
 
 
 def write_meta(client, bucket, key, meta):
-    client.put_object(
-        Bucket=bucket, Key=key, Body=json.dumps(meta, default=str).encode()
-    )
+    client.put_object(Bucket=bucket, Key=key, Body=json.dumps(meta, default=str).encode())
 
 
 def read_meta(client, bucket, key):

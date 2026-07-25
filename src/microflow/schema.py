@@ -430,8 +430,6 @@ class FlowParams:
             if v is None and not col.nullable:
                 raise TypeError(f"param '{name}' may not be None")
             if v is not None and not isinstance(v, col.dtype):
-                raise TypeError(
-                    f"param '{name}': expected {col.dtype.__name__}, got {type(v).__name__}"
-                )
+                raise TypeError(f"param '{name}': expected {col.dtype.__name__}, got {type(v).__name__}")
             out[name] = v
         return out

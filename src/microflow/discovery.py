@@ -71,8 +71,7 @@ def schema_drift(flow_cls, con, config, samples):
         persisted = {
             r[0]: r[1]
             for r in con.sql(
-                f"DESCRIBE SELECT * FROM read_parquet('{storage.uri(config, samples[name])}', "
-                "hive_partitioning=false)"
+                f"DESCRIBE SELECT * FROM read_parquet('{storage.uri(config, samples[name])}', hive_partitioning=false)"
             ).fetchall()
         }
         for col, dtype in declared.items():

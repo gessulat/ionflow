@@ -14,9 +14,7 @@ def test_run_end_to_end(s3cfg, repo):
     assert summary[0][:2] == (2, 10.0)  # n_groups, grand_total
 
     # each group scored independently across the fan-out
-    scores = con.sql(
-        f"SELECT grp, total FROM scored WHERE run_id = '{run_id}' ORDER BY grp"
-    ).fetchall()
+    scores = con.sql(f"SELECT grp, total FROM scored WHERE run_id = '{run_id}' ORDER BY grp").fetchall()
     assert scores == [(0, 3.0), (1, 7.0)]
 
     # ledger row complete with the custom column populated
@@ -31,9 +29,7 @@ def test_run_end_to_end(s3cfg, repo):
     # resource metrics: every step sampled at least once; stats derivable
     from microflow import query
 
-    sampled = {r[0] for r in con.sql(
-        f"SELECT DISTINCT step FROM metrics WHERE run_id = '{run_id}'"
-    ).fetchall()}
+    sampled = {r[0] for r in con.sql(f"SELECT DISTINCT step FROM metrics WHERE run_id = '{run_id}'").fetchall()}
     assert {"raw", "parts", "scored", "summary"} <= sampled
     stats = query.step_stats(con, run_id).fetchall()
     assert len(stats) == 4
@@ -44,9 +40,7 @@ def test_run_end_to_end(s3cfg, repo):
 def test_run_with_processes(s3cfg, repo):
     run_id = ETLFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=2)
     con = ETLFlow.duck(s3cfg)
-    total = con.sql(
-        f"SELECT grand_total FROM summary WHERE run_id = '{run_id}'"
-    ).fetchone()[0]
+    total = con.sql(f"SELECT grand_total FROM summary WHERE run_id = '{run_id}'").fetchone()[0]
     assert total == 10.0
     # branch workers (separate processes) contribute per-branch samples
     branches = con.sql(
@@ -83,28 +77,20 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
         EmptyFanFlow.resume(origin, s3cfg, repo=clean_repo, use_processes=False)
     with pytest.warns(UserWarning, match="different commit"):
-        resumed = EmptyFanFlow.resume(
-            origin, s3cfg, repo=clean_repo, use_processes=False, allow_commit_drift=True
-        )
+        resumed = EmptyFanFlow.resume(origin, s3cfg, repo=clean_repo, use_processes=False, allow_commit_drift=True)
     assert resumed != origin
 
 
 @pytest.mark.slow
 def test_resume_reuses_completed_steps(s3cfg, repo):
     origin = ETLFlow.run(s3cfg, repo=repo, use_processes=False)
-    resumed = runner.run(
-        ETLFlow, s3cfg, repo=repo, origin_run_id=origin, use_processes=False
-    )
+    resumed = runner.run(ETLFlow, s3cfg, repo=repo, origin_run_id=origin, use_processes=False)
     assert resumed != origin
 
     con = ETLFlow.duck(s3cfg)
     # resumed run is self-contained and identical to origin
-    got = con.sql(
-        f"SELECT grand_total FROM summary WHERE run_id = '{resumed}'"
-    ).fetchone()[0]
+    got = con.sql(f"SELECT grand_total FROM summary WHERE run_id = '{resumed}'").fetchone()[0]
     assert got == 10.0
     # ledger records the origin pointer
-    origin_ptr = con.sql(
-        f"SELECT origin_run_id FROM ledger WHERE run_id = '{resumed}'"
-    ).fetchone()[0]
+    origin_ptr = con.sql(f"SELECT origin_run_id FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
     assert origin_ptr == origin

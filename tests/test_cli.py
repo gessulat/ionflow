@@ -43,10 +43,20 @@ def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
         lambda flow_cls, cfg, repo=".", **kw: seen.update(kw) or "rid",
     )
 
-    r = runner.invoke(cli.app, [
-        "run", "examples.etl:ETLFlow", "--incremental", "--allow-commit-drift",
-        "--max-workers", "2", "--threads", "--branch-retries", "1",
-    ])
+    r = runner.invoke(
+        cli.app,
+        [
+            "run",
+            "examples.etl:ETLFlow",
+            "--incremental",
+            "--allow-commit-drift",
+            "--max-workers",
+            "2",
+            "--threads",
+            "--branch-retries",
+            "1",
+        ],
+    )
     assert r.exit_code == 0, r.output
     assert seen["incremental"] is True and seen["max_workers"] == 2
     assert seen["use_processes"] is False and seen["branch_retries"] == 1

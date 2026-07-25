@@ -41,9 +41,7 @@ class ETLFlow(Flow):
         n_rows: int
 
     def raw(self) -> Raw:
-        return pa.table(
-            {"id": [1, 2, 3, 4], "grp": [0, 0, 1, 1], "value": [1.0, 2.0, 3.0, 4.0]}
-        )
+        return pa.table({"id": [1, 2, 3, 4], "grp": [0, 0, 1, 1], "value": [1.0, 2.0, 3.0, 4.0]})
 
     def parts(self, raw: Raw) -> Fanout[Part]:
         groups = [r[0] for r in raw.project("grp").distinct().order("grp").fetchall()]
