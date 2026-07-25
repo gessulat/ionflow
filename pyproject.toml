@@ -47,7 +47,15 @@ dev = [
     "pytest>=9.1.1",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.21",
+    "ty>=0.0.63",
 ]
+
+[tool.ty.src]
+# Only the shipped library is checked. Tests/examples use the flow DSL, whose
+# annotations deliberately mean "output schema", not runtime type (a step
+# annotated `-> Summary` returns an arrow table; a `Branch[Part]` param is a
+# lazy relation) — a nominal checker rejects that by design.
+include = ["src"]
 
 [tool.ruff]
 line-length = 120

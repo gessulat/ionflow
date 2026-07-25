@@ -20,7 +20,7 @@ class Step:
     name: str
     method: typing.Callable
     param_kinds: dict[str, str]  # name -> NORMAL | BRANCH | COLLECT
-    output_table: type
+    output_table: type | None  # None only in prototype flows (schema inferred at write time)
     is_fanout: bool
 
     @property

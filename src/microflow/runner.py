@@ -111,6 +111,7 @@ def _call(con, client, cfg, layout, flow, step, run_id, branch):
 
 def _import(file, name):
     spec = importlib.util.spec_from_file_location("_mf_flow", file)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return getattr(mod, name)

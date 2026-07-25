@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover
-    np = None
+    np = None  # ty: ignore[invalid-assignment]
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
 # depth (like _meta.json), which is what keeps them invisible to parse_key

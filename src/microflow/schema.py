@@ -7,9 +7,9 @@ import pyarrow as pa
 try:  # numpy is optional in core; when installed, np scalar types work as annotations
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover
-    np = None
+    np = None  # ty: ignore[invalid-assignment]
 
-_DUCKDB = {
+_DUCKDB: dict[type, str] = {
     int: "BIGINT",
     float: "DOUBLE",
     str: "VARCHAR",
@@ -19,7 +19,7 @@ _DUCKDB = {
     dt.date: "DATE",
 }
 
-_ARROW = {
+_ARROW: dict[type, pa.DataType] = {
     int: pa.int64(),
     float: pa.float64(),
     str: pa.string(),
