@@ -418,6 +418,165 @@ same-named classes in different modules never share data. The flip side: renamin
 flow class *or* moving it to another module makes it a new flow — old runs stay under
 the old id.
 
+## Tutorial: every feature in one flow
+
+A ten-minute tour. One small flow — count words across a growing set of documents —
+touches everything above: typed tables with constraints, fan-out/fan-in, params,
+custom ledger columns, querying, resource stats, incremental runs via a branch key,
+and publishing. Save it as `tutorial.py` in a configured repo (`microflow setup`),
+commit, and follow along.
+
+```python
+"""tutorial.py — one flow that touches every microflow feature."""
+
+import pyarrow as pa
+
+from microflow import (
+    Branch, Collect, Fanout, Flow, FlowParams,
+    LedgerColumns, Table, check, field, primary_key,
+)
+
+# Stand-in for external inputs. Real flows would list files in a bucket or
+# read a manifest here — see the incremental note below.
+CORPUS = {
+    "docs/zen.txt": "simple is better than complex",
+    "docs/fox.txt": "the quick brown fox jumps over the lazy dog",
+}
+
+
+class Doc(Table):
+    path: str = field(branch_key=True)  # item identity -> incremental resume
+    text: str
+
+
+class WordCount(Table):
+    path: str
+    word: str = primary_key             # unique within each branch's output
+    n: int = check("n >= 1")
+
+
+class Report(Table):
+    n_docs: int
+    n_words: int
+    top_word: str | None                # `T | None` = nullable column
+
+
+class WordFlow(Flow):
+    class Params(FlowParams):           # typed run inputs, bound to `self`
+        min_count: int = 1
+
+    class Ledger(LedgerColumns):        # extra queryable ledger columns
+        distinct_words: int
+
+    def docs(self) -> Fanout[Doc]:      # root fan-out: one table per item
+        return [pa.table({"path": [p], "text": [t]}) for p, t in sorted(CORPUS.items())]
+
+    def counts(self, docs: Branch[Doc]) -> WordCount:   # once per doc, in parallel
+        words = docs.project("path, unnest(string_split(text, ' ')) AS word")
+        return words.aggregate("path, word, count(*) AS n").filter(f"n >= {self.min_count}")
+
+    def report(self, counts: Collect[WordCount]) -> Report:   # fan-in
+        self.distinct_words = counts.aggregate("count(DISTINCT word) AS c").fetchone()[0]
+        return counts.aggregate(
+            "count(DISTINCT path) AS n_docs, sum(n)::BIGINT AS n_words, arg_max(word, n) AS top_word"
+        )
+```
+
+Notice what's *not* here: no wiring (`counts` depends on `docs` because its parameter
+is named `docs`), no schema DDL (the `Table` classes compile to DuckDB constraints,
+validated on every write), no S3 paths, no serialization code.
+
+**1. Run it.** Params come in with `-p`; each fan-out branch runs in its own worker
+process (cap with `--max-workers`, retry flaky branches with `--branch-retries`):
+
+```bash
+$ microflow run tutorial:WordFlow -p min_count=1
+1784996729416-c93d0d1b                              # the new run_id
+```
+
+A dirty working tree would have been refused — the run is pinned to your commit.
+If a branch had failed, `microflow resume tutorial:WordFlow <run_id>` would re-run
+only the incomplete branches into a fresh run, copying the finished ones.
+
+**2. Query it.** Every step is a SQL view spanning all runs (`run_id` is a column),
+and the ledger — including your params and custom columns — is a view too:
+
+```bash
+$ microflow query tutorial:WordFlow "SELECT * FROM report"
+┌────────┬─────────┬──────────┬────────────────────────┐
+│ n_docs │ n_words │ top_word │         run_id         │
+├────────┼─────────┼──────────┼────────────────────────┤
+│      2 │      14 │ the      │ 1784996729416-c93d0d1b │
+└────────┴─────────┴──────────┴────────────────────────┘
+
+$ microflow query tutorial:WordFlow "SELECT run_id, status, min_count, distinct_words FROM ledger"
+┌────────────────────────┬──────────┬───────────┬────────────────┐
+│         run_id         │  status  │ min_count │ distinct_words │
+├────────────────────────┼──────────┼───────────┼────────────────┤
+│ 1784996729416-c93d0d1b │ complete │         1 │             13 │
+└────────────────────────┴──────────┴───────────┴────────────────┘
+```
+
+The same works in Python — `WordFlow.duck()` returns the connection — and bare
+`microflow` opens the TUI to browse runs and preview step outputs interactively.
+
+**3. Check what it cost.** Metrics are always on:
+
+```bash
+$ microflow stats tutorial:WordFlow
+┌─────────┬─────────┬─────────────┬───────────┬─────────────┬───────────┐
+│  step   │ seconds │ peak_rss_mb │ avg_cores │ max_threads │ processes │
+├─────────┼─────────┼─────────────┼───────────┼─────────────┼───────────┤
+│ docs    │     0.0 │       192.0 │       0.0 │          14 │         1 │
+│ counts  │     0.6 │       208.0 │      1.08 │          15 │         2 │
+│ report  │     0.1 │       213.0 │      0.75 │          19 │         1 │
+└─────────┴─────────┴─────────────┴───────────┴─────────────┴───────────┘
+```
+
+The raw time series is the `metrics` view (`SELECT ts, rss FROM metrics WHERE step='counts'`).
+
+**4. Grow the corpus.** Add a document to `CORPUS`, commit, and run incrementally.
+Because `Doc.path` is the **branch key**, resume matches branches by identity, not
+position: the two old documents' outputs are server-side copied, only `cat.txt` is
+counted, and the fan-in recomputes because the key set changed:
+
+```bash
+$ microflow run tutorial:WordFlow --incremental --allow-commit-drift
+1784996755141-193f9a4b
+
+$ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
+┌────────────────────────┬────────┬─────────┐
+│         run_id         │ n_docs │ n_words │
+├────────────────────────┼────────┼─────────┤
+│ 1784996729416-c93d0d1b │      2 │      14 │
+│ 1784996755141-193f9a4b │      3 │      20 │
+└────────────────────────┴────────┴─────────┘
+```
+
+`--allow-commit-drift` is needed here only because this tutorial keeps its corpus
+*in the code*, so adding a document changes the commit. A real incremental flow
+lists external inputs (files in a bucket via `self.config`, a manifest, …), and
+growing the corpus doesn't touch the repo — plain `--incremental` suffices, and
+the commit gate keeps guarding actual code changes.
+
+**5. Publish for consumers.** Hand downstream users one stable path instead of a
+run_id, with provenance in a sidecar:
+
+```bash
+$ microflow publish tutorial:WordFlow 1784996755141-193f9a4b counts \
+    s3://my-bucket/stable/wordcounts.parquet --where "n >= 2"
+published tutorial.WordFlow/counts from run 1784996755141-193f9a4b to s3://my-bucket/stable/wordcounts.parquet
+```
+
+`wordcounts.parquet.meta.json` next to it records the flow, run_id, commit, filter,
+and publish time.
+
+**6. Iterate freely.** While reshaping the flow, add the `Prototype` mixin
+(`class WordFlow(Prototype, Flow)`): runs move to a scratch namespace, a dirty git
+tree is allowed, steps may omit their return annotation, and `microflow clean
+tutorial:WordFlow` wipes the scratch data. Remove the mixin to promote — every
+guarantee applies again from the first stable run.
+
 ## Notes & limits
 
 - **DuckDB-first**, DataFrame-optional. polars/pandas are conveniences, not dependencies.
