@@ -76,19 +76,16 @@ class Flow:
         return cls.Ledger.columns() if cls.Ledger else {}
 
     @classmethod
-    def ledger_fields(cls):
-        """pyarrow fields for the extra ledger columns ([] if none)."""
-        return cls.Ledger.arrow_fields() if cls.Ledger else []
-
-    @classmethod
     def params_columns(cls):
         """The flow's declared params ({} if no inner Params class)."""
         return cls.Params.columns() if cls.Params else {}
 
     @classmethod
-    def params_fields(cls):
-        """pyarrow ledger fields for the params ([] if none)."""
-        return cls.Params.arrow_fields() if cls.Params else []
+    def custom_ledger_fields(cls):
+        """pyarrow ledger fields beyond the base schema: params, then Ledger columns."""
+        return (cls.Params.arrow_fields() if cls.Params else []) + (
+            cls.Ledger.arrow_fields() if cls.Ledger else []
+        )
 
     @classmethod
     def resolve_params(cls, given=None):

@@ -6,6 +6,24 @@ from pathlib import Path
 CONFIG_DIR = ".microflow"
 CONFIG_FILE = "config"
 
+# The setup wizard's fields — one spec drives both the CLI prompts and the TUI
+# form: (config key, prompt label, default). A None default means required.
+SETUP_FIELDS = [
+    ("bucket", "S3 bucket", None),
+    ("prefix", "Key prefix", "microflow"),
+    ("endpoint", "S3 endpoint URL (blank for AWS)", ""),
+    ("region", "Region", "us-east-1"),
+    ("flows", "Flows package for the TUI (e.g. myproject.flows, blank to skip)", ""),
+]
+
+
+def config_from_setup(vals):
+    """Config from setup answers keyed like SETUP_FIELDS (blank optionals -> None)."""
+    return Config(
+        bucket=vals["bucket"], prefix=vals["prefix"], endpoint_url=vals["endpoint"] or None,
+        region=vals["region"], flows=vals["flows"] or None,
+    )
+
 
 class ConfigMissing(RuntimeError):
     """Raised when no `.microflow/config` (with a bucket) can be found."""

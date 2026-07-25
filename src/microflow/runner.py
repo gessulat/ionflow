@@ -238,7 +238,7 @@ def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes
     flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
-    custom_fields = flow_cls.params_fields() + flow_cls.ledger_fields()
+    custom_fields = flow_cls.custom_ledger_fields()
 
     completed = set()
     keyed = _keyed_fanouts(dag)

@@ -20,7 +20,7 @@ from textual.widgets import (
 )
 
 from . import discovery, git, query
-from .config import Config, ConfigMissing, write_config
+from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 
@@ -171,22 +171,18 @@ class OverviewScreen(Screen):
 
 
 class SetupScreen(Screen):
-    """Shown when the repo isn't configured; writes .microflow/config."""
+    """Shown when the repo isn't configured; writes .microflow/config.
 
-    FIELDS = [  # (input id, prompt label, default)
-        ("bucket", "S3 bucket", ""),
-        ("prefix", "Key prefix", "microflow"),
-        ("endpoint", "S3 endpoint (blank for AWS)", ""),
-        ("region", "Region", "us-east-1"),
-        ("flows", "Flows package (e.g. myproject.flows)", ""),
-    ]
+    The form is generated from SETUP_FIELDS — the same spec that drives
+    `microflow setup`'s prompts.
+    """
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Label("Configure microflow for this repo")
-        for name, label, default in self.FIELDS:
+        for key, label, default in SETUP_FIELDS:
             yield Label(label)
-            yield Input(value=default, id=name)
+            yield Input(value=default or "", id=key)
         yield Button("Save", id="save", variant="primary")
         yield Static("", id="setup-msg")
         yield Footer()
@@ -195,19 +191,13 @@ class SetupScreen(Screen):
         if event.button.id != "save":
             return
         vals = {
-            name: self.query_one(f"#{name}", Input).value.strip() or default or None
-            for name, _, default in self.FIELDS
+            key: self.query_one(f"#{key}", Input).value.strip() or default or ""
+            for key, _, default in SETUP_FIELDS
         }
         if not vals["bucket"]:
             self.query_one("#setup-msg", Static).update("Bucket is required.")
             return
-        cfg = Config(
-            bucket=vals["bucket"],
-            prefix=vals["prefix"],
-            endpoint_url=vals["endpoint"],
-            region=vals["region"],
-            flows=vals["flows"],
-        )
+        cfg = config_from_setup(vals)
         root = git.repo_root()
         write_config(Path(root) if root else Path.cwd(), cfg)
         self.app.switch_screen(self.app.overview_screen(cfg))

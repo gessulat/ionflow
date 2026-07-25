@@ -357,7 +357,21 @@ class Table:
         return type(name, (cls,), {"__annotations__": dict(cols), **constraints})
 
 
-class LedgerColumns:
+class _ColumnSet:
+    """Shared accessors for annotation-declared column sets (LedgerColumns, FlowParams)."""
+
+    _columns: typing.ClassVar[dict] = {}
+
+    @classmethod
+    def columns(cls):
+        return cls._columns
+
+    @classmethod
+    def arrow_fields(cls):
+        return _arrow_fields(cls._columns)
+
+
+class LedgerColumns(_ColumnSet):
     """Per-flow ledger columns, populated during a run (all nullable).
 
     >>> class L(LedgerColumns):
@@ -370,16 +384,8 @@ class LedgerColumns:
         super().__init_subclass__(**kw)
         cls._columns = _columns_of(cls, force_nullable=True)
 
-    @classmethod
-    def columns(cls):
-        return cls._columns
 
-    @classmethod
-    def arrow_fields(cls):
-        return _arrow_fields(cls._columns)
-
-
-class FlowParams:
+class FlowParams(_ColumnSet):
     """Typed run inputs: annotations declare types, class values are defaults.
 
     A bare type is required; a default (or `T | None`) makes it optional.
@@ -403,10 +409,6 @@ class FlowParams:
         for name, col in cls._columns.items():
             if col.dtype not in (int, float, str, bool):
                 raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
-
-    @classmethod
-    def columns(cls):
-        return cls._columns
 
     @classmethod
     def arrow_fields(cls):

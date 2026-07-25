@@ -5,7 +5,16 @@ from pathlib import Path
 import typer
 
 from . import git, storage
-from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config, write_config
+from .config import (
+    CONFIG_DIR,
+    CONFIG_FILE,
+    SETUP_FIELDS,
+    Config,
+    ConfigMissing,
+    config_from_setup,
+    read_config,
+    write_config,
+)
 from .query import ledger_with_liveness, step_stats
 
 app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
@@ -66,20 +75,11 @@ def setup():
         root = Path(root)
 
     cur = read_config(str(root))
-    bucket = typer.prompt("S3 bucket", default=cur.get("bucket"))
-    prefix = typer.prompt("Key prefix", default=cur.get("prefix", "microflow"))
-    endpoint = typer.prompt(
-        "S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False
-    )
-    region = typer.prompt("Region", default=cur.get("region", "us-east-1"))
-    flows = typer.prompt(
-        "Flows package for the TUI (e.g. myproject.flows, blank to skip)",
-        default=cur.get("flows", ""), show_default=False,
-    )
-    cfg = Config(
-        bucket=bucket, prefix=prefix, endpoint_url=endpoint or None,
-        region=region, flows=flows or None,
-    )
+    vals = {}
+    for key, label, default in SETUP_FIELDS:
+        preset = cur.get(key, default)  # None (required) prompts until non-empty
+        vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
+    cfg = config_from_setup(vals)
 
     if not storage.aws_credentials_available():
         typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
