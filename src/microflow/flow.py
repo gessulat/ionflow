@@ -34,7 +34,7 @@ class Flow:
 
     _registry: dict[str, type] = {}
     config = None  # bound by the runner (orchestrator and branch workers)
-    prototype = False  # True (or the Prototype mixin) relaxes the guarantees; see Prototype
+    prototype = False  # flipped by the Prototype mixin (the documented spelling); see Prototype
     Ledger = None  # subclass: `class Ledger(LedgerColumns)` — extra ledger columns
     Params = None  # subclass: `class Params(FlowParams)` — typed run inputs
 

@@ -307,7 +307,7 @@ immutable history). Mark a flow as a prototype to relax them — visibly, in cod
 ```python
 from microflow import Flow, Prototype
 
-class Scratch(Prototype, Flow):     # or: prototype = True as a class attribute
+class Scratch(Prototype, Flow):
     def numbers(self):              # untyped step: schema inferred at write
         return pa.table({"x": [1, 2, 3]})
 

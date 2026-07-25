@@ -84,7 +84,8 @@ microflow query myproj.flows:Training \
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
-  `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git
+  `Prototype` mixin (sets `prototype = True`; the mixin is the only documented
+  spelling): scratch namespace (`_proto/`), dirty git
   allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
