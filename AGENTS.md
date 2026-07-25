@@ -117,7 +117,8 @@ microflow query myproj.flows:Training \
   view unions all of them.
 - `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
   DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
-  (httpfs write path is unreliable). `write_part` streams: cast-projection COPY
+  (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0013).
+  `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
   scan (NOT NULL / CHECK / PK) of that file, then `upload_file` (multipart —
   parts may exceed S3's 5GB single-PUT cap). A COPY pipeline must NEVER read

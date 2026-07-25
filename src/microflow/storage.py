@@ -279,9 +279,11 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
 
     The COPY runs on a fresh local connection fed by an arrow batch reader —
     its pipeline must never read httpfs (COPY over a partially consumed httpfs
-    source deadlocks), and the write itself goes through boto3 (httpfs's write
-    path is unreliable against some S3 stores; upload_file does multipart, so
-    parts can exceed S3's 5GB single-PUT cap). Types are enforced by the cast
+    source deadlocks), and the write itself goes through boto3, never httpfs
+    (a failed `COPY TO s3://` leaves a corrupt part visible, ADR 0013;
+    upload_file does multipart, so parts can exceed S3's 5GB single-PUT cap).
+    Nothing touches S3 until the staged file is complete and validated, so a
+    part object's existence implies the part is whole. Types are enforced by the cast
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
     `table=None` (untyped prototype step) skips both — the schema is whatever
     the data infers. `threads`/`memory_mb` keep pooled workers within their
