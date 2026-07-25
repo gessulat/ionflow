@@ -1,6 +1,7 @@
 from . import ledger, query, runner
 from .config import Config
 from .dag import build_dag
+from .publish import publish as _publish
 
 
 class Prototype:
@@ -69,6 +70,11 @@ class Flow:
     @classmethod
     def duck(cls, config=None):
         return query.duck(cls, config or Config.load())
+
+    @classmethod
+    def publish(cls, run_id, step, dest, config=None, where=None, force=False):
+        """Copy `step`'s output from `run_id` to a stable S3 path (plus provenance sidecar)."""
+        return _publish(cls, config or Config.load(), run_id, step, dest, where=where, force=force)
 
     @classmethod
     def ledger_columns(cls):

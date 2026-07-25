@@ -172,6 +172,20 @@ def resume(
 
 
 @app.command()
+def publish(
+    flow: str,
+    run_id: str,
+    step: str,
+    dest: str,
+    where: str = typer.Option(None, "--where", help="SQL predicate selecting the rows to publish"),
+    force: bool = typer.Option(False, "--force", help="Replace the destination object if it exists"),
+):
+    """Copy STEP's output from RUN_ID to DEST (a stable S3 path) with a provenance sidecar."""
+    m = _load(flow).publish(run_id, step, dest, config=_config_or_setup(), where=where, force=force)
+    typer.echo(f"published {m['flow']}/{m['step']} from run {m['run_id']} to {dest}")
+
+
+@app.command()
 def ls(flow: str):
     """List runs recorded in the ledger (stale running runs are marked)."""
     rel = ledger_with_liveness(_load(flow), _config_or_setup())

@@ -38,6 +38,7 @@ uv run microflow run examples.etl:ETLFlow            # sizing: --max-workers/--t
 uv run microflow run myproj:Annotate --incremental   # keyed resume from latest complete run
 uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
+uv run microflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -102,6 +103,9 @@ microflow query myproj.flows:Training \
   shift), and reuses downstream steps only when the key set is unchanged; item
   keys per fan-out are recorded as `branch_keys` in `_meta.json`.
   `incremental=True` (CLI `run --incremental`) = resume from latest complete run.
+- `publish.py` — copy one step's output from a complete run to a stable S3 key
+  (optional `--where` filter) + `<dest>.meta.json` provenance sidecar; refuses an
+  existing dest unless forced. A copy, never a pointer (0009).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode branch workers each flush their own

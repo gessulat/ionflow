@@ -378,6 +378,23 @@ re-uploaded in place, put its etag (or mtime) in the key column. The commit gate
 unchanged — after a code change, run without `--incremental` to recompute the corpus, or
 force with `--allow-commit-drift` to keep old-code outputs.
 
+## Publish (stable paths for consumers)
+
+Run outputs live in immutable `run_id=` folders. Consumers that just want "the current
+training set at a fixed path" — a trainer, a cron job, another team — shouldn't need
+microflow or a run_id:
+
+```bash
+microflow publish mymodule:Annotate <run_id> annotate s3://bucket/stable/training.parquet \
+    --where "split = 'training'"
+```
+
+This copies the step's output (optionally filtered) to one parquet object plus a
+`<dest>.meta.json` sidecar recording flow, run_id, commit, filter, and publish time.
+An existing destination is refused unless you pass `--force` (replacing is a single
+atomic PUT). Note that two related files published one after the other can be observed
+mid-swap — consumers needing cross-file consistency should compare the sidecars' run_id.
+
 ## Storage layout
 
 ```
