@@ -42,6 +42,31 @@ def _count_of(completed, step):
     return sum(1 for k in completed if _split(k)[0] == step)
 
 
+def _keyed_fanouts(dag):
+    """Fan-out step name -> its output table's branch_key column, keyed steps only."""
+    out = {}
+    for name, step in dag.steps.items():
+        key_col = getattr(step.output_table, "branch_key_column", None)
+        if step.is_fanout and key_col is not None and key_col():
+            out[name] = key_col()
+    return out
+
+
+def _downstream(dag, root):
+    """`root` plus every step reachable from it through dependency edges."""
+    out = {root}
+    for name in dag.order:  # topo order: a step appears after all its deps
+        if any(d in out for d in dag.steps[name].deps):
+            out.add(name)
+    return out
+
+
+def _latest_complete(client, config, layout):
+    """run_id of the newest complete run, or None (ledger rows sort by start time)."""
+    rows = ledger.read_all(client, config.bucket, layout.ledger)
+    return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
+
+
 def _fair_share(workers):
     """Per-worker DuckDB caps: workers x per-worker share ~ the machine (cores, 80% RAM)."""
     cores = os.cpu_count() or 1
@@ -187,8 +212,10 @@ class CommitDriftError(RuntimeError):
 
 
 def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0, params=None, allow_commit_drift=False):
-    if origin_run_id and params:
+        branch_retries=0, params=None, allow_commit_drift=False, incremental=False):
+    if incremental and origin_run_id:
+        raise ValueError("pass either origin_run_id or incremental=True, not both")
+    if (origin_run_id or incremental) and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
     commit = commit_or_dirty(repo) if flow_cls.prototype else require_clean(repo)
@@ -196,6 +223,8 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
     client = s3_client(config)
+    if incremental:  # resume from the newest complete run; first run falls through fresh
+        origin_run_id = _latest_complete(client, config, layout)
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = connect(config)
@@ -206,6 +235,64 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     custom_fields = flow_cls.params_fields() + flow_cls.ledger_fields()
 
     completed = set()
+    keyed = _keyed_fanouts(dag)
+    branch_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
+    origin_completed, origin_branch_keys = set(), {}
+    # Steps downstream of a keyed fan-out can't be reused upfront: the fan-out
+    # re-runs first (the work-list may have changed), branch parts are then
+    # matched by item key, and everything else downstream is reused only when
+    # the key set is unchanged.
+    keyed_downstream = {f: _downstream(dag, f) for f in keyed} if origin_run_id else {}
+    deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
+    lazy_reuse = {
+        s for s in deferred
+        if s not in keyed
+        and not any(k == "BRANCH" and d in keyed for d, k in dag.steps[s].param_kinds.items())
+    }
+
+    def copy_part(name, src_branch, dst_branch):
+        client.copy_object(
+            Bucket=config.bucket,
+            CopySource={"Bucket": config.bucket, "Key": layout.part(origin_run_id, name, src_branch)},
+            Key=layout.part(run_id, name, dst_branch),
+        )
+        return _key(name, dst_branch)
+
+    def copy_same(k):
+        name, br = _split(k)
+        return copy_part(name, br, br)
+
+    def work_lists_unchanged(name, excluding=None):
+        """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
+        return all(
+            set(branch_keys.get(f) or []) == set(origin_branch_keys.get(f) or [])
+            for f, ds in keyed_downstream.items()
+            if f != excluding and name in ds
+        )
+
+    def reuse_step(name):
+        """Copy all of the origin's parts for `name` (positional reuse, deferred)."""
+        if parts := [k for k in origin_completed if _split(k)[0] == name]:
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                completed.update(ex.map(copy_same, parts))
+
+    def reuse_matching_branches(name, dep, todo):
+        """Copy origin branch parts whose item key matches; return what's left to compute."""
+        src = {k: j for j, k in enumerate(origin_branch_keys.get(dep) or [])}
+        if not src:
+            warnings.warn(
+                f"origin run has no branch keys for '{dep}' (predates branch_key?); "
+                f"recomputing every '{name}' branch", stacklevel=3,
+            )
+        hits = [
+            (i, src[k]) for i in todo
+            if (k := branch_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
+        ]
+        if hits:
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                completed.update(ex.map(lambda ij: copy_part(name, ij[1], ij[0]), hits))
+        return [i for i in todo if _key(name, i) not in completed]
+
     if origin_run_id:
         origin = ledger.read_meta(client, config.bucket, layout.meta(origin_run_id))
         if origin is None:
@@ -220,17 +307,12 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        def copy_part(k):
-            name, br = _split(k)
-            client.copy_object(
-                Bucket=config.bucket,
-                CopySource={"Bucket": config.bucket, "Key": layout.part(origin_run_id, name, br)},
-                Key=layout.part(run_id, name, br),
-            )
-            return k
-
+        origin_completed = set(origin.get("steps_complete", []))
+        origin_branch_keys = origin.get("branch_keys") or {}
         with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
-            completed.update(ex.map(copy_part, origin.get("steps_complete", [])))
+            completed.update(ex.map(
+                copy_same, [k for k in origin_completed if _split(k)[0] not in deferred],
+            ))
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin.get("params") or {}
@@ -250,6 +332,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             "commit": commit,
             "origin_run_id": origin_run_id,
             "steps_complete": sorted(completed),
+            "branch_keys": branch_keys,
             "params": params,
             "custom": custom or {},
         }
@@ -285,10 +368,17 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     try:
         for name in dag.order:
             step = dag.steps[name]
+            if name in lazy_reuse and work_lists_unchanged(name):
+                reuse_step(name)
             branch_dep = next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
             if branch_dep:
                 n = _count_of(completed, branch_dep)
                 todo = [i for i in range(n) if _key(name, i) not in completed]
+                # key-matched reuse also needs the step's OTHER inputs identical
+                # to the origin's — any other keyed ancestor's change taints them
+                if (todo and origin_run_id and branch_dep in branch_keys
+                        and work_lists_unchanged(name, excluding=branch_dep)):
+                    todo = reuse_matching_branches(name, branch_dep, todo)
                 if todo:
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)
@@ -303,10 +393,22 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
             elif step.is_fanout:
                 if not _count_of(completed, name):  # skip if a prior run already produced it
                     sampler.mark(name)
-                    keys = []
+                    key_col = keyed.get(name)
+                    keys, item_keys, seen = [], [], set()
                     for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
-                        write_part(client, config.bucket, layout.part(run_id, name, i), item, step.output_table)
+                        value = write_part(client, config.bucket, layout.part(run_id, name, i), item,
+                                           step.output_table, branch_key=key_col)
+                        if key_col:
+                            if value in seen:
+                                raise RuntimeError(
+                                    f"fan-out '{name}': duplicate branch key {value!r}; the "
+                                    f"'{key_col}' column must identify each item uniquely"
+                                )
+                            seen.add(value)
+                            item_keys.append(value)
                         keys.append(_key(name, i))
+                    if key_col:
+                        branch_keys[name] = item_keys
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
                     completed.update(keys)

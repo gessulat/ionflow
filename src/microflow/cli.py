@@ -117,16 +117,32 @@ def _parse_params(cols, pairs):
     return out
 
 
+_ALLOW_COMMIT_DRIFT = typer.Option(
+    False, "--allow-commit-drift",
+    help="Resume even though HEAD differs from the origin run's commit "
+         "(reused steps keep their old-code outputs)",
+)
+
+
 @app.command()
 def run(
     flow: str,
     repo: str = ".",
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
+    incremental: bool = typer.Option(
+        False, "--incremental",
+        help="Resume from the latest complete run: reuse branch outputs whose "
+             "fan-out item key is unchanged, compute only the rest",
+    ),
+    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
 ):
     """Run FLOW (given as 'module:ClassName')."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
-    typer.echo(cls.run(_config_or_setup(), repo=repo, params=params))
+    typer.echo(cls.run(
+        _config_or_setup(), repo=repo, params=params, incremental=incremental,
+        allow_commit_drift=allow_commit_drift,
+    ))
 
 
 @app.command()
@@ -134,11 +150,7 @@ def resume(
     flow: str,
     origin_run_id: str,
     repo: str = ".",
-    allow_commit_drift: bool = typer.Option(
-        False, "--allow-commit-drift",
-        help="Resume even though HEAD differs from the origin run's commit "
-             "(reused steps keep their old-code outputs)",
-    ),
+    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
 ):
     """Resume FLOW from a previous run, reusing its completed steps."""
     typer.echo(_load(flow).resume(

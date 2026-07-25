@@ -9,14 +9,15 @@ architecture, add a numbered record when you make such a decision.
 ## Testing (important)
 
 ```bash
-uv run pytest              # default: fast set, ~1.6s (46 checks incl. doctests)
-uv run pytest -m ""        # FULL suite, ~2.2s — run this before committing
+uv run pytest              # default: fast set (incl. doctests)
+uv run pytest -m ""        # FULL suite — run this before committing
 uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
 ```
 
 - Tests run **parallel by default** (`-n 5 --dist worksteal`, set in pyproject).
-- The 4 heaviest integration tests are marked `slow` and **skipped by default**:
-  CLI end-to-end, process-pool run, and both resume tests. `-m ""` includes them.
+- The heaviest integration tests are marked `slow` and **skipped by default**:
+  CLI end-to-end, process-pool run, and every multi-run resume test (classic and
+  keyed/incremental). `-m ""` includes them.
   Anything touching `runner.py`, `cli.py`, or resume semantics MUST pass `-m ""`.
 - Doctests live in modules and run automatically (`--doctest-modules` in addopts).
 - S3 is faked with a moto server **subprocess** (started+warmed at conftest import,
@@ -34,6 +35,7 @@ uv sync                       # install (uv-managed, Python >=3.12)
 uv run microflow               # bare command opens the TUI
 uv run microflow setup         # wizard: writes .microflow/config (TOML)
 uv run microflow run examples.etl:ETLFlow
+uv run microflow run myproj:Annotate --incremental   # keyed resume from latest complete run
 uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
 ```
@@ -71,6 +73,8 @@ microflow query myproj.flows:Training \
   cast but round-tripped by parquet as a plain list — read-side comparisons (views,
   drift) must use `Column.persisted_type()`, not `duckdb_type()`.
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
+  `field(branch_key=True)` (one str/int NOT NULL column) marks a fan-out item's
+  identity for keyed resume; `Table.branch_key_column()` reads it back.
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
@@ -93,6 +97,11 @@ microflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
+  Keyed resume (0008): if the fan-out's Table declares a `branch_key`, resume
+  re-runs the fan-out, copies origin branch parts by item key (positions may
+  shift), and reuses downstream steps only when the key set is unchanged; item
+  keys per fan-out are recorded as `branch_keys` in `_meta.json`.
+  `incremental=True` (CLI `run --incremental`) = resume from latest complete run.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode branch workers each flush their own

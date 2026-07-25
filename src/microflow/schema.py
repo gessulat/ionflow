@@ -123,14 +123,26 @@ def _arrow_type(dtype):
 class _Field:
     """Column constraints attached as an annotation default (`id: int = primary_key`)."""
 
-    def __init__(self, *, primary_key=False, check=None):
+    def __init__(self, *, primary_key=False, check=None, branch_key=False):
         self.primary_key = primary_key
         self.check = check
+        self.branch_key = branch_key
 
 
-def field(*, primary_key=False, check=None):
-    """Combine constraints when the shortcuts don't suffice."""
-    return _Field(primary_key=primary_key, check=check)
+def field(*, primary_key=False, check=None, branch_key=False):
+    """Combine constraints when the shortcuts don't suffice.
+
+    `branch_key=True` marks the column carrying a fan-out item's identity,
+    enabling keyed (incremental) resume — see `Table.branch_key_column`.
+    """
+    return _Field(primary_key=primary_key, check=check, branch_key=branch_key)
+
+
+def _is_key_dtype(dtype):
+    """Branch keys must round-trip JSON meta exactly: str or integer types only."""
+    if dtype in (str, int):
+        return True
+    return np is not None and isinstance(dtype, type) and issubclass(dtype, np.integer)
 
 
 primary_key = field(primary_key=True)
@@ -148,15 +160,20 @@ class Column:
     False
     """
 
-    def __init__(self, dtype, *, nullable=False, primary_key=False, check=None):
+    def __init__(self, dtype, *, nullable=False, primary_key=False, check=None, branch_key=False):
         try:
             _duckdb_type(dtype)
         except KeyError:
             raise TypeError(f"unsupported column dtype: {dtype!r}") from None
+        if branch_key and not _is_key_dtype(dtype):
+            raise TypeError(f"branch_key column must be str or an integer type, not {dtype!r}")
         self.dtype = dtype
         self.primary_key = primary_key
         self.nullable = False if primary_key else nullable
         self.check = check
+        self.branch_key = branch_key
+        if branch_key and self.nullable:
+            raise TypeError("a branch_key column cannot be nullable")
 
     def duckdb_type(self):
         return _duckdb_type(self.dtype)
@@ -219,6 +236,7 @@ def _columns_of(cls, force_nullable=False):
             nullable=force_nullable or optional,
             primary_key=bool(spec and spec.primary_key),
             check=spec.check if spec else None,
+            branch_key=bool(spec and spec.branch_key),
         )
     return cols
 
@@ -245,10 +263,30 @@ class Table:
         cls._columns = _columns_of(cls)
         if not cls._columns:
             raise TypeError(f"{cls.__name__} declares no columns")
+        if len([n for n, c in cls._columns.items() if c.branch_key]) > 1:
+            raise TypeError(f"{cls.__name__}: only one column may be the branch_key")
 
     @classmethod
     def columns(cls):
         return cls._columns
+
+    @classmethod
+    def branch_key_column(cls):
+        """Name of the column marked `field(branch_key=True)`, or None.
+
+        On a fan-out step's output table, this column is each item's stable
+        identity (e.g. source file path + etag): every item must hold exactly
+        one distinct value, and resume matches branch outputs across runs by
+        that value instead of by list position — added items compute, matching
+        items are copied from the origin run.
+
+        >>> class Item(Table):
+        ...     path: str = field(branch_key=True)
+        ...     size: int
+        >>> Item.branch_key_column()
+        'path'
+        """
+        return next((n for n, c in cls._columns.items() if c.branch_key), None)
 
     @classmethod
     def ddl(cls, name, temp=False):

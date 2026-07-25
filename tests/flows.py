@@ -10,7 +10,7 @@ import uuid
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table
+from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table, field
 from microflow.storage import s3_client
 
 
@@ -119,6 +119,61 @@ class ProtoFlow(Prototype, Flow):
 
     def total(self, numbers) -> Agg:
         return numbers.aggregate("count(*) AS n, sum(x) AS total")
+
+
+class KeyedItem(Table):
+    g: int
+    item: str = field(branch_key=True)
+
+
+class KeyedOut(Table):
+    item: str
+    token: str
+
+
+class KeyedAgg(Table):
+    n: int
+    token: str
+
+
+class KeyedFlow(Flow):
+    """Keyed fan-out sized by the side object; uuid tokens expose copy vs recompute."""
+
+    def items(self) -> Fanout[KeyedItem]:
+        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in range(_side_n(self.config))]
+
+    def work(self, items: Branch[KeyedItem]) -> KeyedOut:
+        item = items.project("item").fetchone()[0]
+        return pa.table({"item": [item], "token": [uuid.uuid4().hex]})
+
+    def agg(self, work: Collect[KeyedOut]) -> KeyedAgg:
+        n = work.aggregate("count(*) AS n").fetchone()[0]
+        return pa.table({"n": [n], "token": [uuid.uuid4().hex]})
+
+
+class DupKeyFlow(Flow):
+    """Two fan-out items share a branch key — the run must refuse."""
+
+    def items(self) -> Fanout[KeyedItem]:
+        return [pa.table({"g": [g], "item": ["same"]}) for g in (0, 1)]
+
+    def work(self, items: Branch[KeyedItem]) -> KeyedOut:
+        return items.project("item, 'x' AS token")
+
+
+class TwoKeyFlow(Flow):
+    """Branches over one keyed fan-out while collecting another (cross-input taint)."""
+
+    def fixed(self) -> Fanout[KeyedItem]:
+        return [pa.table({"g": [g], "item": [f"fixed-{g}"]}) for g in (0, 1)]
+
+    def others(self) -> Fanout[KeyedItem]:
+        return [pa.table({"g": [g], "item": [f"other-{g}"]}) for g in range(_side_n(self.config))]
+
+    def work(self, fixed: Branch[KeyedItem], others: Collect[KeyedItem]) -> KeyedOut:
+        item = fixed.project("item").fetchone()[0]
+        n = others.aggregate("count(*) AS n").fetchone()[0]  # output depends on the collect
+        return pa.table({"item": [f"{item}@{n}"], "token": [uuid.uuid4().hex]})
 
 
 class EmptyFanFlow(Flow):

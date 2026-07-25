@@ -339,6 +339,40 @@ steps would keep their old-code outputs, mixing two commits in one run. Pass
 `--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately;
 prototype flows only warn, since they relinquish provenance anyway.
 
+## Incremental runs (growing corpora)
+
+For a corpus that grows file-by-file, declare which column identifies a fan-out item —
+its **branch key** — and resume stops matching branches by position and starts matching
+them by identity:
+
+```python
+class RawFile(Table):
+    path: str = field(branch_key=True)   # one distinct value per fan-out item
+    size: int
+
+class Annotate(Flow):
+    def files(self) -> Fanout[RawFile]:
+        return [one_file_manifest(f) for f in list_raw_files(self.config)]
+
+    def annotate(self, files: Branch[RawFile]) -> Annotated: ...
+```
+
+```bash
+microflow run mymodule:Annotate --incremental
+```
+
+`--incremental` resumes from the latest complete run (first run is a normal full run).
+The fan-out re-runs to pick up the current work-list; branch outputs whose key already
+exists in the origin are **server-side copied**, only new keys compute, and removed keys
+drop out. Downstream steps (the fan-in and beyond) recompute whenever the key set
+changed. The result is still one complete, immutable run folder — adding 5 files to 500
+costs 5 files' compute, and `SELECT ... WHERE run_id = <new>` is always the full corpus.
+
+The key is a contract: **same key must mean same content**. If a source file can be
+re-uploaded in place, put its etag (or mtime) in the key column. The commit gate applies
+unchanged — after a code change, run without `--incremental` to recompute the corpus, or
+force with `--allow-commit-drift` to keep old-code outputs.
+
 ## Storage layout
 
 ```
