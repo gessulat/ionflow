@@ -211,11 +211,18 @@ class CommitDriftError(RuntimeError):
     """Resume refused: HEAD differs from the origin run's commit."""
 
 
-def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_processes=True,
-        branch_retries=0, params=None, allow_commit_drift=False, incremental=False):
-    if incremental and origin_run_id:
-        raise ValueError("pass either origin_run_id or incremental=True, not both")
-    if (origin_run_id or incremental) and params:
+def run(flow_cls, config, repo=".", resume=None, max_workers=None, use_processes=True,
+        branch_retries=0, params=None, allow_commit_drift=False):
+    """Execute `flow_cls`; returns the new run_id.
+
+    `resume` is the one resume spelling: an origin run_id reuses that run's
+    completed steps; the string "latest" resumes the newest complete run and
+    falls through to a fresh full run when there is none (so cron jobs can
+    always pass it). Resume always produces a NEW, self-contained run.
+    """
+    if allow_commit_drift and not resume:
+        raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
+    if resume and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
     commit = commit_or_dirty(repo) if flow_cls.prototype else require_clean(repo)
@@ -223,8 +230,7 @@ def run(flow_cls, config, repo=".", origin_run_id=None, max_workers=None, use_pr
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
     client = s3_client(config)
-    if incremental:  # resume from the newest complete run; first run falls through fresh
-        origin_run_id = _latest_complete(client, config, layout)
+    origin_run_id = _latest_complete(client, config, layout) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = connect(config)

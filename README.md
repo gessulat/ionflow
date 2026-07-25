@@ -22,8 +22,9 @@ configure is one S3-compatible bucket.
   `steps_complete`, plus any flow-specific columns.
 - **Fan-out / fan-in** over N inputs, in parallel, on one machine. Transient branch
   failures (flaky S3) retry in place: `run(branch_retries=1)`.
-- **`resume`** re-runs a failed run, reusing every step that already completed —
-  including individual branches of a partially-failed fan-out.
+- **Resumable**: `run --resume <run_id>` re-runs a failed run, reusing every step
+  that already completed — including individual branches of a partially-failed
+  fan-out; `run --resume latest` makes growing-corpus runs incremental.
 - **Clean git required.** microflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 
@@ -193,7 +194,7 @@ or from the shell:
 microflow run mymodule:ETLFlow
 ```
 
-Sizing knobs (both `run` and `resume`, mirroring the Python API): `--max-workers N`
+Sizing knobs (mirroring the Python API): `--max-workers N`
 caps parallel branch workers — peak memory is roughly workers × one branch's working
 set — `--threads` runs branches in threads instead of processes, and
 `--branch-retries N` retries a failed branch in its worker before giving up.
@@ -332,7 +333,7 @@ flow are a **class-definition error**.
 ## Resume
 
 ```bash
-microflow resume mymodule:ETLFlow <origin_run_id>
+microflow run mymodule:ETLFlow --resume <origin_run_id>   # API: ETLFlow.run(resume=run_id)
 ```
 
 A **new** `run_id` is created; completed step outputs are copied from the origin run
@@ -363,10 +364,10 @@ class Annotate(Flow):
 ```
 
 ```bash
-microflow run mymodule:Annotate --incremental
+microflow run mymodule:Annotate --resume latest
 ```
 
-`--incremental` resumes from the latest complete run (first run is a normal full run).
+`--resume latest` resumes from the latest complete run (a first run is a normal full run).
 The fan-out re-runs to pick up the current work-list; branch outputs whose key already
 exists in the origin are **server-side copied**, only new keys compute, and removed keys
 drop out. Downstream steps (the fan-in and beyond) recompute whenever the key set
@@ -375,7 +376,7 @@ costs 5 files' compute, and `SELECT ... WHERE run_id = <new>` is always the full
 
 The key is a contract: **same key must mean same content**. If a source file can be
 re-uploaded in place, put its etag (or mtime) in the key column. The commit gate applies
-unchanged — after a code change, run without `--incremental` to recompute the corpus, or
+unchanged — after a code change, run without `--resume` to recompute the corpus, or
 force with `--allow-commit-drift` to keep old-code outputs.
 
 ## Publish (stable paths for consumers)
@@ -495,8 +496,8 @@ $ microflow run tutorial:WordFlow -p min_count=1
 ```
 
 A dirty working tree would have been refused — the run is pinned to your commit.
-If a branch had failed, `microflow resume tutorial:WordFlow <run_id>` would re-run
-only the incomplete branches into a fresh run, copying the finished ones.
+If a branch had failed, `microflow run tutorial:WordFlow --resume <run_id>` would
+re-run only the incomplete branches into a fresh run, copying the finished ones.
 
 **2. Query it.** Every step is a SQL view spanning all runs (`run_id` is a column),
 and the ledger — including your params and custom columns — is a view too:
@@ -541,7 +542,7 @@ position: the two old documents' outputs are server-side copied, only `cat.txt` 
 counted, and the fan-in recomputes because the key set changed:
 
 ```bash
-$ microflow run tutorial:WordFlow --incremental --allow-commit-drift
+$ microflow run tutorial:WordFlow --resume latest --allow-commit-drift
 1784996755141-193f9a4b
 
 $ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
@@ -556,7 +557,7 @@ $ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report 
 `--allow-commit-drift` is needed here only because this tutorial keeps its corpus
 *in the code*, so adding a document changes the commit. A real incremental flow
 lists external inputs (files in a bucket via `self.config`, a manifest, …), and
-growing the corpus doesn't touch the repo — plain `--incremental` suffices, and
+growing the corpus doesn't touch the repo — plain `--resume latest` suffices, and
 the commit gate keeps guarding actual code changes.
 
 **5. Publish for consumers.** Hand downstream users one stable path instead of a

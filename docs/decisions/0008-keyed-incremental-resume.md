@@ -1,6 +1,7 @@
 # 0008 — Keyed incremental resume: fan-out items matched by branch_key, single origin
 
-Status: accepted (2026-07-24)
+Status: accepted (2026-07-24); the `run --incremental` sugar clause is
+superseded by [0011](0011-one-resume-spelling.md) (`run --resume latest`).
 
 ## Context
 

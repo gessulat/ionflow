@@ -58,14 +58,8 @@ class Flow:
 
     @classmethod
     def run(cls, config=None, repo=".", **kw):
+        """Execute the flow; `resume=<run_id>|"latest"` reuses an origin run's steps."""
         return runner.run(cls, config or Config.load(), repo=repo, **kw)
-
-    @classmethod
-    def resume(cls, origin_run_id, config=None, repo=".", **kw):
-        return runner.run(
-            cls, config or Config.load(), repo=repo,
-            origin_run_id=origin_run_id, **kw,
-        )
 
     @classmethod
     def duck(cls, config=None):

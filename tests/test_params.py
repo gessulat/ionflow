@@ -16,11 +16,11 @@ def test_params_bind_and_land_in_ledger(s3cfg, repo):
 
 def test_resume_reuses_origin_params(s3cfg, repo):
     origin = ParamFlow.run(s3cfg, repo=repo, use_processes=False, params={"mult": 3})
-    resumed = ParamFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+    resumed = ParamFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
     con = ParamFlow.duck(s3cfg)
     assert con.sql(f"SELECT mult FROM ledger WHERE run_id = '{resumed}'").fetchone()[0] == 3
     with pytest.raises(ValueError, match="origin run's params"):
-        ParamFlow.resume(origin, s3cfg, repo=repo, params={"mult": 5})
+        ParamFlow.run(s3cfg, repo=repo, resume=origin, params={"mult": 5})
 
 
 def test_resume_ignores_dropped_origin_params(s3cfg, repo):
@@ -32,7 +32,7 @@ def test_resume_ignores_dropped_origin_params(s3cfg, repo):
     ledger.write_meta(client, s3cfg.bucket, key, {**meta, "params": {"gone": 1}})
 
     with pytest.warns(UserWarning, match="no longer declared"):
-        EmptyFanFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+        EmptyFanFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
 
 def test_resolve_validates_types():

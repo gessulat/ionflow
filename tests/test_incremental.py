@@ -25,7 +25,7 @@ def test_keyed_resume_computes_only_new_items(s3cfg, repo):
     _put_n(s3cfg, 3)
     origin = KeyedFlow.run(s3cfg, repo=repo, use_processes=False)
     _put_n(s3cfg, 5)
-    resumed = KeyedFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+    resumed = KeyedFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedFlow.duck(s3cfg)
     old, new = _tokens(con, origin), _tokens(con, resumed)
@@ -44,7 +44,7 @@ def test_keyed_resume_drops_removed_items(s3cfg, repo):
     _put_n(s3cfg, 3)
     origin = KeyedFlow.run(s3cfg, repo=repo, use_processes=False)
     _put_n(s3cfg, 2)
-    resumed = KeyedFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+    resumed = KeyedFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedFlow.duck(s3cfg)
     old, new = _tokens(con, origin), _tokens(con, resumed)
@@ -57,7 +57,7 @@ def test_keyed_resume_drops_removed_items(s3cfg, repo):
 def test_keyed_resume_unchanged_worklist_reuses_downstream(s3cfg, repo):
     _put_n(s3cfg, 2)
     origin = KeyedFlow.run(s3cfg, repo=repo, use_processes=False)
-    resumed = KeyedFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+    resumed = KeyedFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedFlow.duck(s3cfg)
     assert _tokens(con, resumed) == _tokens(con, origin)
@@ -76,7 +76,7 @@ def test_resume_from_origin_without_branch_keys_recomputes(s3cfg, repo):
     ledger.write_meta(client, s3cfg.bucket, layout.meta(origin), meta)
 
     with pytest.warns(UserWarning, match="no branch keys"):
-        resumed = KeyedFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+        resumed = KeyedFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
     con = KeyedFlow.duck(s3cfg)
     old, new = _tokens(con, origin), _tokens(con, resumed)
     assert set(new) == set(old)
@@ -84,11 +84,11 @@ def test_resume_from_origin_without_branch_keys_recomputes(s3cfg, repo):
 
 
 @pytest.mark.slow
-def test_incremental_run_resumes_latest_complete(s3cfg, repo):
+def test_resume_latest_uses_newest_complete_run(s3cfg, repo):
     _put_n(s3cfg, 2)
-    first = KeyedFlow.run(s3cfg, repo=repo, use_processes=False, incremental=True)  # no prior: fresh
+    first = KeyedFlow.run(s3cfg, repo=repo, use_processes=False, resume="latest")  # no prior: fresh
     _put_n(s3cfg, 3)
-    second = KeyedFlow.run(s3cfg, repo=repo, use_processes=False, incremental=True)
+    second = KeyedFlow.run(s3cfg, repo=repo, use_processes=False, resume="latest")
 
     con = KeyedFlow.duck(s3cfg)
     t1, t2 = _tokens(con, first), _tokens(con, second)
@@ -98,9 +98,9 @@ def test_incremental_run_resumes_latest_complete(s3cfg, repo):
     assert ptr == first
 
     with pytest.raises(ValueError, match="do not pass params"):
-        KeyedFlow.run(s3cfg, repo=repo, incremental=True, params={"x": 1})
-    with pytest.raises(ValueError, match="not both"):
-        KeyedFlow.run(s3cfg, repo=repo, incremental=True, origin_run_id=first)
+        KeyedFlow.run(s3cfg, repo=repo, resume="latest", params={"x": 1})
+    with pytest.raises(ValueError, match="only applies to a resumed run"):
+        KeyedFlow.run(s3cfg, repo=repo, allow_commit_drift=True)
 
 
 @pytest.mark.slow
@@ -109,7 +109,7 @@ def test_branch_reuse_tainted_by_other_keyed_ancestor(s3cfg, repo):
     _put_n(s3cfg, 1)
     origin = TwoKeyFlow.run(s3cfg, repo=repo, use_processes=False)
     _put_n(s3cfg, 2)
-    resumed = TwoKeyFlow.resume(origin, s3cfg, repo=repo, use_processes=False)
+    resumed = TwoKeyFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     con = TwoKeyFlow.duck(s3cfg)
     items = {r[0] for r in con.sql(f"SELECT item FROM work WHERE run_id = '{resumed}'").fetchall()}

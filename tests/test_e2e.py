@@ -81,10 +81,10 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
     _git(clean_repo, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix")
 
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
-        EmptyFanFlow.resume(origin, s3cfg, repo=clean_repo, use_processes=False)
+        EmptyFanFlow.run(s3cfg, repo=clean_repo, resume=origin, use_processes=False)
     with pytest.warns(UserWarning, match="different commit"):
-        resumed = EmptyFanFlow.resume(
-            origin, s3cfg, repo=clean_repo, use_processes=False, allow_commit_drift=True
+        resumed = EmptyFanFlow.run(
+            s3cfg, repo=clean_repo, resume=origin, use_processes=False, allow_commit_drift=True
         )
     assert resumed != origin
 
@@ -92,9 +92,7 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
 @pytest.mark.slow
 def test_resume_reuses_completed_steps(s3cfg, repo):
     origin = ETLFlow.run(s3cfg, repo=repo, use_processes=False)
-    resumed = runner.run(
-        ETLFlow, s3cfg, repo=repo, origin_run_id=origin, use_processes=False
-    )
+    resumed = runner.run(ETLFlow, s3cfg, repo=repo, resume=origin, use_processes=False)
     assert resumed != origin
 
     con = ETLFlow.duck(s3cfg)

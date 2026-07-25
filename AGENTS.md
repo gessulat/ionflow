@@ -35,7 +35,7 @@ uv sync                       # install (uv-managed, Python >=3.12)
 uv run microflow               # bare command opens the TUI
 uv run microflow setup         # wizard: writes .microflow/config (TOML)
 uv run microflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
-uv run microflow run myproj:Annotate --incremental   # keyed resume from latest complete run
+uv run microflow run myproj:Annotate --resume latest # keyed resume from latest complete run
 uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
 uv run microflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
@@ -102,7 +102,8 @@ microflow query myproj.flows:Training \
   re-runs the fan-out, copies origin branch parts by item key (positions may
   shift), and reuses downstream steps only when the key set is unchanged; item
   keys per fan-out are recorded as `branch_keys` in `_meta.json`.
-  `incremental=True` (CLI `run --incremental`) = resume from latest complete run.
+  `resume=<run_id>|"latest"` is the single resume spelling (0011), CLI `run --resume`;
+  "latest" = newest complete run, falling through fresh when none exists.
 - `publish.py` — copy one step's output from a complete run to a stable S3 key
   (optional `--where` filter) + `<dest>.meta.json` provenance sidecar; refuses an
   existing dest unless forced. A copy, never a pointer (0009).

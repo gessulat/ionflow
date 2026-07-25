@@ -117,56 +117,34 @@ def _parse_params(cols, pairs):
     return out
 
 
-_MAX_WORKERS = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)")
-_USE_PROCESSES = typer.Option(
-    True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
-)
-_BRANCH_RETRIES = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch")
-_ALLOW_COMMIT_DRIFT = typer.Option(
-    False, "--allow-commit-drift",
-    help="Resume even though HEAD differs from the origin run's commit "
-         "(reused steps keep their old-code outputs)",
-)
-
-
 @app.command()
 def run(
     flow: str,
     repo: str = ".",
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
-    incremental: bool = typer.Option(
-        False, "--incremental",
-        help="Resume from the latest complete run: reuse branch outputs whose "
-             "fan-out item key is unchanged, compute only the rest",
+    resume: str = typer.Option(
+        None, "--resume", metavar="RUN_ID|latest",
+        help="Resume from a previous run, reusing its completed steps: an origin "
+             "run_id, or 'latest' for the newest complete run (keyed fan-outs "
+             "recompute only changed items; a first run falls through fresh)",
     ),
-    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
-    max_workers: int = _MAX_WORKERS,
-    use_processes: bool = _USE_PROCESSES,
-    branch_retries: int = _BRANCH_RETRIES,
+    allow_commit_drift: bool = typer.Option(
+        False, "--allow-commit-drift",
+        help="Resume even though HEAD differs from the origin run's commit "
+             "(reused steps keep their old-code outputs)",
+    ),
+    max_workers: int = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)"),
+    use_processes: bool = typer.Option(
+        True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
+    ),
+    branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch"),
 ):
     """Run FLOW (given as 'module:ClassName')."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
     typer.echo(cls.run(
-        _config_or_setup(), repo=repo, params=params, incremental=incremental,
+        _config_or_setup(), repo=repo, params=params, resume=resume,
         allow_commit_drift=allow_commit_drift,
-        max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
-    ))
-
-
-@app.command()
-def resume(
-    flow: str,
-    origin_run_id: str,
-    repo: str = ".",
-    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
-    max_workers: int = _MAX_WORKERS,
-    use_processes: bool = _USE_PROCESSES,
-    branch_retries: int = _BRANCH_RETRIES,
-):
-    """Resume FLOW from a previous run, reusing its completed steps."""
-    typer.echo(_load(flow).resume(
-        origin_run_id, _config_or_setup(), repo=repo, allow_commit_drift=allow_commit_drift,
         max_workers=max_workers, use_processes=use_processes, branch_retries=branch_retries,
     ))
 
