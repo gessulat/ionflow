@@ -21,7 +21,7 @@ from textual.widgets import (
 )
 
 from . import discovery, git, query
-from .config import Config, ConfigMissing, write_config
+from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 
@@ -168,22 +168,18 @@ class OverviewScreen(Screen):
 
 
 class SetupScreen(Screen):
-    """Shown when the repo isn't configured; writes .microflow/config."""
+    """Shown when the repo isn't configured; writes .microflow/config.
 
-    FIELDS = [  # (input id, prompt label, default)
-        ("bucket", "S3 bucket", ""),
-        ("prefix", "Key prefix", "microflow"),
-        ("endpoint", "S3 endpoint (blank for AWS)", ""),
-        ("region", "Region", "us-east-1"),
-        ("flows", "Flows package (e.g. myproject.flows)", ""),
-    ]
+    The form is generated from SETUP_FIELDS — the same spec that drives
+    `microflow setup`'s prompts.
+    """
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Label("Configure microflow for this repo")
-        for name, label, default in self.FIELDS:
+        for key, label, default in SETUP_FIELDS:
             yield Label(label)
-            yield Input(value=default, id=name)
+            yield Input(value=default or "", id=key)
         yield Button("Save", id="save", variant="primary")
         yield Static("", id="setup-msg")
         yield Footer()
@@ -191,17 +187,13 @@ class SetupScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save":
             return
-        vals = {name: self.query_one(f"#{name}", Input).value.strip() or default for name, _, default in self.FIELDS}
+        vals = {
+            key: self.query_one(f"#{key}", Input).value.strip() or default or "" for key, _, default in SETUP_FIELDS
+        }
         if not vals["bucket"]:
             self.query_one("#setup-msg", Static).update("Bucket is required.")
             return
-        cfg = Config(
-            bucket=vals["bucket"],
-            prefix=vals["prefix"],
-            endpoint_url=vals["endpoint"] or None,
-            region=vals["region"],
-            flows=vals["flows"] or None,
-        )
+        cfg = config_from_setup(vals)
         root = git.repo_root()
         write_config(Path(root) if root else Path.cwd(), cfg)
         app = cast("MicroflowTUI", self.app)
@@ -212,10 +204,9 @@ class MicroflowTUI(App):
     TITLE = "microflow"
     BINDINGS = [Binding("q", "quit", "Quit")]
 
-    def __init__(self, config=None, flows_override=None):
+    def __init__(self, config=None):
         super().__init__()
         self._config = config
-        self._flows_override = flows_override
 
     def on_mount(self) -> None:
         self.theme = "dracula"
@@ -224,8 +215,6 @@ class MicroflowTUI(App):
         except ConfigMissing:
             self.push_screen(SetupScreen())
             return
-        if self._flows_override:
-            cfg.flows = self._flows_override
         self.push_screen(self.overview_screen(cfg))
 
     def overview_screen(self, cfg) -> OverviewScreen:
@@ -244,5 +233,5 @@ class MicroflowTUI(App):
         return OverviewScreen(cfg, flows, warnings, with_data)
 
 
-def run_tui(config=None, flows_override=None):
-    MicroflowTUI(config, flows_override).run()
+def run_tui(config=None):
+    MicroflowTUI(config).run()

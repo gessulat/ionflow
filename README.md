@@ -22,8 +22,9 @@ configure is one S3-compatible bucket.
   `steps_complete`, plus any flow-specific columns.
 - **Fan-out / fan-in** over N inputs, in parallel, on one machine. Transient branch
   failures (flaky S3) retry in place: `run(branch_retries=1)`.
-- **`resume`** re-runs a failed run, reusing every step that already completed —
-  including individual branches of a partially-failed fan-out.
+- **Resumable**: `run --resume <run_id>` re-runs a failed run, reusing every step
+  that already completed — including individual branches of a partially-failed
+  fan-out; `run --resume latest` makes growing-corpus runs incremental.
 - **Clean git required.** microflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 
@@ -61,9 +62,9 @@ region   = "us-east-1"
 
 ## A complete flow
 
-Load rows, **fan out** by group, score each group **in parallel**, then **fan in** to a
-summary. Note there is no wiring code — `scored` depends on `parts` purely because it has
-a parameter named `parts`.
+Load orders, **fan out** by region, total each region **in parallel**, then **fan in**
+to a summary. Note there is no wiring code — `region_totals` depends on `by_region`
+purely because it has a parameter named `by_region`.
 
 ```python
 import pyarrow as pa
@@ -73,48 +74,45 @@ from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
 # A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
 # defaults: `= primary_key`, `= check("...")`, `= field(...)`.
-class Raw(Table):
-    id: int = primary_key
-    grp: int
-    value: float
+class Order(Table):
+    order_id: int = primary_key
+    region: str
+    amount: float
 
 
-class Part(Table):
-    id: int
-    grp: int
-    value: float
-
-
-class GroupScore(Table):
-    grp: int
+class RegionTotal(Table):
+    region: str
     total: float = check("total >= 0")
 
 
 class Summary(Table):
-    n_groups: int
+    n_regions: int
     grand_total: float
 
 
 class ETLFlow(Flow):
     # Extra ledger columns, populated during the run (small metadata only).
     class Ledger(LedgerColumns):
-        n_rows: int
+        n_orders: int
 
-    def raw(self) -> Raw:                                    # root step (only `self`)
-        return pa.table(
-            {"id": [1, 2, 3, 4], "grp": [0, 0, 1, 1], "value": [1.0, 2.0, 3.0, 4.0]}
-        )
+    def orders(self) -> Order:                             # root step (only `self`)
+        return pa.table({
+            "order_id": [1, 2, 3, 4],
+            "region": ["eu", "eu", "us", "us"],
+            "amount": [1.0, 2.0, 3.0, 4.0],
+        })
 
-    def parts(self, raw: Raw) -> Fanout[Part]:              # fan-out: one table per group
-        groups = [r[0] for r in raw.project("grp").distinct().order("grp").fetchall()]
-        return [raw.filter(f"grp = {g}") for g in groups]
+    def by_region(self, orders: Order) -> Fanout[Order]:   # fan-out: one table per region;
+        regions = [r[0] for r in                           # partitioning reuses the schema
+                   orders.project("region").distinct().order("region").fetchall()]
+        return [orders.filter(f"region = '{r}'") for r in regions]
 
-    def scored(self, parts: Branch[Part]) -> GroupScore:   # runs once per branch, in parallel
-        return parts.aggregate("grp, sum(value) AS total")
+    def region_totals(self, by_region: Branch[Order]) -> RegionTotal:   # once per branch,
+        return by_region.aggregate("region, sum(amount) AS total")      # in parallel
 
-    def summary(self, scored: Collect[GroupScore], raw: Raw) -> Summary:   # fan-in
-        self.n_rows = raw.aggregate("count(*) AS c").fetchone()[0]         # -> ledger column
-        return scored.aggregate("count(*) AS n_groups, sum(total) AS grand_total")
+    def summary(self, region_totals: Collect[RegionTotal], orders: Order) -> Summary:  # fan-in
+        self.n_orders = orders.aggregate("count(*) AS c").fetchone()[0]  # -> ledger column
+        return region_totals.aggregate("count(*) AS n_regions, sum(total) AS grand_total")
 ```
 
 Columns can be lists: `embedding: list[float]` maps to DuckDB `DOUBLE[]` /
@@ -193,7 +191,7 @@ or from the shell:
 microflow run mymodule:ETLFlow
 ```
 
-Sizing knobs (both `run` and `resume`, mirroring the Python API): `--max-workers N`
+Sizing knobs (mirroring the Python API): `--max-workers N`
 caps parallel branch workers — peak memory is roughly workers × one branch's working
 set — `--threads` runs branches in threads instead of processes, and
 `--branch-retries N` retries a failed branch in its worker before giving up.
@@ -236,8 +234,8 @@ Views glob every run, so a new run shows up with nothing to sync — `run_id` is
 ```python
 con = ETLFlow.duck()
 con.sql("SELECT run_id, grand_total FROM summary ORDER BY run_id").show()
-con.sql("SELECT grp, total FROM scored WHERE run_id = ? ", params=[run_id]).show()
-con.sql("SELECT run_id, started, finished, n_rows FROM ledger").show()
+con.sql("SELECT region, total FROM region_totals WHERE run_id = ? ", params=[run_id]).show()
+con.sql("SELECT run_id, started, finished, n_orders FROM ledger").show()
 ```
 
 ```bash
@@ -250,10 +248,10 @@ microflow ls mymodule:ETLFlow
 Bare `microflow` (no subcommand) opens an interactive terminal UI:
 
 ```bash
-microflow                       # or: microflow tui myproject.flows
+microflow
 ```
 
-![The runs table: five runs of the ETL example flow, with status and the flow's custom n_rows ledger column](docs/screenshots/tui-runs.svg)
+![The runs table: five runs of the ETL example flow, with status and the flow's custom n_orders ledger column](docs/screenshots/tui-runs.svg)
 
 - one **tab per Flow** in your project (point `microflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
@@ -266,9 +264,9 @@ The drill-down opens on the run's resource stats (the same numbers as `microflow
 
 ![Run drill-down: per-step seconds, peak RSS, average cores, threads and processes](docs/screenshots/tui-run-stats.svg)
 
-and selecting a step previews its output table — here `scored`, one row per fan-out branch:
+and selecting a step previews its output table — here `region_totals`, one row per fan-out branch:
 
-![Step output preview: the scored step's GroupScore table](docs/screenshots/tui-step-preview.svg)
+![Step output preview: the region_totals step's RegionTotal table](docs/screenshots/tui-step-preview.svg)
 
 On startup it re-discovers your flows and warns if a flow's declared table schema has drifted
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
@@ -284,7 +282,7 @@ stay bounded while peaks are preserved.
 ```bash
 microflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
                                            # max_threads (defaults to the latest run)
-microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='scored'"
+microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='region_totals'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
@@ -306,7 +304,7 @@ immutable history). Mark a flow as a prototype to relax them — visibly, in cod
 ```python
 from microflow import Flow, Prototype
 
-class Scratch(Prototype, Flow):     # or: prototype = True as a class attribute
+class Scratch(Prototype, Flow):
     def numbers(self):              # untyped step: schema inferred at write
         return pa.table({"x": [1, 2, 3]})
 
@@ -332,7 +330,7 @@ flow are a **class-definition error**.
 ## Resume
 
 ```bash
-microflow resume mymodule:ETLFlow <origin_run_id>
+microflow run mymodule:ETLFlow --resume <origin_run_id>   # API: ETLFlow.run(resume=run_id)
 ```
 
 A **new** `run_id` is created; completed step outputs are copied from the origin run
@@ -347,12 +345,12 @@ prototype flows only warn, since they relinquish provenance anyway.
 ## Incremental runs (growing corpora)
 
 For a corpus that grows file-by-file, declare which column identifies a fan-out item —
-its **branch key** — and resume stops matching branches by position and starts matching
+its **fanout key** — and resume stops matching branches by position and starts matching
 them by identity:
 
 ```python
 class RawFile(Table):
-    path: str = field(branch_key=True)   # one distinct value per fan-out item
+    path: str = fanout_key               # one distinct value per fan-out item
     size: int
 
 class Annotate(Flow):
@@ -363,10 +361,10 @@ class Annotate(Flow):
 ```
 
 ```bash
-microflow run mymodule:Annotate --incremental
+microflow run mymodule:Annotate --resume latest
 ```
 
-`--incremental` resumes from the latest complete run (first run is a normal full run).
+`--resume latest` resumes from the latest complete run (a first run is a normal full run).
 The fan-out re-runs to pick up the current work-list; branch outputs whose key already
 exists in the origin are **server-side copied**, only new keys compute, and removed keys
 drop out. Downstream steps (the fan-in and beyond) recompute whenever the key set
@@ -375,7 +373,7 @@ costs 5 files' compute, and `SELECT ... WHERE run_id = <new>` is always the full
 
 The key is a contract: **same key must mean same content**. If a source file can be
 re-uploaded in place, put its etag (or mtime) in the key column. The commit gate applies
-unchanged — after a code change, run without `--incremental` to recompute the corpus, or
+unchanged — after a code change, run without `--resume` to recompute the corpus, or
 force with `--allow-commit-drift` to keep old-code outputs.
 
 ## Publish (stable paths for consumers)
@@ -403,9 +401,9 @@ s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class na
   runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
-      raw/part_0.parquet
-      parts/part_0.parquet  parts/part_1.parquet
-      scored/part_0.parquet scored/part_1.parquet
+      orders/part_0.parquet
+      by_region/part_0.parquet      by_region/part_1.parquet
+      region_totals/part_0.parquet  region_totals/part_1.parquet
       summary/part_0.parquet
 ```
 
@@ -422,7 +420,7 @@ the old id.
 
 A ten-minute tour. One small flow — count words across a growing set of documents —
 touches everything above: typed tables with constraints, fan-out/fan-in, params,
-custom ledger columns, querying, resource stats, incremental runs via a branch key,
+custom ledger columns, querying, resource stats, incremental runs via a fanout key,
 and publishing. Save it as `tutorial.py` in a configured repo (`microflow setup`),
 commit, and follow along.
 
@@ -433,7 +431,7 @@ import pyarrow as pa
 
 from microflow import (
     Branch, Collect, Fanout, Flow, FlowParams,
-    LedgerColumns, Table, check, field, primary_key,
+    LedgerColumns, Table, check, fanout_key, primary_key,
 )
 
 # Stand-in for external inputs. Real flows would list files in a bucket or
@@ -445,7 +443,7 @@ CORPUS = {
 
 
 class Doc(Table):
-    path: str = field(branch_key=True)  # item identity -> incremental resume
+    path: str = fanout_key              # item identity -> incremental resume
     text: str
 
 
@@ -495,8 +493,8 @@ $ microflow run tutorial:WordFlow -p min_count=1
 ```
 
 A dirty working tree would have been refused — the run is pinned to your commit.
-If a branch had failed, `microflow resume tutorial:WordFlow <run_id>` would re-run
-only the incomplete branches into a fresh run, copying the finished ones.
+If a branch had failed, `microflow run tutorial:WordFlow --resume <run_id>` would
+re-run only the incomplete branches into a fresh run, copying the finished ones.
 
 **2. Query it.** Every step is a SQL view spanning all runs (`run_id` is a column),
 and the ledger — including your params and custom columns — is a view too:
@@ -536,12 +534,12 @@ $ microflow stats tutorial:WordFlow
 The raw time series is the `metrics` view (`SELECT ts, rss FROM metrics WHERE step='counts'`).
 
 **4. Grow the corpus.** Add a document to `CORPUS`, commit, and run incrementally.
-Because `Doc.path` is the **branch key**, resume matches branches by identity, not
+Because `Doc.path` is the **fanout key**, resume matches branches by identity, not
 position: the two old documents' outputs are server-side copied, only `cat.txt` is
 counted, and the fan-in recomputes because the key set changed:
 
 ```bash
-$ microflow run tutorial:WordFlow --incremental --allow-commit-drift
+$ microflow run tutorial:WordFlow --resume latest --allow-commit-drift
 1784996755141-193f9a4b
 
 $ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
@@ -556,7 +554,7 @@ $ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report 
 `--allow-commit-drift` is needed here only because this tutorial keeps its corpus
 *in the code*, so adding a document changes the commit. A real incremental flow
 lists external inputs (files in a bucket via `self.config`, a manifest, …), and
-growing the corpus doesn't touch the repo — plain `--incremental` suffices, and
+growing the corpus doesn't touch the repo — plain `--resume latest` suffices, and
 the commit gate keeps guarding actual code changes.
 
 **5. Publish for consumers.** Hand downstream users one stable path instead of a

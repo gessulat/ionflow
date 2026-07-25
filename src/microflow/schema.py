@@ -123,29 +123,31 @@ def _arrow_type(dtype):
 class _Field:
     """Column constraints attached as an annotation default (`id: int = primary_key`)."""
 
-    def __init__(self, *, primary_key=False, check=None, branch_key=False):
+    def __init__(self, *, primary_key=False, check=None, fanout_key=False):
         self.primary_key = primary_key
         self.check = check
-        self.branch_key = branch_key
+        self.fanout_key = fanout_key
 
 
-def field(*, primary_key=False, check=None, branch_key=False):
-    """Combine constraints when the shortcuts don't suffice.
-
-    `branch_key=True` marks the column carrying a fan-out item's identity,
-    enabling keyed (incremental) resume — see `Table.branch_key_column`.
-    """
-    return _Field(primary_key=primary_key, check=check, branch_key=branch_key)
+def field(*, primary_key=False, check=None, fanout_key=False):
+    """Combine constraints when the shortcuts (`primary_key`, `check`, `fanout_key`)
+    don't suffice, e.g. `field(primary_key=True, fanout_key=True)`."""
+    return _Field(primary_key=primary_key, check=check, fanout_key=fanout_key)
 
 
 def _is_key_dtype(dtype):
-    """Branch keys must round-trip JSON meta exactly: str or integer types only."""
+    """Fanout keys must round-trip JSON meta exactly: str or integer types only."""
     if dtype in (str, int):
         return True
     return np is not None and isinstance(dtype, type) and issubclass(dtype, np.integer)
 
 
 primary_key = field(primary_key=True)
+
+# On a `Fanout[...]` step's output table: marks the column that is each fan-out
+# item's identity, enabling keyed resume (`run --resume latest`). See
+# `Table.fanout_key_column`.
+fanout_key = field(fanout_key=True)
 
 
 def check(expr):
@@ -160,20 +162,20 @@ class Column:
     False
     """
 
-    def __init__(self, dtype, *, nullable=False, primary_key=False, check=None, branch_key=False):
+    def __init__(self, dtype, *, nullable=False, primary_key=False, check=None, fanout_key=False):
         try:
             _duckdb_type(dtype)
         except KeyError:
             raise TypeError(f"unsupported column dtype: {dtype!r}") from None
-        if branch_key and not _is_key_dtype(dtype):
-            raise TypeError(f"branch_key column must be str or an integer type, not {dtype!r}")
+        if fanout_key and not _is_key_dtype(dtype):
+            raise TypeError(f"fanout_key column must be str or an integer type, not {dtype!r}")
         self.dtype = dtype
         self.primary_key = primary_key
         self.nullable = False if primary_key else nullable
         self.check = check
-        self.branch_key = branch_key
-        if branch_key and self.nullable:
-            raise TypeError("a branch_key column cannot be nullable")
+        self.fanout_key = fanout_key
+        if fanout_key and self.nullable:
+            raise TypeError("a fanout_key column cannot be nullable")
 
     def duckdb_type(self):
         return _duckdb_type(self.dtype)
@@ -236,7 +238,7 @@ def _columns_of(cls, force_nullable=False):
             nullable=force_nullable or optional,
             primary_key=bool(spec and spec.primary_key),
             check=spec.check if spec else None,
-            branch_key=bool(spec and spec.branch_key),
+            fanout_key=bool(spec and spec.fanout_key),
         )
     return cols
 
@@ -263,30 +265,30 @@ class Table:
         cls._columns = _columns_of(cls)
         if not cls._columns:
             raise TypeError(f"{cls.__name__} declares no columns")
-        if len([n for n, c in cls._columns.items() if c.branch_key]) > 1:
-            raise TypeError(f"{cls.__name__}: only one column may be the branch_key")
+        if len([n for n, c in cls._columns.items() if c.fanout_key]) > 1:
+            raise TypeError(f"{cls.__name__}: only one column may be the fanout_key")
 
     @classmethod
     def columns(cls):
         return cls._columns
 
     @classmethod
-    def branch_key_column(cls):
-        """Name of the column marked `field(branch_key=True)`, or None.
+    def fanout_key_column(cls):
+        """Name of the column marked `= fanout_key`, or None.
 
-        On a fan-out step's output table, this column is each item's stable
-        identity (e.g. source file path + etag): every item must hold exactly
-        one distinct value, and resume matches branch outputs across runs by
-        that value instead of by list position — added items compute, matching
-        items are copied from the origin run.
+        On a `Fanout[...]` step's output table, this column is each item's
+        stable identity (e.g. source file path + etag): every item must hold
+        exactly one distinct value, and resume matches branch outputs across
+        runs by that value instead of by list position — added items compute,
+        matching items are copied from the origin run.
 
         >>> class Item(Table):
-        ...     path: str = field(branch_key=True)
+        ...     path: str = fanout_key
         ...     size: int
-        >>> Item.branch_key_column()
+        >>> Item.fanout_key_column()
         'path'
         """
-        return next((n for n, c in cls._columns.items() if c.branch_key), None)
+        return next((n for n, c in cls._columns.items() if c.fanout_key), None)
 
     @classmethod
     def ddl(cls, name, temp=False):
@@ -355,7 +357,21 @@ class Table:
         return type(name, (cls,), {"__annotations__": dict(cols), **constraints})
 
 
-class LedgerColumns:
+class _ColumnSet:
+    """Shared accessors for annotation-declared column sets (LedgerColumns, FlowParams)."""
+
+    _columns: typing.ClassVar[dict] = {}
+
+    @classmethod
+    def columns(cls):
+        return cls._columns
+
+    @classmethod
+    def arrow_fields(cls):
+        return _arrow_fields(cls._columns)
+
+
+class LedgerColumns(_ColumnSet):
     """Per-flow ledger columns, populated during a run (all nullable).
 
     >>> class L(LedgerColumns):
@@ -368,16 +384,8 @@ class LedgerColumns:
         super().__init_subclass__(**kw)
         cls._columns = _columns_of(cls, force_nullable=True)
 
-    @classmethod
-    def columns(cls):
-        return cls._columns
 
-    @classmethod
-    def arrow_fields(cls):
-        return _arrow_fields(cls._columns)
-
-
-class FlowParams:
+class FlowParams(_ColumnSet):
     """Typed run inputs: annotations declare types, class values are defaults.
 
     A bare type is required; a default (or `T | None`) makes it optional.
@@ -401,10 +409,6 @@ class FlowParams:
         for name, col in cls._columns.items():
             if col.dtype not in (int, float, str, bool):
                 raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
-
-    @classmethod
-    def columns(cls):
-        return cls._columns
 
     @classmethod
     def arrow_fields(cls):

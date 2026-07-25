@@ -43,10 +43,10 @@ def _count_of(completed, step):
 
 
 def _keyed_fanouts(dag):
-    """Fan-out step name -> its output table's branch_key column, keyed steps only."""
+    """Fan-out step name -> its output table's fanout_key column, keyed steps only."""
     out = {}
     for name, step in dag.steps.items():
-        key_col = getattr(step.output_table, "branch_key_column", None)
+        key_col = getattr(step.output_table, "fanout_key_column", None)
         if step.is_fanout and key_col is not None and key_col():
             out[name] = key_col()
     return out
@@ -62,7 +62,11 @@ def _downstream(dag, root):
 
 
 def _latest_complete(client, config, layout):
-    """run_id of the newest complete run, or None (ledger rows sort by start time)."""
+    """run_id of the newest complete run, or None (ledger rows sort by start time).
+
+    Complete only — resuming must never chain onto a failed or running origin.
+    `stats`' default "latest" is the looser newest-by-start-time of any status.
+    """
     rows = ledger.read_all(client, config.bucket, layout.ledger)
     return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
 
@@ -232,17 +236,23 @@ def run(
     flow_cls,
     config,
     repo=".",
-    origin_run_id=None,
+    resume=None,
     max_workers=None,
     use_processes=True,
     branch_retries=0,
     params=None,
     allow_commit_drift=False,
-    incremental=False,
 ):
-    if incremental and origin_run_id:
-        raise ValueError("pass either origin_run_id or incremental=True, not both")
-    if (origin_run_id or incremental) and params:
+    """Execute `flow_cls`; returns the new run_id.
+
+    `resume` is the one resume spelling: an origin run_id reuses that run's
+    completed steps; the string "latest" resumes the newest complete run and
+    falls through to a fresh full run when there is none (so cron jobs can
+    always pass it). Resume always produces a NEW, self-contained run.
+    """
+    if allow_commit_drift and not resume:
+        raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
+    if resume and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
     # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
     commit = commit_or_dirty(repo) if flow_cls.prototype else require_clean(repo)
@@ -250,8 +260,7 @@ def run(
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
     client = s3_client(config)
-    if incremental:  # resume from the newest complete run; first run falls through fresh
-        origin_run_id = _latest_complete(client, config, layout)
+    origin_run_id = _latest_complete(client, config, layout) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = connect(config)
@@ -259,12 +268,12 @@ def run(
     flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
-    custom_fields = flow_cls.params_fields() + flow_cls.ledger_fields()
+    custom_fields = flow_cls.custom_ledger_fields()
 
     completed = set()
     keyed = _keyed_fanouts(dag)
-    branch_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
-    origin_completed, origin_branch_keys = set(), {}
+    fanout_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
+    origin_completed, origin_fanout_keys = set(), {}
     # Steps downstream of a keyed fan-out can't be reused upfront: the fan-out
     # re-runs first (the work-list may have changed), branch parts are then
     # matched by item key, and everything else downstream is reused only when
@@ -292,7 +301,7 @@ def run(
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
         return all(
-            set(branch_keys.get(f) or []) == set(origin_branch_keys.get(f) or [])
+            set(fanout_keys.get(f) or []) == set(origin_fanout_keys.get(f) or [])
             for f, ds in keyed_downstream.items()
             if f != excluding and name in ds
         )
@@ -305,14 +314,14 @@ def run(
 
     def reuse_matching_branches(name, dep, todo):
         """Copy origin branch parts whose item key matches; return what's left to compute."""
-        src = {k: j for j, k in enumerate(origin_branch_keys.get(dep) or [])}
+        src = {k: j for j, k in enumerate(origin_fanout_keys.get(dep) or [])}
         if not src:
             warnings.warn(
-                f"origin run has no branch keys for '{dep}' (predates branch_key?); recomputing every '{name}' branch",
+                f"origin run has no fanout keys for '{dep}' (predates fanout_key?); recomputing every '{name}' branch",
                 stacklevel=3,
             )
         hits = [
-            (i, src[k]) for i in todo if (k := branch_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
+            (i, src[k]) for i in todo if (k := fanout_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
         ]
         if hits:
             with ThreadPoolExecutor(max_workers=16) as ex:
@@ -334,7 +343,7 @@ def run(
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         origin_completed = set(origin.get("steps_complete", []))
-        origin_branch_keys = origin.get("branch_keys") or {}
+        origin_fanout_keys = origin.get("fanout_keys") or {}
         with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
             completed.update(
                 ex.map(
@@ -361,7 +370,7 @@ def run(
             "commit": commit,
             "origin_run_id": origin_run_id,
             "steps_complete": sorted(completed),
-            "branch_keys": branch_keys,
+            "fanout_keys": fanout_keys,
             "params": params,
             "custom": custom or {},
         }
@@ -415,7 +424,7 @@ def run(
                 if (
                     todo
                     and origin_run_id
-                    and branch_dep in branch_keys
+                    and branch_dep in fanout_keys
                     and work_lists_unchanged(name, excluding=branch_dep)
                 ):
                     todo = reuse_matching_branches(name, branch_dep, todo)
@@ -449,19 +458,19 @@ def run(
                             layout.part(run_id, name, i),
                             item,
                             step.output_table,
-                            branch_key=key_col,
+                            fanout_key=key_col,
                         )
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
-                                    f"fan-out '{name}': duplicate branch key {value!r}; the "
+                                    f"fan-out '{name}': duplicate fanout key {value!r}; the "
                                     f"'{key_col}' column must identify each item uniquely"
                                 )
                             seen.add(value)
                             item_keys.append(value)
                         keys.append(_key(name, i))
                     if key_col:
-                        branch_keys[name] = item_keys
+                        fanout_keys[name] = item_keys
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
                     completed.update(keys)

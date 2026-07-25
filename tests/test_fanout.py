@@ -29,7 +29,7 @@ def test_partial_fanout_resume_reruns_only_failed_branch(s3cfg, repo, tmp_path, 
 
     # resume with the fault cleared
     monkeypatch.setenv("FLAKY_FAIL", "0")
-    resumed = FlakyFlow.resume(origin_id, s3cfg, repo=repo, use_processes=False)
+    resumed = FlakyFlow.run(s3cfg, repo=repo, resume=origin_id, use_processes=False)
 
     # branches 0 and 2 were reused (server-side copied), only branch 1 re-ran
     assert _exec_counts(d) == {0: 1, 1: 2, 2: 1}

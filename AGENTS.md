@@ -35,7 +35,7 @@ uv sync                       # install (uv-managed, Python >=3.12)
 uv run microflow               # bare command opens the TUI
 uv run microflow setup         # wizard: writes .microflow/config (TOML)
 uv run microflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
-uv run microflow run myproj:Annotate --incremental   # keyed resume from latest complete run
+uv run microflow run myproj:Annotate --resume latest # keyed resume from latest complete run
 uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
 uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
 uv run microflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
@@ -67,15 +67,17 @@ microflow query myproj.flows:Training \
 ## Architecture (one line per module, src/microflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
-  `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` / `= field(...)`);
+  `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` /
+  `= fanout_key` / `= field(...)` to combine);
   compiles to DuckDB DDL + pyarrow schema. Column types must be importable at module
   scope (get_type_hints). numpy scalar types work as annotations (np.float32 -> FLOAT —
   narrow dtypes persist); `shaped(dtype, *shape)` = fixed array, enforced by the write
   cast but round-tripped by parquet as a plain list — read-side comparisons (views,
   drift) must use `Column.persisted_type()`, not `duckdb_type()`.
   `Table.make(name, cols, **constraints)` builds one programmatically (wide schemas).
-  `field(branch_key=True)` (one str/int NOT NULL column) marks a fan-out item's
-  identity for keyed resume; `Table.branch_key_column()` reads it back.
+  `= fanout_key` (one str/int NOT NULL column) marks a `Fanout` item's identity
+  for keyed resume — named to pair with `Fanout[...]`;
+  `Table.fanout_key_column()` reads it back.
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition.
@@ -84,7 +86,8 @@ microflow query myproj.flows:Training \
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
-  `Prototype` mixin / `prototype = True`: scratch namespace (`_proto/`), dirty git
+  `Prototype` mixin (sets `prototype = True`; the mixin is the only documented
+  spelling): scratch namespace (`_proto/`), dirty git
   allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
@@ -98,11 +101,12 @@ microflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
-  Keyed resume (0008): if the fan-out's Table declares a `branch_key`, resume
+  Keyed resume (0008): if the fan-out's Table declares a `fanout_key`, resume
   re-runs the fan-out, copies origin branch parts by item key (positions may
   shift), and reuses downstream steps only when the key set is unchanged; item
-  keys per fan-out are recorded as `branch_keys` in `_meta.json`.
-  `incremental=True` (CLI `run --incremental`) = resume from latest complete run.
+  keys per fan-out are recorded as `fanout_keys` in `_meta.json`.
+  `resume=<run_id>|"latest"` is the single resume spelling (0011), CLI `run --resume`;
+  "latest" = newest complete run, falling through fresh when none exists.
 - `publish.py` — copy one step's output from a complete run to a stable S3 key
   (optional `--where` filter) + `<dest>.meta.json` provenance sidecar; refuses an
   existing dest unless forced. A copy, never a pointer (0009).

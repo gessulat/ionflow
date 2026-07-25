@@ -5,7 +5,16 @@ from pathlib import Path
 import typer
 
 from . import git, storage
-from .config import CONFIG_DIR, CONFIG_FILE, Config, ConfigMissing, read_config, write_config
+from .config import (
+    CONFIG_DIR,
+    CONFIG_FILE,
+    SETUP_FIELDS,
+    Config,
+    ConfigMissing,
+    config_from_setup,
+    read_config,
+    write_config,
+)
 from .query import ledger_with_liveness, step_stats
 
 app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
@@ -15,13 +24,9 @@ app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
 def _default(ctx: typer.Context):
     """Launch the TUI when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        _launch_tui()
+        from . import tui as _tui
 
-
-def _launch_tui(flows=None):
-    from . import tui as _tui
-
-    _tui.run_tui(flows_override=flows)  # config resolution is the TUI's own job
+        _tui.run_tui()  # config resolution (incl. the flows package) is the TUI's own job
 
 
 def _load(spec):
@@ -69,22 +74,11 @@ def setup():
         root = Path(root)
 
     cur = read_config(str(root))
-    bucket = typer.prompt("S3 bucket", default=cur.get("bucket"))
-    prefix = typer.prompt("Key prefix", default=cur.get("prefix", "microflow"))
-    endpoint = typer.prompt("S3 endpoint URL (blank for AWS)", default=cur.get("endpoint", ""), show_default=False)
-    region = typer.prompt("Region", default=cur.get("region", "us-east-1"))
-    flows = typer.prompt(
-        "Flows package for the TUI (e.g. myproject.flows, blank to skip)",
-        default=cur.get("flows", ""),
-        show_default=False,
-    )
-    cfg = Config(
-        bucket=bucket,
-        prefix=prefix,
-        endpoint_url=endpoint or None,
-        region=region,
-        flows=flows or None,
-    )
+    vals = {}
+    for key, label, default in SETUP_FIELDS:
+        preset = cur.get(key, default)  # None (required) prompts until non-empty
+        vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
+    cfg = config_from_setup(vals)
 
     if not storage.aws_credentials_available():
         typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
@@ -118,65 +112,37 @@ def _parse_params(cols, pairs):
     return out
 
 
-_MAX_WORKERS = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)")
-_USE_PROCESSES = typer.Option(True, "--processes/--threads", help="Run fan-out branches in worker processes or threads")
-_BRANCH_RETRIES = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch")
-_ALLOW_COMMIT_DRIFT = typer.Option(
-    False,
-    "--allow-commit-drift",
-    help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
-)
-
-
 @app.command()
 def run(
     flow: str,
-    repo: str = ".",
     param: list[str] = typer.Option([], "--param", "-p", help="Flow param as KEY=VALUE (repeatable)"),
-    incremental: bool = typer.Option(
-        False,
-        "--incremental",
-        help="Resume from the latest complete run: reuse branch outputs whose "
-        "fan-out item key is unchanged, compute only the rest",
+    resume: str = typer.Option(
+        None,
+        "--resume",
+        metavar="RUN_ID|latest",
+        help="Resume from a previous run, reusing its completed steps: an origin "
+        "run_id, or 'latest' for the newest complete run (keyed fan-outs "
+        "recompute only changed items; a first run falls through fresh)",
     ),
-    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
-    max_workers: int = _MAX_WORKERS,
-    use_processes: bool = _USE_PROCESSES,
-    branch_retries: int = _BRANCH_RETRIES,
+    allow_commit_drift: bool = typer.Option(
+        False,
+        "--allow-commit-drift",
+        help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
+    ),
+    max_workers: int = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)"),
+    use_processes: bool = typer.Option(
+        True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
+    ),
+    branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch"),
 ):
-    """Run FLOW (given as 'module:ClassName')."""
+    """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     cls = _load(flow)
     params = _parse_params(cls.params_columns(), param)
     typer.echo(
         cls.run(
             _config_or_setup(),
-            repo=repo,
             params=params,
-            incremental=incremental,
-            allow_commit_drift=allow_commit_drift,
-            max_workers=max_workers,
-            use_processes=use_processes,
-            branch_retries=branch_retries,
-        )
-    )
-
-
-@app.command()
-def resume(
-    flow: str,
-    origin_run_id: str,
-    repo: str = ".",
-    allow_commit_drift: bool = _ALLOW_COMMIT_DRIFT,
-    max_workers: int = _MAX_WORKERS,
-    use_processes: bool = _USE_PROCESSES,
-    branch_retries: int = _BRANCH_RETRIES,
-):
-    """Resume FLOW from a previous run, reusing its completed steps."""
-    typer.echo(
-        _load(flow).resume(
-            origin_run_id,
-            _config_or_setup(),
-            repo=repo,
+            resume=resume,
             allow_commit_drift=allow_commit_drift,
             max_workers=max_workers,
             use_processes=use_processes,
@@ -217,6 +183,10 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
     """Per-step resource usage (duration, peak memory, cores, threads) for a run."""
     con = _load(flow).duck(_config_or_setup())
     if run_id is None:
+        # newest by start time, ANY status — a failed run's resource usage is
+        # exactly what stats gets asked about. Deliberately different from
+        # `run --resume latest`, which needs the newest COMPLETE run
+        # (runner._latest_complete).
         latest = con.sql("SELECT run_id FROM ledger ORDER BY started DESC LIMIT 1").fetchone()
         if latest is None:
             typer.echo("no runs recorded")
@@ -243,12 +213,6 @@ def clean(
         raise typer.Exit(0)
     n = storage.delete_prefix(storage.s3_client(cfg), cfg.bucket, layout.root + "/")
     typer.echo(f"deleted {n} objects under {target}")
-
-
-@app.command()
-def tui(flows: str = typer.Argument(None, help="Flows package (overrides config)")):
-    """Launch the interactive terminal UI."""
-    _launch_tui(flows)
 
 
 def main():

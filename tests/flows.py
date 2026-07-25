@@ -10,7 +10,7 @@ import uuid
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table, field
+from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table, fanout_key
 from microflow.storage import s3_client
 
 
@@ -123,7 +123,7 @@ class ProtoFlow(Prototype, Flow):
 
 class KeyedItem(Table):
     g: int
-    item: str = field(branch_key=True)
+    item: str = fanout_key
 
 
 class KeyedOut(Table):
@@ -152,7 +152,7 @@ class KeyedFlow(Flow):
 
 
 class DupKeyFlow(Flow):
-    """Two fan-out items share a branch key — the run must refuse."""
+    """Two fan-out items share a fanout key — the run must refuse."""
 
     def items(self) -> Fanout[KeyedItem]:
         return [pa.table({"g": [g], "item": ["same"]}) for g in (0, 1)]
