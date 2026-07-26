@@ -1,3 +1,4 @@
+import json
 import os
 import tomllib
 from dataclasses import dataclass
@@ -52,12 +53,15 @@ def write_config(root, cfg):
     """Serialize `cfg` to `<root>/.microflow/config` (TOML); return the path written."""
     d = Path(root) / CONFIG_DIR
     d.mkdir(exist_ok=True)
-    lines = [f'bucket = "{cfg.bucket}"', f'prefix = "{cfg.prefix}"']
+    # json.dumps writes each value: the stdlib has a TOML reader but no writer,
+    # and JSON's string escapes are a subset of TOML basic-string escapes, so
+    # quotes/backslashes/control chars in a value can't corrupt the file
+    lines = [f"bucket = {json.dumps(cfg.bucket)}", f"prefix = {json.dumps(cfg.prefix)}"]
     if cfg.endpoint_url:
-        lines.append(f'endpoint = "{cfg.endpoint_url}"')
-    lines.append(f'region = "{cfg.region}"')
+        lines.append(f"endpoint = {json.dumps(cfg.endpoint_url)}")
+    lines.append(f"region = {json.dumps(cfg.region)}")
     if cfg.flows:
-        lines.append(f'flows = "{cfg.flows}"')
+        lines.append(f"flows = {json.dumps(cfg.flows)}")
     path = d / CONFIG_FILE
     path.write_text("\n".join(lines) + "\n")
     return path
