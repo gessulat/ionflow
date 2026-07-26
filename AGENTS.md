@@ -38,7 +38,7 @@ uv run ionflow run examples.embed:EmbedDocs            # sizing: --max-workers/-
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
 uv run ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
 uv run ionflow stats examples.embed:EmbedDocs          # per-step resources, latest run
-uv run ionflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
+uv run ionflow publish myproj:Annotate <run_id> <step> blessed_table  # --to s3://bucket/prefix
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -106,9 +106,11 @@ ionflow query myproj.flows:Training \
   keys per fan-out are recorded as `fanout_keys` in `_meta.json`.
   `resume=<run_id>|"latest"` is the single resume spelling (0011), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
-- `publish.py` — copy one step's output from a complete run to a stable S3 key
-  (optional `--where` filter) + `<dest>.meta.json` provenance sidecar; refuses an
-  existing dest unless forced. A copy, never a pointer (0009).
+- `publish.py` — bless one step's output from a complete run into the publish
+  lake (a schrein DuckLake, default `<prefix>/published/`, `--to` for any
+  bucket): atomic replace in one CAS commit, snapshot history instead of
+  --force, `publications` provenance table, optional `--where` filter.
+  Still a copy into the lake's data path, never a pointer (0009).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode branch workers each flush their own

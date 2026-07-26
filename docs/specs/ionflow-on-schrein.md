@@ -79,7 +79,7 @@ registered but meta unflushed → resume recomputes under a new run_id.
 - **Retention** — run deletion as `DELETE WHERE run_id` + schrein
   `expire_snapshots`/`gc`; would give deletion real semantics and as-of
   time travel. Unscheduled.
-- (`publish` stays a plain copy to a stable key, 0009: it exists for
-  consumers who must not depend on the flow's bucket, layout, or run
-  status — a frozen artifact at a fixed path — which the catalog's
-  discoverability does not replace.)
+- (`publish` blesses outputs into a separate stable publish DuckLake,
+  0009: consumers who must not depend on the flow's bucket, layout, or
+  run status attach that lake and see only blessed tables — which the
+  flow catalog's discoverability does not replace.)

@@ -51,9 +51,9 @@ class Flow:
         return query.duck(cls, config or Config.load())
 
     @classmethod
-    def publish(cls, run_id, step, dest, config=None, where=None, force=False):
-        """Copy `step`'s output from `run_id` to a stable S3 path (plus provenance sidecar)."""
-        return _publish(cls, config or Config.load(), run_id, step, dest, where=where, force=force)
+    def publish(cls, run_id, step, table, config=None, where=None, dest=None):
+        """Bless `step`'s output from `run_id` as `table` in the publish DuckLake."""
+        return _publish(cls, config or Config.load(), run_id, step, table, where=where, dest=dest)
 
     @classmethod
     def ledger_columns(cls):

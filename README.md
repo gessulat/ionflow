@@ -394,22 +394,31 @@ it changes the commit (recompute without `--resume`, or force with
 `--allow-commit-drift`); a real flow lists external inputs via `self.config`, and
 growing the corpus doesn't touch the repo.
 
-## Publish (stable paths for consumers)
+## Publish (blessed tables for consumers)
 
-Run outputs live in immutable `run_id=` folders. Consumers that just want "the current
-embeddings at a fixed path" — a vector-index builder, a cron job, another team —
-shouldn't need ionflow or a run_id:
+A flow's catalog holds *every* run — including failed ones — and knows nothing about
+which run you trust. Consumers that just want "the current embeddings" — a
+vector-index builder, a cron job, another team — shouldn't need ionflow, a run_id,
+or access to the pipeline bucket:
 
 ```bash
-ionflow publish mymodule:EmbedDocs <run_id> vectors s3://bucket/stable/embeddings.parquet \
-    --where "source = 'wiki'"
+ionflow publish mymodule:EmbedDocs <run_id> vectors embeddings --where "source = 'wiki'"
+# --to s3://other-bucket/consumers   to publish into a lake consumers can reach
 ```
 
-This copies the step's output (optionally filtered) to one parquet object plus a
-`<dest>.meta.json` sidecar recording flow, run_id, commit, filter, and publish time.
-An existing destination is refused unless you pass `--force` (replacing is a single
-atomic PUT). Note that two related files published one after the other can be observed
-mid-swap — consumers needing cross-file consistency should compare the sidecars' run_id.
+This copies the step's output (optionally filtered) into the **publish lake** — a
+separate DuckLake at `<prefix>/published/` holding only blessed tables — and swaps
+it in as `embeddings` in one atomic commit: readers see the previous version or the
+new one, never a mix, even across several tables published back to back. Previous
+versions stay reachable through DuckLake snapshots (no `--force` needed to
+replace), and a `publications` table records flow, run_id, step, filter, commit,
+and publish time for every blessing. Consumers attach with stock DuckDB:
+
+```sql
+INSTALL ducklake; LOAD ducklake;
+ATTACH 'ducklake:s3://bucket/prefix/published/catalog.ducklake' AS pub (READ_ONLY);
+SELECT * FROM pub.embeddings;
+```
 
 ## Storage layout
 

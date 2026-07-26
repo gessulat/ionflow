@@ -860,8 +860,8 @@ All shipped:
 Former M3/M3b (Iceberg adapter, managed presets) are scrapped — decision
 0004. A former M4 (`ionflow publish` targeting an external schrein lake)
 is unnecessary: every ionflow flow already *is* a schrein lake (ionflow
-decision 0015), and `publish` remains a plain copy to a stable key
-(ionflow decision 0009).
+decision 0015), and `publish` blesses outputs into a stable publish
+DuckLake of its own (ionflow decision 0009).
 
 ## 13. Open questions
 

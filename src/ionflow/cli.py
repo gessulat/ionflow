@@ -156,13 +156,13 @@ def publish(
     flow: str,
     run_id: str,
     step: str,
-    dest: str,
+    table: str,
     where: str = typer.Option(None, "--where", help="SQL predicate selecting the rows to publish"),
-    force: bool = typer.Option(False, "--force", help="Replace the destination object if it exists"),
+    to: str = typer.Option(None, "--to", help="Publish lake location (s3://bucket/prefix); default <prefix>/published"),
 ):
-    """Copy STEP's output from RUN_ID to DEST (a stable S3 path) with a provenance sidecar."""
-    m = _load(flow).publish(run_id, step, dest, config=_config_or_setup(), where=where, force=force)
-    typer.echo(f"published {m['flow']}/{m['step']} from run {m['run_id']} to {dest}")
+    """Bless STEP's output from RUN_ID as TABLE in the publish DuckLake (atomic replace)."""
+    m = _load(flow).publish(run_id, step, table, config=_config_or_setup(), where=where, dest=to)
+    typer.echo(f"published {m['flow']}/{m['step']} from run {m['run_id']} as table '{table}'")
 
 
 @app.command()
