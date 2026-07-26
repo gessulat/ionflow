@@ -243,13 +243,14 @@ ionflow ls mymodule:EmbedDocs
 ## Browse in the terminal (TUI)
 
 Bare `ionflow` (no subcommand) opens an interactive terminal UI (the screenshots
-show the small ETL flow from this repo's `examples/etl.py`):
+show the `EmbedDocs` flow from above, runnable from this repo as
+`examples/embed.py`):
 
 ```bash
 ionflow
 ```
 
-![The runs table: five runs of the ETL example flow, with status and the flow's custom n_orders ledger column](docs/screenshots/tui-runs.svg)
+![The runs table: five runs of the EmbedDocs example flow, with status and the flow's custom n_docs ledger column](docs/screenshots/tui-runs.svg)
 
 - one **tab per Flow** in your project (point `ionflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
@@ -262,9 +263,10 @@ The drill-down opens on the run's resource stats (the same numbers as `ionflow s
 
 ![Run drill-down: per-step seconds, peak RSS, average cores, threads and processes](docs/screenshots/tui-run-stats.svg)
 
-and selecting a step previews its output table — here `region_totals`, one row per fan-out branch:
+and selecting a step previews its output table — here `vectors`, one row per document,
+with the 64-wide embedding column running off the right edge:
 
-![Step output preview: the region_totals step's RegionTotal table](docs/screenshots/tui-step-preview.svg)
+![Step output preview: the vectors step's DocVector table](docs/screenshots/tui-step-preview.svg)
 
 On startup it re-discovers your flows and warns if a flow's declared table schema has drifted
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
@@ -278,9 +280,17 @@ interval doubles when the 1024-sample cap folds the buffer), so even multi-day r
 stay bounded while peaks are preserved.
 
 ```bash
-ionflow stats mymodule:EmbedDocs          # per-step: seconds, peak_rss_mb, avg_cores,
-                                           # max_threads (defaults to the latest run)
-ionflow query mymodule:EmbedDocs "SELECT * FROM metrics WHERE step='vectors'"
+$ ionflow stats mymodule:EmbedDocs         # defaults to the latest run
+┌───────────┬─────────┬─────────────┬───────────┬─────────────┬───────────┐
+│   step    │ seconds │ peak_rss_mb │ avg_cores │ max_threads │ processes │
+├───────────┼─────────┼─────────────┼───────────┼─────────────┼───────────┤
+│ docs      │     0.0 │       228.0 │       0.0 │          24 │         1 │
+│ by_source │     0.0 │       228.0 │       0.0 │          24 │         1 │
+│ vectors   │     0.2 │       209.0 │      1.61 │          15 │         2 │
+│ summary   │     0.1 │       228.0 │      0.73 │          24 │         1 │
+└───────────┴─────────┴─────────────┴───────────┴─────────────┴───────────┘
+
+$ ionflow query mymodule:EmbedDocs "SELECT * FROM metrics WHERE step='vectors'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
