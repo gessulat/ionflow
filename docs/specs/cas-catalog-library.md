@@ -176,6 +176,64 @@ metadata responsibility catalog-side, single-file commits). Supporting
 both adapters is therefore not hedging between rivals; it is covering
 two converging designs with one commit protocol.
 
+### 2.3 Why Iceberg never did this, what "no database" really means, and which criticisms each adapter answers
+
+Three questions that come up when reading §2.2 next to this spec, with
+honest answers — they sharpen what the library does and does not claim.
+
+**Why didn't Iceberg build on S3 CAS from the start? Timing, not
+oversight.** CAS on a single mutable pointer *is* Iceberg's commit model
+— every commit is "swap the current-metadata pointer, fail if someone
+beat you." But when Iceberg was designed (Netflix, 2017–2018), S3 had
+nowhere to put that CAS: no atomic rename (HDFS's had made
+`HadoopCatalog` work — on HDFS only), no strong consistency until
+Dec 2020, and no conditional PUT until Aug 2024 (`If-None-Match`) /
+Nov 2024 (`If-Match`). For Iceberg's entire formative decade the
+linearizable register had to live elsewhere — Hive metastore locks,
+DynamoDB (Delta's S3 answer for years), SQL databases, then the REST
+catalog spec. The catalog-service ecosystem is scar tissue from S3
+lacking a conditional write. This spec's premise is only viable since
+late 2024 — which is exactly when the Iceberg dev list started
+discussing a `StorageCatalog` (§2.1) and Boring Catalog appeared. Being
+early, not uniquely clever, is the reassuring position: the primitive
+is new, the idea is convergent.
+
+**Does this design actually work "without a database"? Precision:
+without a database *server*.** The catalog artifact is a real database
+(a DuckDB/SQLite file) — what is eliminated is the always-on process:
+no connections, no credentials store, no ops, nothing that can be down.
+A catalog server's two jobs get split: *storing* metadata stays in the
+database (as an immutable artifact), *coordinating* writers is
+delegated to S3's CAS. The honest price (§3, §9): every commit
+transfers the whole catalog and commits serialize — seconds of latency,
+comfortable at commits-per-minute, versus milliseconds and high
+concurrency for a Postgres catalog. Readers fetch the whole catalog
+instead of sending targeted queries to a server — fine while catalogs
+are MBs. "Zero infrastructure within a stated low-write-rate regime" is
+the defensible claim.
+
+**Does it answer the DuckLake manifesto's criticism of Iceberg? Only
+the DuckLake adapter does.** The two adapters answer different
+questions:
+
+- The **DuckLake adapter** inherits the manifesto's answers by
+  construction — it *is* DuckLake: one GET of the catalog, pruning in
+  local SQL (arguably better than DuckLake-with-Postgres, where pruning
+  is a network query), commits as SQL transactions, no Avro layers,
+  cross-table ACID free. What this spec adds is the reply to the
+  criticism *of DuckLake* — "you reintroduced the server" (§2.2).
+- The **Iceberg adapter** does not and cannot: the register replaces
+  the catalog *service*, but the metadata labyrinth (metadata.json,
+  Avro manifests, the round-trip floor, per-commit small-file spray) is
+  the format itself. Its honest pitch is narrower: zero-infrastructure
+  *coordination*, plus atomic multi-table commits (§8) that most real
+  Iceberg catalogs don't offer. You build it for ecosystem
+  compatibility, not because it answers the manifesto.
+
+Prioritization follows: the DuckLake adapter is the main event; the
+Iceberg adapter is a compatibility bridge (consistent with the §12
+milestone order).
+
 ## 3. Non-goals
 
 - **Not a high-throughput catalog.** Commits serialize on one key. Fine up
