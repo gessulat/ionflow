@@ -34,10 +34,10 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 uv sync                       # install (uv-managed, Python >=3.12)
 uv run ionflow               # bare command opens the TUI
 uv run ionflow setup         # wizard: writes .ionflow/config (TOML)
-uv run ionflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
+uv run ionflow run examples.embed:EmbedDocs            # sizing: --max-workers/--threads/--branch-retries
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
-uv run ionflow query examples.etl:ETLFlow "SELECT * FROM summary"
-uv run ionflow stats examples.etl:ETLFlow          # per-step resources, latest run
+uv run ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
+uv run ionflow stats examples.embed:EmbedDocs          # per-step resources, latest run
 uv run ionflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
 ```
 

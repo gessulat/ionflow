@@ -14,7 +14,7 @@ so no migration was needed.
 ## Decision
 
 Flow identity is `flow_id()` = `{__module__}.{__name__}` (e.g.
-`examples.etl.ETLFlow`), used for the S3 namespace (`Layout.for_flow`) and
+`examples.embed.EmbedDocs`), used for the S3 namespace (`Layout.for_flow`) and
 the registry key. Branch workers receive the flow_id in their payload rather
 than deriving it — the worker re-imports the flow by file path, which gives
 the class a loader module name (`_mf_flow`), so its own `flow_id()` is wrong
