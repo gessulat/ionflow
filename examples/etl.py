@@ -1,8 +1,8 @@
-"""Runnable microflow example.
+"""Runnable ionflow example.
 
-    export MICROFLOW_BUCKET=my-bucket   # + AWS_* / MICROFLOW_ENDPOINT
-    microflow run examples.etl:ETLFlow
-    microflow query examples.etl:ETLFlow "SELECT * FROM summary"
+    export IONFLOW_BUCKET=my-bucket   # + AWS_* / IONFLOW_ENDPOINT
+    ionflow run examples.etl:ETLFlow
+    ionflow query examples.etl:ETLFlow "SELECT * FROM summary"
 
 Load orders, fan out by region, total each region in parallel, fan in to a
 summary. The DAG is the method signatures: `region_totals` depends on
@@ -11,7 +11,7 @@ summary. The DAG is the method signatures: `region_totals` depends on
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
+from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
 
 
 class Order(Table):

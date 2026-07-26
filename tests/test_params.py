@@ -2,7 +2,7 @@ import pytest
 import typer
 from flows import EmptyFanFlow, ParamFlow, Src
 
-from microflow import Flow, FlowParams, cli, ledger, storage
+from ionflow import Flow, FlowParams, cli, ledger, storage
 
 
 def test_params_bind_and_land_in_ledger(s3cfg, repo):

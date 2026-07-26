@@ -48,5 +48,5 @@ jobs:
       - run: uv build
       - name: Smoke-test the wheel in a clean environment
         run: |
-          uv run --isolated --no-project --with dist/*.whl -- python -c "import microflow"
-          uv run --isolated --no-project --with dist/*.whl -- microflow --help
+          uv run --isolated --no-project --with dist/*.whl -- python -c "import ionflow"
+          uv run --isolated --no-project --with dist/*.whl -- ionflow --help

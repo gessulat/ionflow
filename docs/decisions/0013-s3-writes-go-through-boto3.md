@@ -21,7 +21,7 @@ Every S3 object write goes through boto3. `write_part` stages a COPY to a
 local temp file, runs the constraint scan on that file, and only then
 uploads (`put_object` under 8MB, multipart `upload_file` above). Grounds:
 
-- **Failure atomicity.** In microflow, part-object existence *is* the
+- **Failure atomicity.** In ionflow, part-object existence *is* the
   completion record: fan-out completeness, resume trust, and immutable run
   folders all read it that way. An httpfs write that dies mid-stream would
   make a failed branch look complete; resume would copy the corrupt part

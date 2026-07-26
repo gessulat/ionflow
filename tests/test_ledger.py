@@ -4,7 +4,7 @@ import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
 
-from microflow import ledger, storage
+from ionflow import ledger, storage
 
 
 def _client(cfg):

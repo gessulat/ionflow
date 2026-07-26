@@ -6,10 +6,10 @@
 |     /
 ```
 
-# microflow
+# ionflow
 
 A barebones [Metaflow](https://metaflow.org) alternative. A **flow is a class**, a
-**step is a method**, and every step returns a **typed table** that microflow persists
+**step is a method**, and every step returns a **typed table** that ionflow persists
 as Parquet on S3. No Kubernetes, no scheduler, no metadata server — the only thing you
 configure is one S3-compatible bucket.
 
@@ -25,13 +25,13 @@ configure is one S3-compatible bucket.
 - **Resumable**: `run --resume <run_id>` re-runs a failed run, reusing every step
   that already completed — including individual branches of a partially-failed
   fan-out; `run --resume latest` makes growing-corpus runs incremental.
-- **Clean git required.** microflow refuses to start with a dirty working tree, so every
+- **Clean git required.** ionflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 
 ## Install
 
 ```bash
-uv add microflow    # or: pip install microflow
+uv add ionflow    # or: pip install ionflow
 ```
 
 ## Configure (the only setup)
@@ -39,23 +39,23 @@ uv add microflow    # or: pip install microflow
 Run the wizard once per repo:
 
 ```bash
-microflow setup
+ionflow setup
 ```
 
 It asks for your bucket (and optional prefix / endpoint / region) and writes them to
-`.microflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
-whether to gitignore `.microflow/` (keep it local) or commit it (share with your team).
-Re-run `microflow setup` any time to change it.
+`.ionflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
+whether to gitignore `.ionflow/` (keep it local) or commit it (share with your team).
+Re-run `ionflow setup` any time to change it.
 
 **Credentials** come from the standard AWS chain (environment variables, `~/.aws/credentials`,
-or an IAM role) and are never written to the repo. `microflow setup` just checks they resolve
+or an IAM role) and are never written to the repo. `ionflow setup` just checks they resolve
 and that the bucket is reachable. Any command guides you into `setup` if the repo isn't
 configured yet.
 
 ```
-# .microflow/config
+# .ionflow/config
 bucket   = "my-bucket"
-prefix   = "microflow"
+prefix   = "ionflow"
 endpoint = "https://…"   # omit for AWS S3; set for MinIO / R2
 region   = "us-east-1"
 ```
@@ -68,7 +68,7 @@ purely because it has a parameter named `by_region`.
 
 ```python
 import pyarrow as pa
-from microflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
+from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
 
 
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
@@ -138,7 +138,7 @@ conversion scaffolding in either direction:
 
 ```python
 import numpy as np
-from microflow import Flow, Table, check, shaped
+from ionflow import Flow, Table, check, shaped
 
 class Spectra(Table):
     frame: np.int32                      # narrow dtypes persist as-is (INTEGER, not BIGINT)
@@ -176,19 +176,19 @@ class DSP(Flow):
 - **Complex arrays** have no parquet type; store `np.real` / `np.imag` as two
   columns (the error message says so too).
 
-numpy is optional, not a microflow dependency — these paths light up when your
+numpy is optional, not a ionflow dependency — these paths light up when your
 project has it installed.
 
 ## Run it
 
 ```python
-run_id = ETLFlow.run()          # reads .microflow/config (or pass config=Config(...))
+run_id = ETLFlow.run()          # reads .ionflow/config (or pass config=Config(...))
 ```
 
 or from the shell:
 
 ```bash
-microflow run mymodule:ETLFlow
+ionflow run mymodule:ETLFlow
 ```
 
 Sizing knobs (mirroring the Python API): `--max-workers N`
@@ -202,7 +202,7 @@ Typed run inputs, declared like everything else — annotations on an inner clas
 A bare type is required; a class value is the default.
 
 ```python
-from microflow import FlowParams
+from ionflow import FlowParams
 
 class Training(Flow):
     class Params(FlowParams):
@@ -214,7 +214,7 @@ class Training(Flow):
 ```
 
 ```bash
-microflow run mymodule:Training -p dataset=d1 -p batch_size=64
+ionflow run mymodule:Training -p dataset=d1 -p batch_size=64
 ```
 
 ```python
@@ -239,28 +239,28 @@ con.sql("SELECT run_id, started, finished, n_orders FROM ledger").show()
 ```
 
 ```bash
-microflow query mymodule:ETLFlow "SELECT * FROM summary"
-microflow ls mymodule:ETLFlow
+ionflow query mymodule:ETLFlow "SELECT * FROM summary"
+ionflow ls mymodule:ETLFlow
 ```
 
 ## Browse in the terminal (TUI)
 
-Bare `microflow` (no subcommand) opens an interactive terminal UI:
+Bare `ionflow` (no subcommand) opens an interactive terminal UI:
 
 ```bash
-microflow
+ionflow
 ```
 
 ![The runs table: five runs of the ETL example flow, with status and the flow's custom n_orders ledger column](docs/screenshots/tui-runs.svg)
 
-- one **tab per Flow** in your project (point `microflow setup` at your `flows` package —
+- one **tab per Flow** in your project (point `ionflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
 - each tab is a table of that flow's runs: `run_id`, `status`, `started`, `finished`, **plus
   that flow's custom ledger columns**,
 - `Tab` cycles flows; `j`/`k`/PageUp/PageDown move the row cursor,
 - **Enter** drills into a run to preview each step's output table; **Esc** goes back.
 
-The drill-down opens on the run's resource stats (the same numbers as `microflow stats`):
+The drill-down opens on the run's resource stats (the same numbers as `ionflow stats`):
 
 ![Run drill-down: per-step seconds, peak RSS, average cores, threads and processes](docs/screenshots/tui-run-stats.svg)
 
@@ -280,9 +280,9 @@ interval doubles when the 1024-sample cap folds the buffer), so even multi-day r
 stay bounded while peaks are preserved.
 
 ```bash
-microflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
+ionflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
                                            # max_threads (defaults to the latest run)
-microflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='region_totals'"
+ionflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='region_totals'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
@@ -302,7 +302,7 @@ Iterating on a flow fights the production guarantees (clean git, declared schema
 immutable history). Mark a flow as a prototype to relax them — visibly, in code:
 
 ```python
-from microflow import Flow, Prototype
+from ionflow import Flow, Prototype
 
 class Scratch(Prototype, Flow):
     def numbers(self):              # untyped step: schema inferred at write
@@ -320,7 +320,7 @@ Prototype flows:
 - may **omit step output schemas** (untyped steps can't fan out — annotate
   `Fanout[...]` for that);
 - tolerate ledger schema churn (a conflicting old scratch ledger is reset);
-- can be wiped: `microflow clean mymodule:Scratch` (refused for stable flows —
+- can be wiped: `ionflow clean mymodule:Scratch` (refused for stable flows —
   deletion is explicit and scratch-only, never a side effect of running).
 
 Remove the mixin to promote: the flow points back at the stable namespace, and every
@@ -330,7 +330,7 @@ flow are a **class-definition error**.
 ## Resume
 
 ```bash
-microflow run mymodule:ETLFlow --resume <origin_run_id>   # API: ETLFlow.run(resume=run_id)
+ionflow run mymodule:ETLFlow --resume <origin_run_id>   # API: ETLFlow.run(resume=run_id)
 ```
 
 A **new** `run_id` is created; completed step outputs are copied from the origin run
@@ -361,7 +361,7 @@ class Annotate(Flow):
 ```
 
 ```bash
-microflow run mymodule:Annotate --resume latest
+ionflow run mymodule:Annotate --resume latest
 ```
 
 `--resume latest` resumes from the latest complete run (a first run is a normal full run).
@@ -380,10 +380,10 @@ force with `--allow-commit-drift` to keep old-code outputs.
 
 Run outputs live in immutable `run_id=` folders. Consumers that just want "the current
 training set at a fixed path" — a trainer, a cron job, another team — shouldn't need
-microflow or a run_id:
+ionflow or a run_id:
 
 ```bash
-microflow publish mymodule:Annotate <run_id> annotate s3://bucket/stable/training.parquet \
+ionflow publish mymodule:Annotate <run_id> annotate s3://bucket/stable/training.parquet \
     --where "split = 'training'"
 ```
 
@@ -421,15 +421,15 @@ the old id.
 A ten-minute tour. One small flow — count words across a growing set of documents —
 touches everything above: typed tables with constraints, fan-out/fan-in, params,
 custom ledger columns, querying, resource stats, incremental runs via a fanout key,
-and publishing. Save it as `tutorial.py` in a configured repo (`microflow setup`),
+and publishing. Save it as `tutorial.py` in a configured repo (`ionflow setup`),
 commit, and follow along.
 
 ```python
-"""tutorial.py — one flow that touches every microflow feature."""
+"""tutorial.py — one flow that touches every ionflow feature."""
 
 import pyarrow as pa
 
-from microflow import (
+from ionflow import (
     Branch, Collect, Fanout, Flow, FlowParams,
     LedgerColumns, Table, check, fanout_key, primary_key,
 )
@@ -488,26 +488,26 @@ validated on every write), no S3 paths, no serialization code.
 process (cap with `--max-workers`, retry flaky branches with `--branch-retries`):
 
 ```bash
-$ microflow run tutorial:WordFlow -p min_count=1
+$ ionflow run tutorial:WordFlow -p min_count=1
 1784996729416-c93d0d1b                              # the new run_id
 ```
 
 A dirty working tree would have been refused — the run is pinned to your commit.
-If a branch had failed, `microflow run tutorial:WordFlow --resume <run_id>` would
+If a branch had failed, `ionflow run tutorial:WordFlow --resume <run_id>` would
 re-run only the incomplete branches into a fresh run, copying the finished ones.
 
 **2. Query it.** Every step is a SQL view spanning all runs (`run_id` is a column),
 and the ledger — including your params and custom columns — is a view too:
 
 ```bash
-$ microflow query tutorial:WordFlow "SELECT * FROM report"
+$ ionflow query tutorial:WordFlow "SELECT * FROM report"
 ┌────────┬─────────┬──────────┬────────────────────────┐
 │ n_docs │ n_words │ top_word │         run_id         │
 ├────────┼─────────┼──────────┼────────────────────────┤
 │      2 │      14 │ the      │ 1784996729416-c93d0d1b │
 └────────┴─────────┴──────────┴────────────────────────┘
 
-$ microflow query tutorial:WordFlow "SELECT run_id, status, min_count, distinct_words FROM ledger"
+$ ionflow query tutorial:WordFlow "SELECT run_id, status, min_count, distinct_words FROM ledger"
 ┌────────────────────────┬──────────┬───────────┬────────────────┐
 │         run_id         │  status  │ min_count │ distinct_words │
 ├────────────────────────┼──────────┼───────────┼────────────────┤
@@ -516,12 +516,12 @@ $ microflow query tutorial:WordFlow "SELECT run_id, status, min_count, distinct_
 ```
 
 The same works in Python — `WordFlow.duck()` returns the connection — and bare
-`microflow` opens the TUI to browse runs and preview step outputs interactively.
+`ionflow` opens the TUI to browse runs and preview step outputs interactively.
 
 **3. Check what it cost.** Metrics are always on:
 
 ```bash
-$ microflow stats tutorial:WordFlow
+$ ionflow stats tutorial:WordFlow
 ┌─────────┬─────────┬─────────────┬───────────┬─────────────┬───────────┐
 │  step   │ seconds │ peak_rss_mb │ avg_cores │ max_threads │ processes │
 ├─────────┼─────────┼─────────────┼───────────┼─────────────┼───────────┤
@@ -539,10 +539,10 @@ position: the two old documents' outputs are server-side copied, only `cat.txt` 
 counted, and the fan-in recomputes because the key set changed:
 
 ```bash
-$ microflow run tutorial:WordFlow --resume latest --allow-commit-drift
+$ ionflow run tutorial:WordFlow --resume latest --allow-commit-drift
 1784996755141-193f9a4b
 
-$ microflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
+$ ionflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
 ┌────────────────────────┬────────┬─────────┐
 │         run_id         │ n_docs │ n_words │
 ├────────────────────────┼────────┼─────────┤
@@ -561,7 +561,7 @@ the commit gate keeps guarding actual code changes.
 run_id, with provenance in a sidecar:
 
 ```bash
-$ microflow publish tutorial:WordFlow 1784996755141-193f9a4b counts \
+$ ionflow publish tutorial:WordFlow 1784996755141-193f9a4b counts \
     s3://my-bucket/stable/wordcounts.parquet --where "n >= 2"
 published tutorial.WordFlow/counts from run 1784996755141-193f9a4b to s3://my-bucket/stable/wordcounts.parquet
 ```
@@ -571,7 +571,7 @@ and publish time.
 
 **6. Iterate freely.** While reshaping the flow, add the `Prototype` mixin
 (`class WordFlow(Prototype, Flow)`): runs move to a scratch namespace, a dirty git
-tree is allowed, steps may omit their return annotation, and `microflow clean
+tree is allowed, steps may omit their return annotation, and `ionflow clean
 tutorial:WordFlow` wipes the scratch data. Remove the mixin to promote — every
 guarantee applies again from the first stable run.
 
@@ -589,5 +589,5 @@ guarantee applies again from the first stable run.
 - Set custom ledger columns on non-branch (main-process) steps; branch steps run in
   separate processes and their `self` is not carried back.
 - Steps can read **side inputs** (raw files that aren't step outputs) via `self.config`
-  (e.g. `microflow.storage.s3_client(self.config)`). Side inputs escape run provenance —
+  (e.g. `ionflow.storage.s3_client(self.config)`). Side inputs escape run provenance —
   record their identifiers as ledger columns.

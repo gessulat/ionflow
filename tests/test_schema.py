@@ -3,7 +3,7 @@ import datetime as dt
 import pyarrow as pa
 import pytest
 
-from microflow.schema import Table, check, fanout_key, field, primary_key
+from ionflow.schema import Table, check, fanout_key, field, primary_key
 
 
 class Features(Table):

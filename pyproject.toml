@@ -1,5 +1,5 @@
 [project]
-name = "microflow"
+name = "ionflow"
 version = "0.1.0"
 description = "A barebones Metaflow alternative: typed table flows on S3, no scheduler."
 readme = "README.md"
@@ -30,11 +30,11 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/gessulat/microflow"
-Issues = "https://github.com/gessulat/microflow/issues"
+Repository = "https://github.com/gessulat/ionflow"
+Issues = "https://github.com/gessulat/ionflow/issues"
 
 [project.scripts]
-microflow = "microflow.cli:main"
+ionflow = "ionflow.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
@@ -64,12 +64,12 @@ line-length = 120
 select = ["E", "F", "W", "I", "UP", "B", "BLE"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/microflow/cli.py" = ["B008"]  # typer's Option-in-default idiom
+"src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 # Fast by default: parallel, and the 4 heaviest integration tests are excluded.
 # Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
 addopts = "-n 5 --dist worksteal --doctest-modules -m 'not slow'"
-testpaths = ["tests", "src/microflow"]
+testpaths = ["tests", "src/ionflow"]
 markers = ["slow: heavy integration tests (CLI e2e, process pool, resume); run with -m ''"]

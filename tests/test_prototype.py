@@ -5,7 +5,7 @@ import pyarrow as pa
 import pytest
 from flows import ProtoFlow
 
-from microflow import Flow, ledger, storage
+from ionflow import Flow, ledger, storage
 
 
 def test_untyped_step_rejected_outside_prototype():
@@ -31,7 +31,7 @@ def test_prototype_attribute_form():
 
 
 def test_untyped_empty_view_is_run_id_only():
-    from microflow.query import _empty_view_sql
+    from ionflow.query import _empty_view_sql
 
     assert _empty_view_sql(None) == "SELECT NULL::VARCHAR AS run_id WHERE false"
 
@@ -39,7 +39,7 @@ def test_untyped_empty_view_is_run_id_only():
 def test_clean_cli_refuses_stable_flows():
     from typer.testing import CliRunner
 
-    from microflow import cli
+    from ionflow import cli
 
     r = CliRunner().invoke(cli.app, ["clean", "flows:FlakyFlow"])
     assert r.exit_code == 1
@@ -47,14 +47,14 @@ def test_clean_cli_refuses_stable_flows():
 
 
 def test_startup_warnings_skip_prototype_drift(s3cfg):
-    from microflow import discovery
+    from ionflow import discovery
 
     # ProtoFlow has an untyped step: an un-skipped drift check would fail on it
     assert discovery.startup_warnings({"ProtoFlow": ProtoFlow}, s3cfg, {"ProtoFlow"}, {}) == []
 
 
 def test_scan_runs_keeps_namespaces_apart(s3cfg):
-    from microflow import discovery
+    from ionflow import discovery
 
     client = storage.s3_client(s3cfg)
     client.put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")

@@ -16,7 +16,7 @@ dangerous, just limited.
 
 ## Decision
 
-`microflow run` and `microflow resume` take `--max-workers`, `--branch-retries`,
+`ionflow run` and `ionflow resume` take `--max-workers`, `--branch-retries`,
 and `--processes/--threads` (default `--processes`), passing straight through
 to `runner.run`. Thread mode's limits are unchanged and now user-facing:
 GIL-bound pure-Python steps, no per-branch BLAS caps or metrics rows, no crash

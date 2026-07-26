@@ -8,8 +8,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped, storage
-from microflow.storage import Layout, get_table, s3_client, to_arrow
+from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped, storage
+from ionflow.storage import Layout, get_table, s3_client, to_arrow
 
 # --- schema: numpy dtype annotations ---
 
@@ -300,7 +300,7 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
     # the drift check compares against the persisted (list) form: no false positive
-    from microflow import discovery
+    from ionflow import discovery
 
     _, samples, _ = discovery.scan_runs(s3cfg)
     assert discovery.schema_drift(SignalFlow, con, s3cfg, samples[SignalFlow.flow_id()]) == []
