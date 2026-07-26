@@ -20,8 +20,10 @@ Why:
   spec's §11 skeleton; moving it out means copying the tree and dropping the
   workspace entry.
 
-Boundaries this imposes: ionflow must not depend on schrein (until M4's
-`publish --to-ducklake`, which will be an ordinary dependency, not a
-workspace import), and schrein must never import ionflow — the spec is
+Boundaries this imposes: schrein must never import ionflow — the spec is
 deliberately self-contained and the package must stay buildable from it
-alone.
+alone. The other direction is allowed and exists: ionflow depends on
+schrein (a `{ workspace = true }` uv source today, an ordinary package
+dependency once schrein is extracted) for `CasRegister` under its ledger —
+ionflow decision 0014. That dependency carries no role-mixing: the ledger
+stays run bookkeeping, the catalog stays schrein's.

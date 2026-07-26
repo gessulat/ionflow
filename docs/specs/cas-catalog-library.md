@@ -76,12 +76,12 @@ What §7 extracts from `ledger.py` is only the proven CAS commit loop
 of the ledger's run-tracking semantics carries over.
 
 ionflow flows do **not** run on schrein, and the ledger stays in ionflow
-unchanged after schrein exists. The only planned integration is M4:
+after schrein exists. The only planned integration is M4:
 `ionflow publish --to-ducklake / --to-iceberg` — ionflow *publishes
 into* a schrein-managed lake; it does not use schrein as its run
-substrate. (Reimplementing the ledger on `CasRegister` would be a
-mechanical refactor ionflow could adopt later; it would not merge the
-two roles.) An *optional* mode where ionflow registers completed step
+substrate. (Reimplementing the ledger on `CasRegister` is a mechanical
+refactor that does not merge the two roles; ionflow has adopted it —
+see its decision 0014.) An *optional* mode where ionflow registers completed step
 outputs into a schrein lake is explored separately in the ionflow repo
 (`docs/specs/ionflow-on-schrein.md`); even there the roles stay
 distinct — the ledger remains a separate object and keeps sole

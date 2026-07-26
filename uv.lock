@@ -486,6 +486,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "psutil" },
     { name = "pyarrow" },
+    { name = "schrein" },
     { name = "textual" },
     { name = "typer" },
 ]
@@ -506,6 +507,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.4" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
+    { name = "schrein", editable = "schrein" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "typer", specifier = ">=0.26.8" },
 ]

@@ -129,8 +129,10 @@ ionflow query myproj.flows:Training \
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `ledger.py`  — append-only `ledger.parquet` via S3 conditional-write (If-Match) CAS;
-  per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz in DuckDB).
+- `ledger.py`  — append-only `ledger.parquet`; the CAS loop is `schrein.CasRegister`
+  (0014 — ionflow's only schrein import; roles stay separate: the ledger is run
+  bookkeeping, never a catalog). Per-run `_meta.json`. Timestamps are naive UTC
+  (tz-aware parquet needs pytz in DuckDB).
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
@@ -157,11 +159,11 @@ ionflow query myproj.flows:Training \
 
 ## schrein (uv workspace member, `schrein/`)
 
-Sibling library, not part of ionflow: zero-infrastructure lakehouse catalogs
-on S3 conditional writes. Spec: `docs/specs/cas-catalog-library.md`; status:
-M0 (CAS core) + M1 (DuckLake adapter). No imports between ionflow and
-schrein in either direction; its decisions live in `schrein/docs/decisions/`
-(own numbering).
+Sibling library: zero-infrastructure lakehouse catalogs on S3 conditional
+writes. Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
+M1 (DuckLake adapter). ionflow depends on schrein for exactly one thing —
+`CasRegister` under the ledger (decision 0014); schrein must never import
+ionflow. Its decisions live in `schrein/docs/decisions/` (own numbering).
 
 - Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
   (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't

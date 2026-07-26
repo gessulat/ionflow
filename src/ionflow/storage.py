@@ -314,11 +314,11 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     return key_value
 
 
-def put_parquet(client, bucket, key, table, **extra):
-    """Upload a pyarrow Table as parquet; `extra` passes PutObject kwargs (e.g. IfMatch)."""
+def put_parquet(client, bucket, key, table):
+    """Upload a pyarrow Table as parquet."""
     buf = io.BytesIO()
     pq.write_table(table, buf)
-    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), **extra)
+    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
 
 
 def get_table(client, bucket, key):
