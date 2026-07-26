@@ -18,7 +18,7 @@ from .storage import (
     connect,
     empty_relation,
     input_relation,
-    list_keys,
+    part_keys,
     s3_client,
     utc_now,
     write_part,
@@ -46,9 +46,8 @@ def _keyed_fanouts(dag):
     """Fan-out step name -> its output table's fanout_key column, keyed steps only."""
     out = {}
     for name, step in dag.steps.items():
-        key_col = getattr(step.output_table, "fanout_key_column", None)
-        if step.is_fanout and key_col is not None and key_col():
-            out[name] = key_col()
+        if step.is_fanout and step.output_table.fanout_key_column():
+            out[name] = step.output_table.fanout_key_column()
     return out
 
 
@@ -80,12 +79,8 @@ def _fair_share(workers):
 
 def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
-        keys = sorted(list_keys(client, cfg.bucket, layout.step_dir(run_id, dep) + "/"))
+        keys = part_keys(client, cfg.bucket, layout, run_id, dep)
         if not keys:  # empty fan-out: hand the reducer a typed empty table
-            if dep_table is None:
-                raise RuntimeError(
-                    f"empty fan-out from untyped step '{dep}'; declare its Table to type the empty input"
-                )
             return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
@@ -392,6 +387,7 @@ def run(
             custom_fields,
         )
 
+    cat.ensure_tables(flow_cls)  # before any run object exists: a run implies a catalog
     flush()
     upsert("running")
 
@@ -407,7 +403,6 @@ def run(
             pass
 
     try:
-        cat.ensure_tables(flow_cls)
         for name in dag.order:
             step = dag.steps[name]
             if name in lazy_reuse and work_lists_unchanged(name):
@@ -476,7 +471,7 @@ def run(
                 result = _call(con, client, config, layout, flow, step, run_id, None)
                 write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
                 completed.add(_key(name, 0))
-            cat.register_step(run_id, name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
+            cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
             flush()
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]

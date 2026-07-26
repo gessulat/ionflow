@@ -1,9 +1,9 @@
+import duckdb
+
 from . import catalog, metrics
 from .storage import (
     Layout,
     connect,
-    is_metrics_key,
-    list_keys,
     object_age,
     read_parquet_sql,
     s3_client,
@@ -11,9 +11,16 @@ from .storage import (
     utc_now,
 )
 
+# a flow with no runs has no ledger object; the view must still exist and type
+_EMPTY_LEDGER_SQL = (
+    "SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
+    'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR[] AS steps_complete, '
+    "NULL::VARCHAR AS origin_run_id WHERE false"
+)
+
 
 def _empty_view_sql(table):
-    """Typed, zero-row SELECT for a flow that has not run yet (no catalog).
+    """Typed, zero-row SELECT standing in for a table with nothing on S3 yet.
 
     `run_id` goes last, matching its position in the catalog views.
     """
@@ -21,13 +28,17 @@ def _empty_view_sql(table):
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
-def _scan_runs_dir(client, config, layout):
-    """(any run objects present, any metrics present) from one LIST of runs/."""
-    has_runs = has_metrics = False
-    for key in list_keys(client, config.bucket, layout.root + "/runs/"):
-        has_runs = True
-        has_metrics = has_metrics or is_metrics_key(key)
-    return has_runs, has_metrics
+def _view_or_empty(con, name, body, empty_table):
+    """CREATE VIEW over S3 objects, falling back to a typed empty view.
+
+    DuckDB binds read_parquet at CREATE time, so an absent glob/object raises
+    here — that IS the "nothing on S3 yet" signal, no LIST needed.
+    """
+    try:
+        con.execute(f"CREATE VIEW {name} AS {body}")
+    except duckdb.IOException:
+        empty = _EMPTY_LEDGER_SQL if empty_table is None else _empty_view_sql(empty_table)
+        con.execute(f"CREATE VIEW {name} AS {empty}")
 
 
 def step_rows(con, step, run_id, limit=100):
@@ -84,7 +95,14 @@ def ledger_with_liveness(flow_cls, config, con=None):
     A SIGKILL'd run stays `running` in the ledger forever; this derives the
     honest display state at read time (one HEAD per running run).
     """
-    con = con or duck(flow_cls, config)
+    if con is None:  # ledger-only callers (ls) skip the catalog attach entirely
+        con = connect(config)
+        _view_or_empty(
+            con,
+            "ledger",
+            f"SELECT * FROM read_parquet('{uri(config, Layout.for_flow(config, flow_cls).ledger)}')",
+            None,
+        )
     layout = Layout.for_flow(config, flow_cls)
     stale = _stale_running(con, s3_client(config), config, layout)
     if not stale:
@@ -107,12 +125,12 @@ def duck(flow_cls, config):
     """
     con = connect(config)
     layout = Layout.for_flow(config, flow_cls)
-    has_runs, has_metrics = _scan_runs_dir(s3_client(config), config, layout)
     if catalog.Catalog(config, flow_cls).attach_readonly(con):
         for name in flow_cls._dag.steps:
             # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
-    elif has_runs:
+    elif object_age(s3_client(config), config.bucket, layout.ledger) is not None:
+        # runs happened (genesis precedes the first run object) but the register is gone
         raise RuntimeError(
             f"{flow_cls.flow_id()}: runs exist but no catalog does; "
             f"run `ionflow catalog-backfill` to rebuild it from the run folders"
@@ -120,10 +138,6 @@ def duck(flow_cls, config):
     else:  # never ran
         for name, step in flow_cls._dag.steps.items():
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
-    if has_metrics:
-        metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
-    else:
-        metrics_body = _empty_view_sql(metrics.Sample)
-    con.execute(f"CREATE VIEW metrics AS {metrics_body}")
-    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')")
+    _view_or_empty(con, "metrics", read_parquet_sql(uri(config, layout.metrics_glob)), metrics.Sample)
+    _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{uri(config, layout.ledger)}')", None)
     return con

@@ -39,30 +39,24 @@ def schema_drift(flow_cls, config):
     """Messages where a step's declared schema differs from its catalog table.
 
     One catalog read covers every step. No catalog (flow never ran) means no
-    drift; a step whose table is missing was added since genesis and gets its
-    table on the next run — also not drift.
+    drift; a step without a table yet was added since genesis and gets one on
+    the next run — also not drift.
     """
     issues = []
-    try:
-        with catalog.Catalog(config, flow_cls).lake.read() as con:
-            have = {
-                r[0] for r in con.sql("SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake'").fetchall()
-            }
-            for name, step in flow_cls._dag.steps.items():
-                if name not in have:
-                    continue
-                declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
-                persisted = {r[0]: r[1] for r in con.sql(f"DESCRIBE lake.{name}").fetchall() if r[0] != "run_id"}
-                for col, dtype in declared.items():
-                    if col not in persisted:
-                        issues.append(f"{flow_cls.flow_id()}.{name}: missing column '{col}'")
-                    elif persisted[col] != dtype:
-                        issues.append(f"{flow_cls.flow_id()}.{name}: '{col}' {persisted[col]}→{dtype}")
-                for col in persisted:
-                    if col not in declared:
-                        issues.append(f"{flow_cls.flow_id()}.{name}: unexpected column '{col}'")
-    except FileNotFoundError:
-        return []
+    tables = catalog.Catalog(config, flow_cls).tables()
+    for name, step in flow_cls._dag.steps.items():
+        if name not in tables:
+            continue
+        declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
+        persisted = {c: t for c, t in tables[name].items() if c != "run_id"}
+        for col, dtype in declared.items():
+            if col not in persisted:
+                issues.append(f"{flow_cls.flow_id()}.{name}: missing column '{col}'")
+            elif persisted[col] != dtype:
+                issues.append(f"{flow_cls.flow_id()}.{name}: '{col}' {persisted[col]}→{dtype}")
+        for col in persisted:
+            if col not in declared:
+                issues.append(f"{flow_cls.flow_id()}.{name}: unexpected column '{col}'")
     return issues
 
 

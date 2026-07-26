@@ -105,8 +105,8 @@ def test_bare_ndarray_shape_mismatch_is_actionable():
         to_arrow(np.zeros((2, 3)), Pair)
 
 
-def test_bare_ndarray_untyped_step_is_actionable():
-    with pytest.raises(TypeError, match="untyped step"):
+def test_bare_ndarray_without_table_is_actionable():
+    with pytest.raises(TypeError, match="no declared Table"):
         to_arrow(np.zeros(3))
 
 

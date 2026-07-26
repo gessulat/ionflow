@@ -79,6 +79,8 @@ def build_dag(cls) -> Dag:
         table = typing.get_args(ret)[0] if is_fanout else ret
         if table is None:
             raise ValueError(f"step '{name}' has no output table annotation")
+        if "run_id" in table.columns():
+            raise ValueError(f"step '{name}': column 'run_id' is reserved (the catalog's partition column)")
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():

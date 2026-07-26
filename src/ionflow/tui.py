@@ -113,7 +113,7 @@ class OverviewScreen(Screen):
         if not self.flows:
             yield Static("No flows found. Set `flows` in .ionflow/config to your flows package.")
         with TabbedContent():
-            for name, cls in self.flows.items():
+            for name in self.flows:
                 with TabPane(name, id=f"flow-{_slug(name)}"):
                     yield FlowTable(cursor_type="row", id=f"table-{_slug(name)}")
         yield Footer()

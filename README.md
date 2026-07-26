@@ -232,7 +232,14 @@ the run's meta; `resume` always reuses the origin run's params. Types are limite
 ## Query every run as one database
 
 `duck()` returns a DuckDB connection with a **view per step table** plus a `ledger` view.
-Views glob every run, so a new run shows up with nothing to sync — `run_id` is a column.
+Views read the flow's **DuckLake catalog** (attached read-only as a consistent
+snapshot), so a new run shows up with nothing to sync — `run_id` is a column.
+Anyone with stock DuckDB can attach the catalog directly, no ionflow needed:
+
+```sql
+INSTALL ducklake; LOAD ducklake;
+ATTACH 'ducklake:s3://bucket/prefix/mymodule.EmbedDocs/catalog.ducklake' AS lake (READ_ONLY);
+```
 
 ```python
 con = EmbedDocs.duck()
@@ -409,6 +416,8 @@ mid-swap — consumers needing cross-file consistency should compare the sidecar
 ```
 s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
   ledger.parquet                           #   e.g. mymodule.EmbedDocs
+  catalog.ducklake                         # the flow's DuckLake catalog (schrein
+  _lake/                                   #   CAS register); _lake/ = catalog-owned files
   runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
@@ -418,9 +427,12 @@ s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class na
       summary/part_0.parquet
 ```
 
-Run folders are immutable, which is why no catalog database is needed — DuckDB reads the
-Parquet directly and the ledger uses an S3 conditional-write (`If-Match`) for safe
-concurrent appends.
+Run folders are immutable. The catalog registers each completed step's parts
+(metadata only — parts are never rewritten; `run_id` comes from the hive path)
+in one CAS commit per step, and both the catalog and the ledger swap via S3
+conditional writes (`If-Match`), so concurrent runs stay safe with no extra
+infrastructure. If the catalog object is ever lost or corrupted,
+`ionflow catalog-backfill mymodule:EmbedDocs` rebuilds it from the run folders.
 
 A flow's durable identity is its **module-qualified class name** (`flow_id`), so
 same-named classes in different modules never share data. The flip side: renaming a

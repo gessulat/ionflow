@@ -201,7 +201,7 @@ def catalog_backfill(
     flow: str,
     replace: bool = typer.Option(False, "--replace", help="Rebuild an existing catalog from the run folders"),
 ):
-    """Register all complete runs into the flow's DuckLake catalog (catalog mode)."""
+    """Rebuild a flow's catalog from its run folders (recovery for a lost register)."""
     from . import catalog
 
     cls = _load(flow)

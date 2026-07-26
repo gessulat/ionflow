@@ -74,6 +74,14 @@ class DuckLake:
         register = CasRegister(client, bucket, f"{prefix}/{CATALOG_KEY}")
         return cls(register, f"s3://{bucket}/{prefix}/data/", secret_sql)
 
+    def attach(self, con, local: pathlib.Path, read_only: bool = False) -> None:
+        """Attach a local copy of the catalog on `con` as `lake`."""
+        load_ducklake(con)
+        if self.secret_sql:
+            con.execute(self.secret_sql)
+        ro = ", READ_ONLY" if read_only else ""
+        con.execute(f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})")
+
     @contextlib.contextmanager
     def _open(self, blob: bytes | None, read_only: bool = False):
         """Materialize the catalog locally and attach it; yields (con, local)."""
@@ -83,11 +91,7 @@ class DuckLake:
                 local.write_bytes(blob)  # rebase base; genesis: ATTACH creates it
             con = duckdb.connect()
             try:
-                load_ducklake(con)
-                if self.secret_sql:
-                    con.execute(self.secret_sql)
-                ro = ", READ_ONLY" if read_only else ""
-                con.execute(f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})")
+                self.attach(con, local, read_only)
                 yield con, local
             finally:
                 con.close()

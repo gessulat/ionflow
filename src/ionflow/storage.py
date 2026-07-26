@@ -6,7 +6,6 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from itertools import batched
 from urllib.parse import urlparse
 
 import boto3
@@ -57,7 +56,7 @@ class Layout:
 
     @classmethod
     def for_flow(cls, config, flow_cls):
-        """The layout a flow class writes to — the one place identity and flag are read.
+        """The layout a flow class writes to — the one place identity is read.
 
         `flow` is the module-qualified `flow_id()`, so same-named classes in
         different modules never share a namespace or ledger.
@@ -198,7 +197,7 @@ def _ndarray_table(arr, table):
         return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
     if table is None:
         raise TypeError(
-            "bare ndarray from an untyped step: return {'col': array} or a structured array so columns have names"
+            "bare ndarray with no declared Table: return {'col': array} or a structured array so columns have names"
         )
     cols = table.columns()
     names = list(cols)
@@ -337,14 +336,6 @@ def get_bytes_or_none(client, bucket, key):
         raise
 
 
-def delete_prefix(client, bucket, prefix):
-    """Delete every object under `prefix`; returns the number deleted."""
-    keys = list_keys(client, bucket, prefix)
-    for batch in batched(keys, 1000):  # DeleteObjects caps at 1000 keys
-        client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]})
-    return len(keys)
-
-
 def object_age(client, bucket, key):
     """Seconds since the object was last written, by S3's own clock (None if absent).
 
@@ -361,25 +352,14 @@ def object_age(client, bucket, key):
     return (server_now - r["LastModified"]).total_seconds()
 
 
+def part_keys(client, bucket, layout, run_id, step):
+    """A step's part keys for one run, sorted — the one registration/read order."""
+    return sorted(list_keys(client, bucket, layout.step_dir(run_id, step) + "/"))
+
+
 def list_keys(client, bucket, prefix):
     pages = client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
     return [o["Key"] for page in pages for o in page.get("Contents", [])]
-
-
-def is_metrics_key(key):
-    """True for metrics objects — the orchestrator's or a branch worker's.
-
-    Kept beside the key scheme so recognition can't drift from construction.
-
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics.parquet")
-    True
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet")
-    True
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/raw/part_0.parquet")
-    False
-    """
-    name = key.rsplit("/", 1)[-1]
-    return name.startswith(METRICS_PREFIX) and name.endswith(".parquet")
 
 
 def _np_column(name, arr):

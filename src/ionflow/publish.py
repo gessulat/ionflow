@@ -4,8 +4,8 @@ from .storage import (
     connect,
     empty_relation,
     input_relation,
-    list_keys,
     object_age,
+    part_keys,
     s3_client,
     utc_now,
     write_part,
@@ -49,15 +49,12 @@ def publish(flow_cls, config, run_id, step, dest, where=None, force=False):
     dest_bucket, dest_key = _parse_dest(config, dest)
     if not force and object_age(client, dest_bucket, dest_key) is not None:
         raise FileExistsError(f"s3://{dest_bucket}/{dest_key} exists; pass force=True (CLI: --force) to replace it")
-    keys = sorted(list_keys(client, config.bucket, layout.step_dir(run_id, step) + "/"))
+    keys = part_keys(client, config.bucket, layout, run_id, step)
     con = connect(config)
     if keys:
         rel = input_relation(con, config, keys)
     else:  # e.g. an empty fan-out: publish a typed, zero-row file
-        table = flow_cls._dag.steps[step].output_table
-        if table is None:
-            raise RuntimeError(f"step '{step}' wrote no parts in run {run_id} and declares no Table")
-        rel = empty_relation(con, table)
+        rel = empty_relation(con, flow_cls._dag.steps[step].output_table)
     if where:
         rel = rel.filter(where)
     write_part(client, dest_bucket, dest_key, rel, None)

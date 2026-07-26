@@ -16,7 +16,7 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 
 - Tests run **parallel by default** (`-n 5 --dist worksteal`, set in pyproject).
 - The heaviest integration tests are marked `slow` and **skipped by default**:
-  CLI end-to-end, process-pool run, and every multi-run resume test (classic and
+  CLI end-to-end, process-pool run, and every multi-run resume test (plain and
   keyed/incremental). `-m ""` includes them.
   Anything touching `runner.py`, `cli.py`, or resume semantics MUST pass `-m ""`.
 - Doctests live in modules and run automatically (`--doctest-modules` in addopts).
@@ -131,7 +131,7 @@ ionflow query myproj.flows:Training \
   (0014 — roles stay separate: the ledger is run bookkeeping, never a catalog).
   Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
   in DuckDB).
-- `catalog.py` — every stable flow's DuckLake catalog (0015, 0016 — the only
+- `catalog.py` — every flow's DuckLake catalog (0015, 0016 — the only
   read/registration mode; no config flag): at the flow root, one table per
   step, run_id inferred from the parts' hive paths at registration (parts
   never rewritten). One CAS commit per completed step by the orchestrator;
@@ -170,7 +170,7 @@ Sibling library: zero-infrastructure lakehouse catalogs on S3 conditional
 writes. Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
 two things — `CasRegister` under the ledger (0014) and `DuckLake` under
-catalog mode (0015); schrein must never import ionflow. Its decisions live
+the catalog (0015); schrein must never import ionflow. Its decisions live
 in `schrein/docs/decisions/` (own numbering).
 
 - Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
