@@ -3,7 +3,7 @@
 **Status:** draft for extraction into a fresh repository
 **Origin:** design discussion in the [ionflow](https://github.com/gessulat/ionflow) repo, 2026-07-25
 **Landscape checked:** 2026-07-26 (§2.1 — the niche is validated and unoccupied)
-**Working name:** `casket` (CAS + bucket — placeholder, rename freely)
+**Working name:** `schrein` (German: shrine/reliquary — a sealed casket built to preserve its contents unchanged)
 
 This document is self-contained. It specifies a small Python library that
 makes a **multi-writer DuckLake catalog** (and later an **Apache Iceberg
@@ -256,7 +256,7 @@ Three components; the adapters differ only in *what the register holds*.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  casket.register  —  CAS core (~150 lines, no deps > boto3)│
+│ schrein.register  —  CAS core (~150 lines, no deps > boto3)│
 │  A linearizable register on one S3 key:                    │
 │    read() -> (bytes|None, etag|None)                       │
 │    write(bytes, expect_etag) -> etag     # If-Match CAS    │
@@ -265,7 +265,7 @@ Three components; the adapters differ only in *what the register holds*.
 └─────────────┬─────────────────────────┬───────────────────┘
               │                         │
 ┌─────────────▼─────────────┐ ┌─────────▼───────────────────┐
-│ casket.ducklake (phase 1) │ │ casket.iceberg   (phase 2)  │
+│ schrein.ducklake (phase 1)│ │ schrein.iceberg  (phase 2)  │
 │ register holds the        │ │ register holds a JSON       │
 │ .ducklake catalog file    │ │ pointer map:                │
 │ (DuckDB-format);          │ │   {table -> metadata.json}  │
@@ -428,7 +428,7 @@ which the atomic-commit property above makes safe to do in one step.
 ## 6. Public API (target)
 
 ```python
-from casket import CasRegister, DuckLake
+from schrein import CasRegister, DuckLake
 
 lake = DuckLake(
     bucket="mybucket", prefix="lake",     # -> s3://mybucket/lake/catalog.ducklake
@@ -499,7 +499,7 @@ raise RuntimeError("CAS failed after retries")
 Generalized core for the new library (complete, runnable):
 
 ```python
-# src/casket/register.py
+# src/schrein/register.py
 """A linearizable CAS register on one S3 key, via conditional writes."""
 import random
 import time
@@ -562,7 +562,7 @@ runs the user closure, detaches, asserts no `.wal`, and returns the new
 file's bytes.
 
 ```python
-# src/casket/ducklake.py  (sketch; the register does the concurrency work)
+# src/schrein/ducklake.py  (sketch; the register does the concurrency work)
 import pathlib
 import tempfile
 
@@ -778,7 +778,7 @@ server-side. What the presets buy is one uniform entry point where the
 backend is just a URI:
 
 ```python
-from casket import open_catalog
+from schrein import open_catalog
 
 open_catalog("cas+s3://bucket/prefix")            # self-hosted: this spec's CAS catalog
 open_catalog("s3tables://<table-bucket-arn>")     # AWS S3 Tables
@@ -873,10 +873,10 @@ the harness is parallel-safe by construction (one server, unique buckets).
 ## 11. Fresh-repo skeleton
 
 ```
-casket/
+schrein/
   pyproject.toml
   README.md                 <- distill §1, §4, §6 of this spec
-  src/casket/
+  src/schrein/
     __init__.py             <- exports CasRegister, DuckLake, CommitConflict
     register.py             <- §7.1 (complete)
     ducklake.py             <- §7.1 sketch -> full adapter (genesis, read(), gc)
@@ -893,7 +893,7 @@ casket/
 ```toml
 # pyproject.toml
 [project]
-name = "casket"
+name = "schrein"
 version = "0.0.1"
 description = "Zero-infrastructure lakehouse catalogs on S3 conditional writes (DuckLake, Iceberg)"
 requires-python = ">=3.12"
@@ -913,7 +913,7 @@ addopts = "-n auto --dist worksteal"
 testpaths = ["tests"]
 ```
 
-Bootstrap: `uv init --lib casket && uv add boto3 duckdb && uv add --group dev pytest pytest-xdist "moto[server,s3]"`.
+Bootstrap: `uv init --lib schrein && uv add boto3 duckdb && uv add --group dev pytest pytest-xdist "moto[server,s3]"`.
 
 ## 12. Milestones
 
