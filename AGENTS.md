@@ -154,3 +154,21 @@ ionflow query myproj.flows:Training \
 - A run killed by SIGKILL stays `running` in the ledger forever (can't catch it),
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
   has been quiet for 300s; its metrics survive up to the last flush.
+
+## schrein (uv workspace member, `schrein/`)
+
+Sibling library, not part of ionflow: zero-infrastructure lakehouse catalogs
+on S3 conditional writes. Spec: `docs/specs/cas-catalog-library.md`; status:
+M0 (CAS core) + M1 (DuckLake adapter). No imports between ionflow and
+schrein in either direction; its decisions live in `schrein/docs/decisions/`
+(own numbering).
+
+- Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
+  (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't
+  collect it.
+- Its tests launch `schrein/tests/moto_server.py`, NOT bare moto: moto's
+  conditional PUTs race under threads and silently lose updates
+  (schrein decision 0003).
+- The ducklake extension loads from the `duckdb-extension-ducklake` PyPI
+  wheel when `INSTALL` can't reach extensions.duckdb.org (decision 0002);
+  the wheel pins its exact duckdb version, so upgrade both together.
