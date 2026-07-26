@@ -1,0 +1,37 @@
+[project]
+name = "schrein"
+version = "0.0.1"
+description = "Zero-infrastructure DuckLake catalogs on S3 conditional writes"
+readme = "README.md"
+authors = [
+    { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
+]
+requires-python = ">=3.12"
+license = "MIT"
+keywords = ["ducklake", "lakehouse", "catalog", "duckdb", "s3", "cas"]
+dependencies = [
+    "boto3>=1.35",
+    "duckdb>=1.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    # Extension wheel so tests run without extensions.duckdb.org access;
+    # published in lockstep with duckdb (see docs/decisions/0002).
+    "duckdb-extension-ducklake>=1.5.4",
+    "moto[s3,server]>=5.2.2",
+    "pytest>=8",
+    "pytest-xdist>=3",
+]
+
+[tool.pytest.ini_options]
+# Fast by default: the CAS-contention hammer at the DuckLake layer is `slow`.
+# Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
+addopts = "-n 5 --dist worksteal -m 'not slow'"
+testpaths = ["tests"]
+pythonpath = ["tests"]  # pins `from helpers import ...` under any import mode
+markers = ["slow: heavy CAS-contention integration tests; run with -m ''"]
