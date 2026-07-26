@@ -1,3 +1,5 @@
+import graphlib
+import heapq
 import inspect
 import typing
 from dataclasses import dataclass
@@ -39,20 +41,19 @@ def _is_step(name, obj):
 
 
 def _toposort(steps):
-    in_degree = {n: len(s.deps) for n, s in steps.items()}
-    ready = sorted(n for n, d in in_degree.items() if d == 0)
-    order = []
-    while ready:
-        n = ready.pop(0)
+    """Topological order, lexicographically smallest ready step first (deterministic)."""
+    ts = graphlib.TopologicalSorter({n: s.deps for n, s in steps.items()})
+    try:
+        ts.prepare()
+    except graphlib.CycleError as e:
+        raise ValueError(f"cycle detected among steps: {' -> '.join(e.args[1])}") from None
+    order, ready = [], []
+    while ts.is_active():
+        for n in ts.get_ready():
+            heapq.heappush(ready, n)
+        n = heapq.heappop(ready)
         order.append(n)
-        for m, s in steps.items():
-            if n in s.deps:
-                in_degree[m] -= 1
-                if in_degree[m] == 0:
-                    ready.append(m)
-        ready.sort()
-    if len(order) != len(steps):
-        raise ValueError(f"cycle detected among steps: {set(steps) - set(order)}")
+        ts.done(n)
     return order
 
 

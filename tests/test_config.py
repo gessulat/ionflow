@@ -38,6 +38,13 @@ def test_flows_roundtrips(tmp_path):
     assert Config.load(str(tmp_path)).flows == "myproj.flows"
 
 
+def test_write_escapes_special_characters(tmp_path):
+    from microflow.config import write_config
+
+    write_config(tmp_path, Config(bucket="b", prefix='pre"fix\\path'))
+    assert Config.load(str(tmp_path)).prefix == 'pre"fix\\path'
+
+
 def test_missing_raises(tmp_path):
     assert find_config(str(tmp_path)) is None
     with pytest.raises(ConfigMissing):
