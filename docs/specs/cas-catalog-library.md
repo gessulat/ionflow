@@ -126,6 +126,56 @@ deserve nothing more than thin adapters (§8.1). And since Boring Catalog
 is unmaintained, the §8 plan builds on `CasRegister` rather than adopting
 it.
 
+### 2.2 Why DuckLake exists at all (and why that argument leads here)
+
+Background worth internalizing before building either adapter — it
+explains why the two adapters have such different shapes, and why this
+library is a natural extension of DuckLake's own argument rather than a
+workaround.
+
+**The catalog paradox.** Iceberg and Delta were designed to need *no*
+database: all metadata encoded into immutable files on blob storage, at
+the cost of many compromises (two-layer Avro manifests batched solely
+because blob stores punish small files; a hard latency floor of many
+sequential HTTP round trips before the smallest query touches data; a
+new metadata-file spray per commit — the "small changes" problem).
+Atomic commits then forced both formats to bolt on a catalog — a
+database — anyway, but one that holds only a pointer, while the real
+metadata still lives in the file labyrinth built to avoid it. The
+DuckDB team hit this first-hand implementing `duckdb-iceberg`, and the
+[DuckLake manifesto](https://ducklake.select/manifesto/) is the
+conclusion: the designs "never revisited the rest of their design
+constraints" after conceding the database. If you must run one, let it
+hold *everything* — schemas, snapshots, file lists, stats — and keep
+only data as Parquet on S3. Reads drop from ~7 round trips to ~2 (one
+SQL query does all pruning and returns the file list); commits become
+SQL transactions with free cross-table ACID; tiny inserts can be
+[inlined into the catalog](https://ducklake.select/2026/04/02/data-inlining-in-ducklake/)
+instead of spraying small files. The stated justification: the 2010s
+constraints died — S3 is strongly consistent, running a database is
+trivial, and the Hadoop-era database-avoidance reflex is a hangover
+(Mühleisen and Tigani's framing: "Iceberg is the new Hadoop").
+
+**The counterattack, and this spec's move.** The standard objection to
+DuckLake is that the catalog database reintroduces exactly the
+always-on infrastructure the lakehouse was supposed to eliminate —
+hence "multi-user → run PostgreSQL" in the DuckLake docs, and hence
+Quack (§2, §2.1: their server-shaped beta answer). This library is the
+missing move in that debate: keep DuckLake's "all metadata in SQL" win
+and delete the infrastructure by making the database itself an
+immutable artifact CAS-swapped on S3 (§5). It also explains the adapter
+asymmetry: DuckLake's catalog is *designed* to be one swappable
+database file — the register holds it directly — while Iceberg's
+metadata is deliberately smeared across immutable files, so its
+register can only hold the pointer map (§8).
+
+**It's playing out as a debate, not a war.** DuckLake 0.3 shipped
+[bidirectional Iceberg metadata/data copy](https://ducklake.select/2025/09/17/ducklake-03/),
+and Iceberg's v4 discussions are absorbing the critique (moving
+metadata responsibility catalog-side, single-file commits). Supporting
+both adapters is therefore not hedging between rivals; it is covering
+two converging designs with one commit protocol.
+
 ## 3. Non-goals
 
 - **Not a high-throughput catalog.** Commits serialize on one key. Fine up
@@ -866,6 +916,17 @@ DuckLake:
 [MotherDuck architecture deep dive](https://motherduck.com/blog/ducklake-architecture-deep-dive/) ·
 [DuckLake in production (catalog & storage)](https://thefulldatastack.substack.com/p/ducklake-in-production-catalog-storage) ·
 [Quack as the DuckLake catalog](https://www.definite.app/blog/duckdb-quack-ducklake-catalog)
+
+DuckLake-vs-Iceberg background (§2.2):
+[DuckLake announcement](https://ducklake.select/2025/05/27/ducklake-01/) ·
+[data inlining in DuckLake](https://ducklake.select/2026/04/02/data-inlining-in-ducklake/) ·
+[DuckLake 0.3 — Iceberg interoperability](https://ducklake.select/2025/09/17/ducklake-03/) ·
+[Iceberg vs DuckLake, summary of a conversation](https://selectstarfrom.substack.com/p/iceberg-vs-ducklake-summary-of-a) ·
+[MotherDuck: a duck walks into a lake](https://motherduck.com/blog/ducklake-motherduck/) ·
+[InfoQ on DuckLake 1.0](https://www.infoq.com/news/2026/05/ducklake-sql-catalog/) ·
+[The Register on the small-changes problem](https://www.theregister.com/software/2026/04/16/duckdb-uses-rdbms-to-tackle-lakehouse-small-changes-issue/5222357) ·
+[lakehouse table formats in 2026](https://amdatalakehouse.substack.com/p/lakehouse-table-formats-in-2026-iceberg) ·
+[Data Engineering Podcast: Duck Lake](https://www.dataengineeringpodcast.com/episodepage/duck-lake-simplifying-the-lakehouse-ecosystem)
 
 S3 primitives:
 [conditional writes user guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
