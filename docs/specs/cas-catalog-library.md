@@ -56,6 +56,33 @@ The library's core idea:
 Every commit serializes on one S3 key. That is the entire coordination
 protocol.
 
+### 1.1 Scope guard: schrein is not ionflow's ledger
+
+Because both designs are "one mutable S3 object, CAS-swapped," it is easy
+to conflate them. They share a *mechanism*, not a *role*:
+
+- **ionflow's ledger** is run bookkeeping: an append-only record of flow
+  runs (`run_id`, status, timestamps, commit, completed steps, params).
+  It has no schema authority — in ionflow, table schemas live in `Table`
+  class annotations and drift checking lives in `discovery.py`. The
+  ledger never performs or tracks schema changes.
+- **schrein's register** holds a lakehouse *catalog*: table schemas,
+  snapshots, and file lists for a datalake. Schema evolution is a
+  first-class catalog operation here (§5.6) — the opposite of the
+  ledger's role.
+
+What §7 extracts from `ledger.py` is only the proven CAS commit loop
+(`upsert_run` → `CasRegister`), i.e. the coordination primitive. Nothing
+of the ledger's run-tracking semantics carries over.
+
+ionflow flows do **not** run on schrein, and the ledger stays in ionflow
+unchanged after schrein exists. The only planned integration is M4:
+`ionflow publish --to-ducklake / --to-iceberg` — ionflow *publishes
+into* a schrein-managed lake; it does not use schrein as its run
+substrate. (Reimplementing the ledger on `CasRegister` would be a
+mechanical refactor ionflow could adopt later; it would not merge the
+two roles.)
+
 ## 2. Prior art (read these before building)
 
 | Project | What it proves | Link |
