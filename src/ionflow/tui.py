@@ -114,7 +114,7 @@ class OverviewScreen(Screen):
             yield Static("No flows found. Set `flows` in .ionflow/config to your flows package.")
         with TabbedContent():
             for name, cls in self.flows.items():
-                with TabPane(name + (" [proto]" if cls.prototype else ""), id=f"flow-{_slug(name)}"):
+                with TabPane(name, id=f"flow-{_slug(name)}"):
                     yield FlowTable(cursor_type="row", id=f"table-{_slug(name)}")
         yield Footer()
 
@@ -224,10 +224,9 @@ class IonflowTUI(App):
         except Exception as e:  # noqa: BLE001
             flows, import_warnings = {}, [f"could not import flows '{cfg.flows}': {e}"]
         try:
-            stable, samples, proto = discovery.scan_runs(cfg)
-            warnings = import_warnings + discovery.startup_warnings(flows, cfg, stable, samples)
-            # each flow has data only in the namespace its flag points at
-            with_data = {n for n, c in flows.items() if n in (proto if c.prototype else stable)}
+            with_ledger = discovery.scan_runs(cfg)
+            warnings = import_warnings + discovery.startup_warnings(flows, cfg, with_ledger)
+            with_data = set(flows) & with_ledger
         except Exception as e:  # noqa: BLE001
             with_data, warnings = set(), import_warnings + [f"could not read S3: {e}"]
         return OverviewScreen(cfg, flows, warnings, with_data)

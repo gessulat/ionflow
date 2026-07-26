@@ -1,5 +1,4 @@
-"""The catalog: every stable flow's DuckLake, registered step outputs, vanilla
-readers. Only prototype flows are catalog-less.
+"""The catalog: every flow's DuckLake, registered step outputs, vanilla readers.
 
 The catalog only receives table schemas and file registrations; run
 bookkeeping (ledger/meta) is untouched — see docs/specs/ionflow-on-schrein.md.
@@ -7,7 +6,6 @@ bookkeeping (ledger/meta) is untouched — see docs/specs/ionflow-on-schrein.md.
 
 import duckdb
 import pytest
-from flows import ProtoFlow
 from schrein.ducklake import load_ducklake
 
 from ionflow import Collect, Fanout, Flow, Table, fanout_key
@@ -58,11 +56,6 @@ def test_run_registers_and_vanilla_reader_sees_it(s3cfg, repo):
     assert v.sql("SELECT sum(v) FROM lake.items").fetchone()[0] == 3
     assert v.sql("SELECT count(*) FROM lake.source").fetchone()[0] == 3
     v.close()
-
-
-def test_prototypes_have_no_catalog_and_stable_flows_always_do(s3cfg):
-    assert catmod.for_flow(s3cfg, ProtoFlow).mode == "none"
-    assert catmod.for_flow(s3cfg, CatFlow).mode == "ducklake"
 
 
 def test_backfill_restores_a_lost_catalog(s3cfg, repo):

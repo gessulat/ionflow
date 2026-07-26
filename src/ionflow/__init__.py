@@ -1,13 +1,12 @@
 from .config import Config
 from .dag import Branch, Collect, Fanout
-from .flow import Flow, Prototype
+from .flow import Flow
 from .schema import FlowParams, LedgerColumns, Table, check, fanout_key, field, primary_key, shaped
 from .storage import ConstraintViolation
 
 __all__ = [
     "ConstraintViolation",
     "Flow",
-    "Prototype",
     "Table",
     "LedgerColumns",
     "FlowParams",

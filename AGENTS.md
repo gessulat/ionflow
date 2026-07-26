@@ -86,12 +86,11 @@ ionflow query myproj.flows:Training \
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
-  `Prototype` mixin (sets `prototype = True`; the mixin is the only documented
-  spelling): scratch namespace (`_proto/`), dirty git
-  allowed, untyped steps allowed, drift check skipped, `ionflow clean` wipes it.
+  There is no prototype/scratch mode (0017): every flow carries the full
+  guarantees — clean git, typed steps, a catalog — from its first run.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
-  warn), in-worker branch retries (`branch_retries`), git gate,
+  per-branch resume (refuses commit drift unless `allow_commit_drift`),
+  in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
   `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker
@@ -115,8 +114,7 @@ ionflow query myproj.flows:Training \
   run heartbeat); process-mode branch workers each flush their own
   `_metrics_<step>_<branch>.parquet` (crash-durable branch samples); the `metrics`
   view unions all of them.
-- `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
-  DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
+- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0013).
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
@@ -139,11 +137,10 @@ ionflow query myproj.flows:Training \
   never rewritten). One CAS commit per completed step by the orchestrator;
   registration failure fails the run. `duck()` views an attached snapshot
   (run_id kept last) and refuses a pre-catalog bucket, pointing at
-  `ionflow catalog-backfill` (also the corruption-recovery path). Prototype
-  flows are catalog-less — glob reads live only in their scratch namespace.
-  No schema-migration workflow, deliberately (0016): schema change = new
-  flow name, or backfill --replace when old parts conform.
-  Ledger/meta/metrics untouched.
+  `ionflow catalog-backfill` (the corruption-recovery path — 0017; there is
+  no other read path). No schema-migration workflow, deliberately (0016):
+  schema change = new flow name, or backfill --replace when old parts
+  conform. Ledger/meta/metrics untouched.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
@@ -156,10 +153,9 @@ ionflow query myproj.flows:Training \
 
 - Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
   **no pandas/polars in core** (steps may return anything arrow-convertible).
-- Runs refuse a dirty git tree (no override for stable flows; `Prototype` flows run
-  dirty and record `dirty:<sha>`). Tests always create/commit a repo first.
-- Untyped steps (no return annotation) are a class-definition error except in
-  `Prototype` flows, where the parquet schema is inferred at write time.
+- Runs refuse a dirty git tree, without exception. Tests always create/commit
+  a repo first.
+- Untyped steps (no return annotation) are a class-definition error.
 - Python docs: a one-liner, plus short prose only for non-obvious constraints;
   doctests for examples (they run in the suite).
 - Run folders on S3 are immutable; the ledger is the only mutated object (CAS).

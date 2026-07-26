@@ -23,25 +23,15 @@ def _rows(blob):
     return [] if blob is None else storage.table_from_bytes(blob).to_pylist()
 
 
-def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_conflict=False):
-    """Insert or replace this run's ledger row; the CAS loop is schrein's CasRegister.
-
-    `reset_on_conflict` (prototype flows): when existing rows no longer fit
-    the current schema — scratch flows churn types freely — start a fresh
-    ledger holding only this run instead of failing.
-    """
+def upsert_run(client, bucket, key, row, custom_fields=(), retries=5):
+    """Insert or replace this run's ledger row; the CAS loop is schrein's CasRegister."""
     schema = pa.schema(_BASE_FIELDS + list(custom_fields))
 
     def fn(old):
         rows = [r for r in _rows(old) if r["run_id"] != row["run_id"]]
         rows.append(dict(row))  # from_pylist fills any missing schema columns with null
         rows.sort(key=lambda r: r["started"])
-        try:
-            return storage.parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
-        except (pa.ArrowInvalid, pa.ArrowTypeError):  # old rows don't fit the current schema
-            if not reset_on_conflict:
-                raise
-            return storage.parquet_bytes(pa.Table.from_pylist([dict(row)], schema=schema))
+        return storage.parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
 
     CasRegister(client, bucket, key).transact(fn, max_attempts=retries, base_delay=0.05)
 

@@ -20,8 +20,7 @@ try:  # numpy is optional in core; step returns convert when it's installed
 except ModuleNotFoundError:  # pragma: no cover
     np = None  # ty: ignore[invalid-assignment]
 
-METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
-# depth (like _meta.json), which is what keeps them invisible to parse_key
+METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
@@ -46,23 +45,15 @@ def error_code(err):
 class Layout:
     """S3 key scheme for one flow.
 
-    Prototype flows live under a `_proto/` scratch namespace: disposable,
-    invisible to the flow's stable views, wiped by `ionflow clean`.
-
     >>> l = Layout("mf", "ETL")
     >>> l.ledger
     'mf/ETL/ledger.parquet'
     >>> l.part("r1", "raw")
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
-    >>> l.table_glob("raw")
-    'mf/ETL/runs/*/raw/*.parquet'
-    >>> Layout("mf", "ETL", proto=True).ledger
-    'mf/_proto/ETL/ledger.parquet'
     """
 
     prefix: str
     flow: str
-    proto: bool = False
 
     @classmethod
     def for_flow(cls, config, flow_cls):
@@ -71,11 +62,11 @@ class Layout:
         `flow` is the module-qualified `flow_id()`, so same-named classes in
         different modules never share a namespace or ledger.
         """
-        return cls(config.prefix, flow_cls.flow_id(), getattr(flow_cls, "prototype", False))
+        return cls(config.prefix, flow_cls.flow_id())
 
     @property
     def root(self):
-        return f"{self.prefix}/_proto/{self.flow}" if self.proto else f"{self.prefix}/{self.flow}"
+        return f"{self.prefix}/{self.flow}"
 
     @property
     def ledger(self):
@@ -103,9 +94,6 @@ class Layout:
 
     def part(self, run_id, step, branch=0):
         return f"{self.step_dir(run_id, step)}/part_{branch}.parquet"
-
-    def table_glob(self, step):
-        return f"{self.root}/runs/*/{step}/*.parquet"
 
 
 def s3_client(cfg):
@@ -290,8 +278,8 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     Nothing touches S3 until the staged file is complete and validated, so a
     part object's existence implies the part is whole. Types are enforced by the cast
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
-    `table=None` (untyped prototype step) skips both — the schema is whatever
-    the data infers. `threads`/`memory_mb` keep pooled workers within their
+    `table=None` (publish's copy path: the source is already typed) skips
+    both. `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak. `fanout_key`
     (a column name, for keyed fan-out parts) validates that the written file
     holds exactly one distinct non-NULL value of that column and returns it;
@@ -378,42 +366,10 @@ def list_keys(client, bucket, prefix):
     return [o["Key"] for page in pages for o in page.get("Contents", [])]
 
 
-def parse_key(prefix, key):
-    """Reverse of Layout's key scheme, for keys under `prefix` (ends with "/").
-
-    Returns (flow, None) for a flow's ledger, (flow, step) for a run part,
-    or None for anything else (e.g. _meta.json, or prototype `_proto/` keys —
-    scratch must stay invisible to stable scans; namespace-scoped readers pass
-    the `_proto/` prefix themselves).
-
-    >>> parse_key("mf/", "mf/ETL/ledger.parquet")
-    ('ETL', None)
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/raw/part_0.parquet")
-    ('ETL', 'raw')
-    >>> parse_key("mf/", "mf/_proto/ETL/ledger.parquet") is None
-    True
-    >>> parse_key("mf/_proto/", "mf/_proto/ETL/ledger.parquet")
-    ('ETL', None)
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
-    True
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
-    True
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet") is None
-    True
-    """
-    parts = key.removeprefix(prefix).split("/")
-    if parts[1:] == ["ledger.parquet"]:
-        return parts[0], None
-    if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
-        return parts[0], parts[3]
-    return None
-
-
 def is_metrics_key(key):
     """True for metrics objects — the orchestrator's or a branch worker's.
 
-    The positive complement of parse_key's exclusion, kept beside the key
-    scheme so recognition can't drift from construction.
+    Kept beside the key scheme so recognition can't drift from construction.
 
     >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics.parquet")
     True

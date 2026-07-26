@@ -5,7 +5,6 @@ from .storage import (
     is_metrics_key,
     list_keys,
     object_age,
-    parse_key,
     read_parquet_sql,
     s3_client,
     uri,
@@ -14,25 +13,21 @@ from .storage import (
 
 
 def _empty_view_sql(table):
-    """Typed, zero-row SELECT so a step that produced no parts is still queryable.
+    """Typed, zero-row SELECT for a flow that has not run yet (no catalog).
 
-    `run_id` goes last, matching where hive partitioning puts it in real views.
-    `table=None` (untyped prototype step) yields a run_id-only empty view.
+    `run_id` goes last, matching its position in the catalog views.
     """
-    cols = [] if table is None else [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
+    cols = [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
-def _scan_parts(client, config, layout):
-    """(step names with parts, any metrics present) from one LIST of runs/."""
-    steps, has_metrics = set(), False
-    ns_prefix = layout.root.removesuffix(layout.flow)  # 'mf/' or 'mf/_proto/'
+def _scan_runs_dir(client, config, layout):
+    """(any run objects present, any metrics present) from one LIST of runs/."""
+    has_runs = has_metrics = False
     for key in list_keys(client, config.bucket, layout.root + "/runs/"):
-        parsed = parse_key(ns_prefix, key)
-        if parsed and parsed[1]:
-            steps.add(parsed[1])
+        has_runs = True
         has_metrics = has_metrics or is_metrics_key(key)
-    return steps, has_metrics
+    return has_runs, has_metrics
 
 
 def step_rows(con, step, run_id, limit=100):
@@ -103,32 +98,28 @@ def ledger_with_liveness(flow_cls, config, con=None):
 def duck(flow_cls, config):
     """DuckDB connection with a view per step table + a `ledger` view.
 
-    Stable flows read the flow's DuckLake catalog, attached read-only (a
-    consistent snapshot); a flow that never ran gets typed empty views, and a
-    pre-catalog bucket is refused with a pointer at `catalog-backfill` rather
-    than silently hiding its runs. Prototype flows glob their scratch parts —
-    they have no catalog. Either way `SELECT ... WHERE run_id = ...`
-    time-travels; `ledger` and `metrics` keep their non-catalog plumbing.
+    Views sit over the flow's DuckLake catalog, attached read-only (a
+    consistent snapshot), so `SELECT ... WHERE run_id = ...` time-travels. A
+    flow that never ran gets typed empty views; runs without a catalog mean
+    the register was lost — refused with a pointer at `catalog-backfill`.
+    `ledger` and `metrics` keep their own plumbing: run bookkeeping and
+    telemetry are not lake data.
     """
     con = connect(config)
     layout = Layout.for_flow(config, flow_cls)
-    present, has_metrics = _scan_parts(s3_client(config), config, layout)
-    if catalog.for_flow(config, flow_cls).attach_readonly(con):
+    has_runs, has_metrics = _scan_runs_dir(s3_client(config), config, layout)
+    if catalog.Catalog(config, flow_cls).attach_readonly(con):
         for name in flow_cls._dag.steps:
-            # run_id last, matching the classic hive-partition column position
+            # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
-    elif not flow_cls.prototype and present:
+    elif has_runs:
         raise RuntimeError(
             f"{flow_cls.flow_id()}: runs exist but no catalog does; "
-            f"run `ionflow catalog-backfill` to adopt pre-catalog runs"
+            f"run `ionflow catalog-backfill` to rebuild it from the run folders"
         )
-    else:  # prototype scratch, or a stable flow that never ran
+    else:  # never ran
         for name, step in flow_cls._dag.steps.items():
-            if name in present:
-                body = read_parquet_sql(uri(config, layout.table_glob(name)))
-            else:
-                body = _empty_view_sql(step.output_table)
-            con.execute(f"CREATE VIEW {name} AS {body}")
+            con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
     if has_metrics:
         metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
     else:

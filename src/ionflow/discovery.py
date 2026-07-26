@@ -1,7 +1,7 @@
 import importlib
 import pkgutil
 
-from . import storage
+from . import catalog, storage
 from .flow import Flow
 
 
@@ -24,78 +24,58 @@ def discover_flows(package):
 
 
 def scan_runs(config):
-    """One LIST of the bucket prefix: stable flows with a ledger, one sample part
-    key per step, and prototype flows with a scratch ledger.
-
-    Returns (with_data, samples, proto_with_data). `samples` is {flow: {step:
-    key}}, stable namespace only — the two namespaces must never mix, or a
-    stable flow's drift check would DESCRIBE leftover scratch parquet.
-    """
+    """Flow names with a ledger on S3 — one LIST of the bucket prefix."""
     client = storage.s3_client(config)
     prefix = config.prefix + "/"
-    proto_prefix = prefix + "_proto/"
-    with_data, samples, proto_with_data = set(), {}, set()
-    for key in storage.list_keys(client, config.bucket, prefix):
-        if key.startswith(proto_prefix):
-            parsed = storage.parse_key(proto_prefix, key)
-            if parsed and parsed[1] is None:
-                proto_with_data.add(parsed[0])
-            continue
-        parsed = storage.parse_key(prefix, key)
-        if parsed is None:
-            continue
-        flow, step = parsed
-        if step is None:
-            with_data.add(flow)
-        else:
-            samples.setdefault(flow, {}).setdefault(step, key)
-    return with_data, samples, proto_with_data
+    suffix = "/ledger.parquet"
+    return {
+        key[len(prefix) : -len(suffix)]
+        for key in storage.list_keys(client, config.bucket, prefix)
+        if key.endswith(suffix) and "/" not in key[len(prefix) : -len(suffix)]
+    }
 
 
-def flows_with_data(config):
-    """Flow names that have a ledger on S3 (i.e. at least one recorded run)."""
-    return scan_runs(config)[0]
+def schema_drift(flow_cls, config):
+    """Messages where a step's declared schema differs from its catalog table.
 
-
-def schema_drift(flow_cls, con, config, samples):
-    """Messages where a step's declared schema differs from what's on S3.
-
-    Reads one sample part's parquet footer per step (via httpfs), instead of
-    binding a whole-glob view.
+    One catalog read covers every step. No catalog (flow never ran) means no
+    drift; a step whose table is missing was added since genesis and gets its
+    table on the next run — also not drift.
     """
     issues = []
-    for name, step in flow_cls._dag.steps.items():
-        if name not in samples:
-            continue
-        declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
-        persisted = {
-            r[0]: r[1]
-            for r in con.sql(
-                f"DESCRIBE SELECT * FROM read_parquet('{storage.uri(config, samples[name])}', hive_partitioning=false)"
-            ).fetchall()
-        }
-        for col, dtype in declared.items():
-            if col not in persisted:
-                issues.append(f"{flow_cls.flow_id()}.{name}: missing column '{col}'")
-            elif persisted[col] != dtype:
-                issues.append(f"{flow_cls.flow_id()}.{name}: '{col}' {persisted[col]}→{dtype}")
-        for col in persisted:
-            if col not in declared:
-                issues.append(f"{flow_cls.flow_id()}.{name}: unexpected column '{col}'")
+    try:
+        with catalog.Catalog(config, flow_cls).lake.read() as con:
+            have = {
+                r[0] for r in con.sql("SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake'").fetchall()
+            }
+            for name, step in flow_cls._dag.steps.items():
+                if name not in have:
+                    continue
+                declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
+                persisted = {r[0]: r[1] for r in con.sql(f"DESCRIBE lake.{name}").fetchall() if r[0] != "run_id"}
+                for col, dtype in declared.items():
+                    if col not in persisted:
+                        issues.append(f"{flow_cls.flow_id()}.{name}: missing column '{col}'")
+                    elif persisted[col] != dtype:
+                        issues.append(f"{flow_cls.flow_id()}.{name}: '{col}' {persisted[col]}→{dtype}")
+                for col in persisted:
+                    if col not in declared:
+                        issues.append(f"{flow_cls.flow_id()}.{name}: unexpected column '{col}'")
+    except FileNotFoundError:
+        return []
     return issues
 
 
-def startup_warnings(flows, config, with_data, samples):
+def startup_warnings(flows, config, with_data):
     """Health check: orphaned S3 data + schema drift, as human-readable lines."""
     warnings = []
     for name in sorted(with_data - set(flows)):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
-    con = storage.connect(config)  # one connection serves every flow's drift check
     for name, cls in flows.items():
-        if name not in with_data or cls.prototype:  # scratch churns by design
+        if name not in with_data:
             continue
         try:
-            warnings += schema_drift(cls, con, config, samples.get(name, {}))
+            warnings += schema_drift(cls, config)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"{name}: schema check failed: {e}")
     return warnings

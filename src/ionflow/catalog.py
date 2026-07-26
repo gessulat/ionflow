@@ -1,6 +1,5 @@
-"""Per-flow DuckLake catalog — THE read/registration substrate for stable flows
-(docs/specs/ionflow-on-schrein.md; decisions 0015, 0016). Only prototype flows
-stay catalog-less (untyped steps and schema churn have no catalog analogue).
+"""Per-flow DuckLake catalog — every flow's read/registration substrate
+(docs/specs/ionflow-on-schrein.md; decisions 0015, 0016).
 
 Roles stay strictly separate: the catalog only ever receives table schemas and
 data-file registrations; the ledger keeps sole authority over run bookkeeping.
@@ -25,38 +24,15 @@ from .storage import Layout
 CATALOG_KEY = "catalog.ducklake"  # at the flow root, next to ledger.parquet
 
 
-def for_flow(config, flow_cls):
-    """The flow's catalog — every stable flow has one; prototypes never do."""
-    if flow_cls.prototype:
-        return NullCatalog()
-    return DuckLakeCatalog(config, Layout.for_flow(config, flow_cls))
-
-
-class NullCatalog:
-    """Prototype flows: every catalog call is a no-op (glob reads, no catalog)."""
-
-    mode = "none"
-
-    def ensure_tables(self, flow_cls):
-        pass
-
-    def register_step(self, run_id, step, part_keys):
-        pass
-
-    def attach_readonly(self, con):
-        return False
-
-
-class DuckLakeCatalog:
+class Catalog:
     """schrein DuckLake at the flow root; its data_path is catalog-written files
     only (`_lake/`) — registered step parts stay in their immutable run folders."""
 
-    mode = "ducklake"
-
-    def __init__(self, config, layout):
+    def __init__(self, config, flow_cls):
+        root = Layout.for_flow(config, flow_cls).root
         self.bucket = config.bucket
-        register = CasRegister(storage.s3_client(config), config.bucket, f"{layout.root}/{CATALOG_KEY}")
-        self.lake = DuckLake(register, f"s3://{config.bucket}/{layout.root}/_lake/", storage.secret_sql(config))
+        register = CasRegister(storage.s3_client(config), config.bucket, f"{root}/{CATALOG_KEY}")
+        self.lake = DuckLake(register, f"s3://{config.bucket}/{root}/_lake/", storage.secret_sql(config))
 
     def ensure_tables(self, flow_cls):
         """Genesis, idempotent: one table per typed step, skipped when all exist."""
@@ -106,8 +82,6 @@ class DuckLakeCatalog:
 def _table_ddl(step_name, table):
     """CREATE TABLE from a step's Table: persisted types (what a reader sees),
     NOT NULL only (all DuckLake enforces) — PK/CHECK stay ionflow-side (0003)."""
-    if table is None:
-        raise RuntimeError(f"step '{step_name}': catalog mode requires a typed return (Table)")
     if "run_id" in table.columns():
         raise RuntimeError(f"step '{step_name}': column 'run_id' is reserved in catalog mode")
     cols = ", ".join(
@@ -123,11 +97,9 @@ def backfill(flow_cls, config, replace=False):
     (rebuild a corrupt/clobbered catalog from the run folders). Returns the
     number of runs registered.
     """
-    if flow_cls.prototype:
-        raise RuntimeError("prototype flows are always classic; nothing to backfill")
     layout = Layout.for_flow(config, flow_cls)
     client = storage.s3_client(config)
-    cat = DuckLakeCatalog(config, layout)
+    cat = Catalog(config, flow_cls)
     if cat.lake.register.read()[0] is not None:
         if not replace:
             raise FileExistsError(f"catalog exists at {layout.root}/{CATALOG_KEY}; pass --replace to rebuild")

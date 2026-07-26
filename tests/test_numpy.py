@@ -302,5 +302,4 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     # the drift check compares against the persisted (list) form: no false positive
     from ionflow import discovery
 
-    _, samples, _ = discovery.scan_runs(s3cfg)
-    assert discovery.schema_drift(SignalFlow, con, s3cfg, samples[SignalFlow.flow_id()]) == []
+    assert discovery.schema_drift(SignalFlow, s3cfg) == []

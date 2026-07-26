@@ -337,38 +337,6 @@ arrive with the final write). The flush also doubles as a **heartbeat**: `ls`
 and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 5+ minutes — the honest state for a process that was killed without cleanup.
 
-## Prototyping
-
-Iterating on a flow fights the production guarantees (clean git, declared schemas,
-immutable history). While reshaping `EmbedDocs`, mark it as a prototype to relax
-them — visibly, in code:
-
-```python
-from ionflow import Flow, Prototype
-
-class EmbedDocs(Prototype, Flow):
-    def docs(self):                             # untyped step: schema inferred at write
-        return pa.table({"doc_id": [9], "source": ["scratch"], "text": ["…"]})
-
-    def by_source(self, docs) -> Fanout[Doc]:   # typed steps still validate as usual
-        ...
-```
-
-Prototype flows:
-
-- run in a **scratch namespace** (`<prefix>/_proto/<flow_id>/…`) — stable views, drift
-  checks, and other clients never see the churn, and stable data is never touched;
-- may run from a **dirty git tree** (ledger records `dirty:<sha>`);
-- may **omit step output schemas** (untyped steps can't fan out — `by_source`
-  keeps its `Fanout[...]` annotation);
-- tolerate ledger schema churn (a conflicting old scratch ledger is reset);
-- can be wiped: `ionflow clean mymodule:EmbedDocs` (refused for stable flows —
-  deletion is explicit and scratch-only, never a side effect of running).
-
-Remove the mixin to promote: the flow points back at the stable namespace, and every
-guarantee applies again from the first stable run. Untyped steps in a non-prototype
-flow are a **class-definition error**.
-
 ## Resume
 
 ```bash
@@ -381,8 +349,7 @@ partially-failed fan-out re-runs only its failed branches.
 
 If HEAD differs from the origin run's commit, resume **refuses by default** — reused
 steps would keep their old-code outputs, mixing two commits in one run. Pass
-`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately;
-prototype flows only warn, since they relinquish provenance anyway.
+`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately.
 
 ## Incremental runs (growing corpora)
 

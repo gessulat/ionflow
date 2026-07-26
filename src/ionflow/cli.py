@@ -209,24 +209,5 @@ def catalog_backfill(
     typer.echo(f"registered {n} complete run(s) into the catalog")
 
 
-@app.command()
-def clean(
-    flow: str,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
-):
-    """Delete a PROTOTYPE flow's scratch runs. Refused for stable flows."""
-    cls = _load(flow)
-    if not cls.prototype:
-        typer.echo(f"{cls.__name__} is not a prototype flow; stable runs are immutable.")
-        raise typer.Exit(1)
-    cfg = _config_or_setup()
-    layout = storage.Layout.for_flow(cfg, cls)
-    target = storage.uri(cfg, layout.root + "/")
-    if not yes and not typer.confirm(f"Delete ALL scratch data under {target}?"):
-        raise typer.Exit(0)
-    n = storage.delete_prefix(storage.s3_client(cfg), cfg.bucket, layout.root + "/")
-    typer.echo(f"deleted {n} objects under {target}")
-
-
 def main():
     app()
