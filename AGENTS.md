@@ -86,7 +86,7 @@ ionflow query myproj.flows:Training \
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
-  There is no prototype/scratch mode (0017): every flow carries the full
+  There is no prototype/scratch mode (0015): every flow carries the full
   guarantees — clean git, typed steps, a catalog — from its first run.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`),
@@ -131,16 +131,16 @@ ionflow query myproj.flows:Training \
   (0014 — roles stay separate: the ledger is run bookkeeping, never a catalog).
   Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
   in DuckDB).
-- `catalog.py` — every flow's DuckLake catalog (0015, 0016 — the only
+- `catalog.py` — every flow's DuckLake catalog (0015 — the only
   read/registration mode; no config flag): at the flow root, one table per
   step, run_id inferred from the parts' hive paths at registration (parts
   never rewritten). One CAS commit per completed step by the orchestrator;
   registration failure fails the run. `duck()` views an attached snapshot
   (run_id kept last) and refuses a pre-catalog bucket, pointing at
-  `ionflow catalog-backfill` (the corruption-recovery path — 0017; there is
-  no other read path). No schema-migration workflow, deliberately (0016):
-  schema change = new flow name, or backfill --replace when old parts
-  conform. Ledger/meta/metrics untouched.
+  `ionflow catalog-backfill` (the corruption-recovery path; there is no
+  other read path). No schema-migration workflow, deliberately: schema
+  change = new flow name, or backfill --replace when old parts conform.
+  Ledger/meta/metrics untouched.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket

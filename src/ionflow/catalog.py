@@ -1,5 +1,5 @@
 """Per-flow DuckLake catalog — every flow's read/registration substrate
-(docs/specs/ionflow-on-schrein.md; decisions 0015, 0016, 0017).
+(docs/specs/ionflow-on-schrein.md; decision 0015).
 
 Roles stay strictly separate: the catalog only ever receives table schemas and
 data-file registrations; the ledger keeps sole authority over run bookkeeping.
@@ -16,7 +16,7 @@ import tempfile
 
 from schrein.ducklake import CATALOG_KEY
 
-from schrein import CasRegister, DuckLake
+from schrein import DuckLake
 
 from . import ledger, storage
 from .storage import Layout
@@ -29,9 +29,14 @@ class Catalog:
     def __init__(self, config, flow_cls, client=None):
         root = Layout.for_flow(config, flow_cls).root
         self.bucket = config.bucket
-        self.key = f"{root}/{CATALOG_KEY}"
-        register = CasRegister(client or storage.s3_client(config), config.bucket, self.key)
-        self.lake = DuckLake(register, f"s3://{config.bucket}/{root}/_lake/", storage.secret_sql(config))
+        self.lake = DuckLake.at(
+            client or storage.s3_client(config),
+            config.bucket,
+            root,
+            secret_sql=storage.secret_sql(config),
+            data_subdir="_lake",
+        )
+        self.key = self.lake.register.key
 
     def tables(self):
         """{table: {column: type}} from the current catalog; {} when none exists."""

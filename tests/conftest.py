@@ -9,8 +9,9 @@ import pytest
 
 # Start + warm the moto server in a background thread at import time, so the
 # heavy imports (boto3) and botocore's first-client JSON load overlap with
-# collection instead of stalling each worker's first S3 test. The server runs
-# as a subprocess, never in-process: DuckDB httpfs relation binds starve an
+# collection instead of stalling each worker's first S3 test. The server is
+# schrein.testing (atomic conditional PUTs — schrein decision 0003), run as a
+# subprocess, never in-process: DuckDB httpfs relation binds starve an
 # in-process werkzeug server (see AGENTS.md, Testing).
 _moto = {}
 
@@ -26,7 +27,7 @@ def _warm():
 
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
+        [sys.executable, "-m", "schrein.testing", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -35,7 +35,7 @@ def scan_runs(config):
     }
 
 
-def schema_drift(flow_cls, config):
+def schema_drift(flow_cls, config, client=None):
     """Messages where a step's declared schema differs from its catalog table.
 
     One catalog read covers every step. No catalog (flow never ran) means no
@@ -43,7 +43,7 @@ def schema_drift(flow_cls, config):
     the next run — also not drift.
     """
     issues = []
-    tables = catalog.Catalog(config, flow_cls).tables()
+    tables = catalog.Catalog(config, flow_cls, client=client).tables()
     for name, step in flow_cls._dag.steps.items():
         if name not in tables:
             continue
@@ -65,11 +65,12 @@ def startup_warnings(flows, config, with_data):
     warnings = []
     for name in sorted(with_data - set(flows)):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
+    client = storage.s3_client(config)  # one client serves every flow's check
     for name, cls in flows.items():
         if name not in with_data:
             continue
         try:
-            warnings += schema_drift(cls, config)
+            warnings += schema_drift(cls, config, client=client)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"{name}: schema check failed: {e}")
     return warnings

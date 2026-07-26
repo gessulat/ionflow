@@ -81,12 +81,11 @@ after schrein exists. The only planned integration is M4:
 into* a schrein-managed lake; it does not use schrein as its run
 substrate. (Reimplementing the ledger on `CasRegister` is a mechanical
 refactor that does not merge the two roles; ionflow has adopted it —
-see its decision 0014.) An *optional* mode where ionflow registers completed step
-outputs into a schrein lake is explored separately in the ionflow repo
-(`docs/specs/ionflow-on-schrein.md`); even there the roles stay
-distinct — the ledger remains a separate object and keeps sole
-authority over run bookkeeping; the catalog only ever receives table
-schemas and data-file registrations.
+see its decision 0014.) ionflow also registers completed step outputs
+into a per-flow schrein lake (`docs/specs/ionflow-on-schrein.md`); the
+roles stay distinct — the ledger remains a separate object and keeps
+sole authority over run bookkeeping; the catalog only ever receives
+table schemas and data-file registrations.
 
 ## 2. Prior art (read these before building)
 

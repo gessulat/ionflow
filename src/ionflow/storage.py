@@ -13,6 +13,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
+from schrein.ducklake import load_extension
 
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
@@ -164,7 +165,7 @@ def secret_sql(cfg, name="s"):
 def connect(cfg, threads=None, memory_mb=None):
     """Return a DuckDB connection wired to the configured S3 endpoint (httpfs)."""
     con = _local_connection(threads, memory_mb)
-    con.execute("INSTALL httpfs; LOAD httpfs")
+    load_extension(con, "httpfs")  # schrein's loader: cache, then wheel, then INSTALL
     con.execute(secret_sql(cfg))
     return con
 

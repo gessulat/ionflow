@@ -69,10 +69,12 @@ class DuckLake:
         self.secret_sql = secret_sql  # CREATE SECRET ... for non-AWS endpoints
 
     @classmethod
-    def at(cls, client, bucket: str, prefix: str, secret_sql: str | None = None) -> "DuckLake":
-        """Standard layout: s3://bucket/prefix/{catalog.ducklake, data/}."""
+    def at(
+        cls, client, bucket: str, prefix: str, secret_sql: str | None = None, data_subdir: str = "data"
+    ) -> "DuckLake":
+        """Standard layout: s3://bucket/prefix/{catalog.ducklake, <data_subdir>/}."""
         register = CasRegister(client, bucket, f"{prefix}/{CATALOG_KEY}")
-        return cls(register, f"s3://{bucket}/{prefix}/data/", secret_sql)
+        return cls(register, f"s3://{bucket}/{prefix}/{data_subdir}/", secret_sql)
 
     def attach(self, con, local: pathlib.Path, read_only: bool = False) -> None:
         """Attach a local copy of the catalog on `con` as `lake`."""

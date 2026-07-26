@@ -9,7 +9,8 @@ its threaded server two writers can both pass the check. Reads were clean —
 every GET's body MD5 matched its etag — so this is purely a writer-writer
 race in the fake, not a flaw in the commit protocol.
 
-Fix: `tests/moto_server.py` wraps moto's WSGI app and takes a process-wide
+Fix: `schrein.testing` (used by both this suite and ionflow's) wraps
+moto's WSGI app and takes a process-wide
 lock around any PUT carrying `If-Match`/`If-None-Match`, restoring real-S3
 semantics. Everything else (reads, unconditional data uploads) stays
 concurrent, so the DuckDB-httpfs starvation lesson from ionflow (server in
