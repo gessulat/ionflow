@@ -80,7 +80,6 @@ class Config:
     endpoint_url: str | None = None
     region: str = "us-east-1"
     flows: str | None = None  # package the TUI imports to discover Flow classes
-    catalog: str = "none"  # "ducklake" = catalog mode (docs/specs/ionflow-on-schrein.md)
     access_key: str | None = None
     secret_key: str | None = None
 
@@ -100,5 +99,4 @@ class Config:
             endpoint_url=os.environ.get("IONFLOW_ENDPOINT") or data.get("endpoint"),
             region=os.environ.get("AWS_DEFAULT_REGION") or data.get("region", "us-east-1"),
             flows=data.get("flows"),
-            catalog=os.environ.get("IONFLOW_CATALOG") or data.get("catalog", "none"),
         )

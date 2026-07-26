@@ -1,11 +1,11 @@
 # Spec exploration: ionflow step outputs in a schrein lake (optional)
 
-**Status:** implemented through I2 (decision 0015) — hook, genesis,
-per-step registration, fan-out/resume registration, backfill, and the
-`query.duck` read path, behind `catalog = "ducklake"`. I3 (retention,
-`ionflow migrate`) remains open. Earlier revision note: the first draft
-blurred the ledger and catalog roles; this version keeps them strictly
-separate
+**Status:** implemented through I2 (decision 0015) and made the ONLY mode
+for stable flows — the config flag was removed and `ionflow migrate` will
+not be built (decision 0016; §3.3 and §6's optionality are superseded).
+Retention wiring for `clean` remains open. Earlier revision note: the
+first draft blurred the ledger and catalog roles; this version keeps them
+strictly separate
 **Depends on:** `cas-catalog-library.md` (the schrein spec), specifically
 its M0–M2 milestones shipping as a usable package
 

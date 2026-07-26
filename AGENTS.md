@@ -133,13 +133,17 @@ ionflow query myproj.flows:Training \
   (0014 — roles stay separate: the ledger is run bookkeeping, never a catalog).
   Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
   in DuckDB).
-- `catalog.py` — optional catalog mode (config `catalog = "ducklake"` /
-  `IONFLOW_CATALOG`; 0015): per-flow schrein DuckLake at the flow root, one
-  table per step, run_id inferred from the parts' hive paths at registration
-  (parts never rewritten). One CAS commit per completed step by the
-  orchestrator; registration failure fails the run; `ionflow catalog-backfill`
-  adopts/rebuilds from run folders. `duck()` then views an attached snapshot;
-  prototypes always classic; ledger/meta/metrics untouched.
+- `catalog.py` — every stable flow's DuckLake catalog (0015, 0016 — the only
+  read/registration mode; no config flag): at the flow root, one table per
+  step, run_id inferred from the parts' hive paths at registration (parts
+  never rewritten). One CAS commit per completed step by the orchestrator;
+  registration failure fails the run. `duck()` views an attached snapshot
+  (run_id kept last) and refuses a pre-catalog bucket, pointing at
+  `ionflow catalog-backfill` (also the corruption-recovery path). Prototype
+  flows are catalog-less — glob reads live only in their scratch namespace.
+  No schema-migration workflow, deliberately (0016): schema change = new
+  flow name, or backfill --replace when old parts conform.
+  Ledger/meta/metrics untouched.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket

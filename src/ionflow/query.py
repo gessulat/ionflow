@@ -103,18 +103,26 @@ def ledger_with_liveness(flow_cls, config, con=None):
 def duck(flow_cls, config):
     """DuckDB connection with a view per step table + a `ledger` view.
 
-    Classic mode globs every run's parts; catalog mode attaches the flow's
-    DuckLake read-only (a consistent snapshot) and views its tables. Either
-    way `SELECT ... WHERE run_id = ...` time-travels and new runs appear with
-    nothing to sync. `ledger` and `metrics` keep their non-catalog plumbing.
+    Stable flows read the flow's DuckLake catalog, attached read-only (a
+    consistent snapshot); a flow that never ran gets typed empty views, and a
+    pre-catalog bucket is refused with a pointer at `catalog-backfill` rather
+    than silently hiding its runs. Prototype flows glob their scratch parts —
+    they have no catalog. Either way `SELECT ... WHERE run_id = ...`
+    time-travels; `ledger` and `metrics` keep their non-catalog plumbing.
     """
     con = connect(config)
     layout = Layout.for_flow(config, flow_cls)
     present, has_metrics = _scan_parts(s3_client(config), config, layout)
     if catalog.for_flow(config, flow_cls).attach_readonly(con):
         for name in flow_cls._dag.steps:
-            con.execute(f"CREATE VIEW {name} AS SELECT * FROM lake.{name}")
-    else:  # classic (or a catalog-mode flow that hasn't run yet)
+            # run_id last, matching the classic hive-partition column position
+            con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
+    elif not flow_cls.prototype and present:
+        raise RuntimeError(
+            f"{flow_cls.flow_id()}: runs exist but no catalog does; "
+            f"run `ionflow catalog-backfill` to adopt pre-catalog runs"
+        )
+    else:  # prototype scratch, or a stable flow that never ran
         for name, step in flow_cls._dag.steps.items():
             if name in present:
                 body = read_parquet_sql(uri(config, layout.table_glob(name)))

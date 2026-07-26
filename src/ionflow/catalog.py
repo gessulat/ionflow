@@ -1,4 +1,6 @@
-"""Optional per-flow DuckLake catalog — "catalog mode" (docs/specs/ionflow-on-schrein.md).
+"""Per-flow DuckLake catalog — THE read/registration substrate for stable flows
+(docs/specs/ionflow-on-schrein.md; decisions 0015, 0016). Only prototype flows
+stay catalog-less (untyped steps and schema churn have no catalog analogue).
 
 Roles stay strictly separate: the catalog only ever receives table schemas and
 data-file registrations; the ledger keeps sole authority over run bookkeeping.
@@ -24,14 +26,14 @@ CATALOG_KEY = "catalog.ducklake"  # at the flow root, next to ledger.parquet
 
 
 def for_flow(config, flow_cls):
-    """The flow's catalog per config — NullCatalog unless catalog mode applies."""
-    if getattr(config, "catalog", "none") != "ducklake" or flow_cls.prototype:
+    """The flow's catalog — every stable flow has one; prototypes never do."""
+    if flow_cls.prototype:
         return NullCatalog()
     return DuckLakeCatalog(config, Layout.for_flow(config, flow_cls))
 
 
 class NullCatalog:
-    """Classic mode (and prototype flows): every catalog call is a no-op."""
+    """Prototype flows: every catalog call is a no-op (glob reads, no catalog)."""
 
     mode = "none"
 
@@ -117,9 +119,9 @@ def _table_ddl(step_name, table):
 def backfill(flow_cls, config, replace=False):
     """Register every complete run of a flow into a fresh catalog.
 
-    Both the adoption path (enable catalog mode on an existing flow) and the
-    recovery path (rebuild a corrupt/clobbered catalog from the run folders).
-    Returns the number of runs registered.
+    Both the adoption path (pre-catalog buckets) and the recovery path
+    (rebuild a corrupt/clobbered catalog from the run folders). Returns the
+    number of runs registered.
     """
     if flow_cls.prototype:
         raise RuntimeError("prototype flows are always classic; nothing to backfill")
