@@ -1,247 +1,220 @@
-# Spec exploration: ionflow running *on* schrein (optional catalog mode)
+# Spec exploration: ionflow step outputs in a schrein lake (optional)
 
-**Status:** exploration — not committed to; written to scope the idea honestly
-**Depends on:** `cas-catalog-library.md` (the schrein spec), specifically its
-M0–M2 milestones shipping as a usable package
-**Relation to schrein §1.1:** this does not merge the ledger and the catalog
-roles — it moves the run ledger *into* a catalog as an ordinary table
+**Status:** exploration, revised — the first draft blurred the ledger and
+catalog roles (it moved the ledger into the catalog); this version keeps
+them strictly separate
+**Depends on:** `cas-catalog-library.md` (the schrein spec), specifically
+its M0–M2 milestones shipping as a usable package
 
-## 0. Summary and recommendation
+## 0. The two roles, stated first
 
-Today ionflow's only planned schrein integration is publish targets
-(schrein M4): runs live in immutable run folders, tracked by a CAS-swapped
-`ledger.parquet`, and schrein manages a *separate* lake you publish into.
+Nothing in this document changes what each component is the authority
+for. Catalog mode adds exactly one new interaction (§1); everything else
+stays where it is.
 
-This document asks: what would it take for a flow's runs to live in a
-schrein-managed DuckLake catalog directly — step outputs as catalog
-tables, the run ledger as a catalog table — and is it worth it?
+| Component | Authority over | Changed here? |
+|---|---|---|
+| **schrein catalog** (per flow) | The lake: table schemas, schema evolution, snapshots, and the **file list that defines each table's contents** | New — this is what gets added |
+| **`ledger.parquet`** | Run bookkeeping: run status, timestamps, commit, params | No — byte-for-byte as today |
+| **`_meta.json`** | Per-run progress: `steps_complete`, `fanout_keys`, resume provenance | No — resume still reads this, not the catalog |
+| **`_metrics*.parquet`** | Run telemetry (and, via its flush cadence, run liveness) | No — plain files in run folders, as today |
 
-Conclusion in one paragraph: it is architecturally a surprisingly good
-fit, because ionflow already does write-data-first (workers upload
-Parquet via boto3; completion is recorded afterwards), which is exactly
-schrein's preferred "register, don't write" commit pattern — the catalog
-only ever ingests metadata-only commits, and workers don't change at all.
-The wins are real (atomic step completion, vanilla-DuckDB readers,
-one-GET discovery, schema migration across historic runs, principled
-retention). The costs are real too (a new dependency, a doubled test
-matrix for runner/resume, version coupling to the ducklake extension).
-Recommendation: **build it as an optional backend behind a `RunStore`
-seam, per-flow catalogs, stable flows only**, sequenced after schrein
-M2, starting with a de-risking spike (§8, I0). Do not make it the
-default until it has survived the full resume matrix and a real
-workload.
+One point that the first draft failed to make explicit, and that
+everything below rests on: **a lakehouse catalog is not only a schema
+store.** In DuckLake, the catalog also holds each table's file list —
+that is the core lakehouse mechanic. A Parquet file on S3 is not part of
+any table until a catalog commit registers it. So a catalog *inherently*
+answers "which files are in table X right now"; that is lake metadata,
+not run tracking. Wherever this document talks about visibility, it is
+this mechanism at work — never the catalog knowing anything about runs.
 
-## 1. What "runs on schrein" means precisely
-
-Catalog mode changes *where run metadata lives and how completion becomes
-visible*. It deliberately changes almost nothing about how data is written.
+## 1. What catalog mode adds
 
 ```
 s3://bucket/<flow_root>/
-  catalog.ducklake            <- schrein CAS register, one per flow
-  run_id=<id>/<step>/part-N.parquet   <- unchanged: immutable, boto3-written
-  run_id=<id>/_metrics*.parquet       <- unchanged: outside the catalog
+  ledger.parquet              <- unchanged (CAS, run bookkeeping)
+  catalog.ducklake            <- NEW: schrein register, the lake for this flow
+  run_id=<id>/_meta.json      <- unchanged
+  run_id=<id>/_metrics*.parquet        <- unchanged
+  run_id=<id>/<step>/part-N.parquet    <- unchanged (immutable, boto3-written)
 ```
 
-- **One catalog per flow**, at the flow's existing S3 root. This follows
-  flow identity = namespace (ADR 0004), bounds CAS contention to
-  concurrent runs of *one* flow, and keeps the blast radius of a corrupt
-  catalog to one flow. Cross-flow queries use DuckDB multi-ATTACH (a
-  helper in `query.py`), not a shared register.
-- **One catalog table per step**, rows across runs distinguished by
-  `run_id` (partition value or column — open question §7.1). Plus a
-  `runs` table replacing `ledger.parquet`, and a small `fanout_keys`
-  table replacing that part of `_meta.json`.
-- **Data files are written exactly as today**: `write_part` casts,
-  constraint-scans locally, uploads via boto3 (ADR 0013 untouched).
-  DuckLake never writes step data; ionflow never uses `INSERT INTO
-  lake.step`. The catalog ingests files via `ducklake_add_data_files` —
-  metadata-only, reads one Parquet footer, trivially replayable, which is
-  schrein §5.3's preferred pattern verbatim.
-- **Only the orchestrator commits.** Fan-out workers keep uploading
-  their branch parts and reporting keys back, exactly as now. The
-  multi-writer story the CAS protocol must handle is *concurrent runs of
-  the same flow*, not workers.
-- **Commit points per run:** run start (genesis/ensure tables from the
-  `Table` DDL + insert `runs` row `running`), each step completion
-  (register that step's part files + update the run's progress), run end
-  (status `complete`/`failed`). That is S+2 CAS commits per run versus 2
-  today — still deep inside schrein's commits-per-minute comfort zone
-  (§4).
-- **Metrics stay outside the catalog.** The 60s flush is the run
-  heartbeat and must never be a CAS commit (rate, and a wedged CAS must
-  not kill the heartbeat). `_metrics.parquet` keeps its current
-  plain-overwrite path; staleness detection is unchanged. Optionally the
-  final metrics file is registered at run end so `metrics` is queryable
-  through the catalog.
+- **One catalog per flow**, holding **one table per step**, rows across
+  runs distinguished by `run_id`. Genesis (first run of the flow)
+  creates the tables from the existing `Table` DDL.
+- **The one new interaction:** when a step completes, the orchestrator
+  registers that step's part files into the step's lake table — one
+  metadata-only CAS commit via `ducklake_add_data_files`, which reads
+  only Parquet footers. This is schrein §5.3's preferred
+  "register, don't write" pattern verbatim, and it is the *only* thing
+  ionflow ever asks the catalog to do during a run (plus `ALTER` for
+  explicit migrations, §3.3).
+- **Data writing is unchanged.** `write_part` casts, constraint-scans
+  locally, uploads via boto3 (ADRs 0013 and 0003 stand). DuckLake never
+  writes step data; ionflow never uses `INSERT INTO`. Fan-out workers
+  are untouched — they upload parts and report keys, as today; only the
+  orchestrator talks to the catalog.
+- **Run tracking is unchanged.** Ledger start/end upserts, per-step
+  `_meta.json` flushes, resume (0002/0008 — copy origin parts, which in
+  catalog mode also means registering the copies under the new run_id),
+  the staleness heuristic: all exactly as today. Resume decisions read
+  `_meta.json`, never the catalog.
+- **Reads move to the catalog** (in catalog mode): `query.duck()`
+  attaches the catalog read-only instead of building glob views;
+  `scan_runs`' bucket LIST and the footer-based drift check become
+  catalog reads. Same SQL surface (`query`/`stats`/TUI unchanged). The
+  `ledger` and `metrics` views keep their current non-catalog plumbing.
 
-## 2. What ionflow gains
+Commit rate: one CAS commit per completed step (plus one-time genesis).
+Writers on a flow's register = concurrent runs of that flow. Even ten
+concurrent runs of a ten-step flow stay far below schrein's
+commits-per-minute comfort zone (§3/§9 there), and the closures commute
+(different run_ids), so rebases replay cleanly.
 
-1. **Atomic step completion — kills a whole class of invariants.**
-   Today "a fan-out counts as completed only when ALL parts are written"
-   is a carefully maintained bookkeeping invariant, missing parts
-   surface lazily inside steps (CLAUDE.md gotcha), and completion state
-   is smeared across parts + `_meta.json` + ledger row. In catalog mode
-   a step is visible iff its registration commit landed; a partial
-   fan-out is *structurally* invisible (unregistered files don't exist
-   to readers); "registered" and "resumable" are the same fact; and
-   status + progress + file list update in one atomic multi-table
-   transaction — the exact property DuckLake exists to provide.
-2. **Vanilla readers.** Anyone with stock DuckDB attaches the flow's
-   catalog `READ_ONLY` from a notebook — no ionflow install, no
-   knowledge of the key scheme, typed schema included
-   (Frozen-DuckLake reader pattern). Today consumers need `query.py` or
-   the layout conventions. This is arguably the headline feature.
-3. **Discovery becomes one GET.** `scan_runs` (bucket LIST) and the
-   drift check (one Parquet footer per step) collapse into reading the
-   catalog. `ls`/TUI latency stops scaling with bucket size. Typed
-   empty views come free (tables exist from run start), deleting the
-   empty-view special case in `query.py`.
-4. **Schema evolution across history — a genuinely new capability.**
-   Today a schema change only affects new runs; old runs drift. DuckLake
-   schema changes are metadata-only catalog operations (schrein §5.6):
-   an additive migration (`ALTER TABLE ADD COLUMN ... DEFAULT`) applies
-   across all historic runs at once, atomically, without rewriting a
-   single Parquet file. For long-lived incremental keyed workloads
-   (0008-style `Annotate` flows) this is the difference between
-   "schema change = start over" and "schema change = one commit."
-5. **Principled retention.** Run deletion becomes `DELETE WHERE run_id`
-   + snapshot expiry + schrein GC with grace TTL, instead of ad-hoc
-   prefix deletes; `ionflow clean` gets real semantics for stable flows.
-6. **Time travel.** Catalog snapshots give as-of-commit queries over the
-   whole flow state for free.
+## 2. Consequences of registration (not new run semantics)
 
-## 3. What it costs
+Because a file is only *in* a table once registered, and a step's parts
+are registered in one commit at completion:
 
-- **A new load-bearing dependency** (schrein + ducklake extension) on
-  the correctness path of every run in catalog mode.
-- **Version coupling.** The catalog file format and ducklake extension
-  version couple all orchestrators that write one flow (schrein open
-  question 2). Orchestrator-only commits keep the exposed surface small,
-  but a mixed-version fleet needs the refuse-older-writers rule.
-- **Test matrix.** Every runner/resume behavior needs classic-mode and
-  catalog-mode coverage. This is the largest real cost. Mitigation:
-  catalog mode enters as experimental; its integration tests are marked
-  `slow` like the resume matrix they mirror.
-- **Commit latency per step** — a CAS round-trip, seconds worst-case
-  under a rebase. Negligible against real step runtimes.
-- **Catalog blast radius.** One corrupt/clobbered catalog object breaks
-  reads for that flow (data files remain, and are re-registerable via
-  backfill). Mitigations: per-flow catalogs, bucket versioning, and the
-  fact that data was never writable through the catalog path.
+- A half-finished fan-out is invisible **to lake readers** — its
+  uploaded parts are unreferenced S3 objects, not table contents. Today
+  readers glob paths, so partially written fan-outs are physically
+  visible, and the runner defends with the "complete only when ALL
+  parts written" invariant plus lazily-surfacing read errors. Those
+  defenses remain for classic mode; catalog-mode readers simply never
+  encounter the problem.
+- A crashed run's unregistered parts are orphans; schrein's grace-TTL
+  GC reaps them. Its *registered* steps remain queryable under that
+  run_id — same as today, where a failed run's written parts are
+  globbable and the ledger says `failed`. Status still comes from the
+  ledger; the catalog holds no opinion on it.
+- Crash windows: parts uploaded but not registered → step recomputed on
+  resume (as today, via meta); registered but meta not flushed → resume
+  recomputes under a new run_id and the origin's rows sit in the table
+  like any failed run's output. No new inconsistency class; the catalog
+  and meta can only skew in the same benign way parts and meta can
+  today.
 
-## 4. Contention budget
+## 3. What ionflow gains
 
-Writers on one register = concurrent runs of one flow, each committing
-S+2 times over minutes-to-hours. Even ten concurrent runs of a
-ten-step flow average well under one commit per minute against a
-KB–MB catalog; rebase closures are metadata-only replays that commute
-(different run_ids). This fits schrein §3/§9 with orders of magnitude of
-headroom. If a pathological flow (hundreds of very fast steps, many
-concurrent runs) ever hits contention, the schrein-side log-structured
-upgrade (§9) applies before any ionflow redesign does.
+1. **Vanilla readers.** Anyone with stock DuckDB attaches the flow's
+   catalog `READ_ONLY` from a notebook — no ionflow install, no key
+   scheme knowledge, typed schemas included (Frozen-DuckLake pattern).
+   Today consumers need `query.py` or the layout conventions. This is
+   the headline feature. (They see the data tables; run status stays an
+   ionflow concern — the ledger is not lake data.)
+2. **Discovery becomes one GET.** Run/step enumeration for queries and
+   the drift check stop scaling with bucket size; typed empty views
+   come free (tables exist from genesis), deleting that special case in
+   `query.py`.
+3. **Schema evolution across history — the genuinely new capability,
+   and squarely schrein's department.** Today a schema change affects
+   only new runs; old runs drift, and the drift check can only refuse.
+   A DuckLake schema change is a metadata-only catalog operation
+   (schrein §5.6): an additive migration applies across all historic
+   runs in one commit, no files rewritten. For long-lived incremental
+   keyed flows (0008-style `Annotate`), that turns "schema change =
+   start over" into "schema change = one `ionflow migrate` commit."
+   Drift detection can then *propose* a migration instead of refusing.
+4. **Clean read-side visibility** (§2) — partial fan-outs and
+   half-written state can't reach lake readers.
+5. **Principled retention.** Run deletion = `DELETE WHERE run_id` +
+   snapshot expiry + grace-TTL GC, giving `ionflow clean` real
+   semantics for stable flows; snapshots give as-of time travel.
 
-## 5. Failure modes (mapped against today)
+## 4. What it costs
 
-| Failure | Today | Catalog mode |
-|---|---|---|
-| Crash after parts upload, before completion record | Parts exist, unrecorded → step recomputed on resume | Identical: files unregistered/invisible → recomputed; orphans reaped by GC after grace TTL |
-| Partial fan-out at crash | Parts visible; invariant + lazy errors keep it non-resumable | Structurally invisible — nothing to defend |
-| SIGKILL mid-run | Ledger stuck `running`; staleness from metrics heartbeat | Identical (heartbeat unchanged, outside catalog) |
-| Failed run, some steps done | Resumable via meta `steps_complete` | Resumable via registered steps (same, one source of truth) |
-| Two runs finish steps concurrently | Independent objects; ledger CAS at run end only | CAS rebase; commuting closures replay cleanly |
-| Corrupt/clobbered register | Ledger lost → run listing gone, parts + meta survive | Catalog lost → reads gone until restore (bucket versioning) or `backfill` re-registration |
+- **A new load-bearing dependency** (schrein + the ducklake extension)
+  on the read/query path of catalog-mode flows — though notably *not*
+  on the run-bookkeeping path, which stays ledger-only.
+- **Version coupling.** Catalog format and ducklake extension versions
+  couple the orchestrators writing one flow (schrein open question 2).
+- **Test matrix.** Runner behaviors need classic and catalog coverage —
+  the largest real cost. Mitigation: catalog mode is experimental at
+  first; its integration tests mirror the resume matrix and are marked
+  `slow`.
+- **Commit latency per step** — one CAS round-trip, seconds worst-case
+  under rebase; negligible against step runtimes.
+- **Catalog blast radius.** A corrupt/clobbered register breaks *reads*
+  for that flow until restored (bucket versioning) or rebuilt — data
+  files and the ledger are unaffected, and `ionflow catalog backfill`
+  (§6) re-registers everything from the run folders. Per-flow catalogs
+  keep this contained.
 
-## 6. Module-by-module delta
+## 5. Rejected variant: the ledger as a catalog table
 
-- **New seam: `RunStore`** (the optionality mechanism, §7.2) —
-  `begin_run`, `complete_step(step, part_keys)`, `finish_run(status)`,
-  `runs()`, `parts(run_id, step)`, `step_schema(step)`, plus a
-  query-attach hook. `ClassicStore` wraps today's `ledger.py` +
-  `_meta.json` + LIST/glob machinery, behavior-identical. `DuckLakeStore`
-  wraps `schrein.DuckLake.commit` with replayable closures.
-- **`runner.py`** — `flush()`/`upsert()` calls become store calls; the
-  per-step `flush()` becomes `complete_step` (in catalog mode: the
-  registration commit). Workers, retries, sizing, metrics: untouched.
-- **`ledger.py`** — becomes the guts of `ClassicStore`; unchanged
-  otherwise. (Reimplementing it on `CasRegister` is an unrelated
-  mechanical refactor.)
-- **`query.py`** — `duck()` dispatches: classic = glob views (today),
-  catalog = download-attach read-only, exposing the same view names +
-  `ledger` view over the `runs` table. `metrics` view stays glob-based
-  in both modes. Same SQL surface either way — `query`/`stats`/TUI
-  don't notice.
-- **`discovery.py`** — catalog mode replaces `scan_runs` LIST and the
-  footer-based drift check with catalog reads; drift compares declared
-  `Table` schema (via `persisted_type()` — the `shaped()` rule applies
-  to catalog DDL exactly as it does to views) against catalog schema,
-  and can now *offer* a migration instead of only refusing.
-- **`storage.py`** — `write_part` unchanged (ADR 0013 and 0003 stand:
-  constraints are enforced by our pre-upload scan; DuckLake would only
-  check NOT NULL). `Layout` gains the catalog key.
-- **Resume (ADR 0002, 0008)** — semantics preserved: copy origin parts
-  into the new run folder (server-side copy, cheap), then register the
-  copies under the new run_id. Keyed resume reads `fanout_keys` from the
-  catalog and copies+registers per surviving item. A future
-  "register-don't-copy" resume (sharing files across runs) becomes
-  *safe* under catalog refcounting — GC only deletes unreferenced files
-  — but changes run-deletion semantics; explicitly deferred, 0002
-  stands.
-- **`publish.py` (ADR 0009)** — unchanged: a copy with a sidecar. Noted
-  for later: within a catalog, publish-as-reference into a stable table
-  becomes safe for the same refcounting reason; that would be a new
-  numbered decision superseding 0009's trade-off, not a silent change.
-- **Prototype flows** — always classic mode. Scratch schema churn would
-  translate into migration/table-drop noise in a catalog, and
-  `reset_on_conflict` ledger resets have no clean catalog analogue.
-  Catalog mode is for stable flows; this is a simplification, not a
-  limitation.
-- **`config.py`** — `[storage] catalog = "none" | "ducklake"` at the
-  project level; each run records its mode in the `runs` row. New CLI:
-  `ionflow catalog backfill <flow>` registers pre-existing classic runs
-  into a fresh catalog (footer reads, one commit), which is both the
+The first draft proposed moving `ledger.parquet` (and `_meta.json`)
+into the catalog, so that file registration and run status commit in
+one atomic transaction. Rejected:
+
+- It puts run bookkeeping inside the lake schema — exactly the
+  role-conflation the schrein spec's §1.1 scope guard exists to
+  prevent, and a standing source of confusion for anyone reading either
+  spec.
+- The atomicity it buys is marginal: §2 shows catalog/meta skew is the
+  same benign class as today's parts/meta skew.
+- It would put the ducklake extension on the bookkeeping path of every
+  run, and prototype flows (which stay classic — schema churn would be
+  migration noise, and `reset_on_conflict` has no catalog analogue)
+  would need the classic ledger anyway, forcing two bookkeeping
+  implementations.
+
+The ledger stays a separate CAS object. (Reimplementing `ledger.py` on
+schrein's `CasRegister` remains a possible mechanical refactor — same
+mechanism, roles untouched.)
+
+## 6. Optionality
+
+- **`RunStore` seam** is unnecessary in this revision — since run
+  bookkeeping doesn't move, the integration surface shrinks to: a
+  `Catalog` hook the runner calls at genesis and step completion
+  (no-op in classic mode), and a backend switch in `query.py` /
+  `discovery.py` for the read side.
+- **Config:** `[storage] catalog = "none" | "ducklake"` at project
+  level; each run records the mode in its meta. Prototype flows are
+  always classic.
+- **`ionflow catalog backfill <flow>`:** registers pre-existing classic
+  runs into a fresh catalog (footer reads, one commit) — both the
   migration path and the corruption-recovery path.
+- **Dependency:** `ionflow[ducklake]` optional extra pulling schrein.
 
 ## 7. Open questions
 
-1. **run_id materialization.** Options: (a) register files with a
-   catalog-side partition value (needs `ducklake_add_data_files`
-   partition support — schrein open question 3 already flags verifying
-   this function's semantics); (b) write run_id as a real column into
-   each part (breaks 0002's cheap server-side resume copy, since copies
-   would carry the origin's run_id). (a) is strongly preferred; the I0
-   spike must settle it.
-2. **Catalog granularity.** Per-flow (recommended: contention isolation,
-   0004 alignment, small blast radius) vs per-project (single attach for
-   the whole lake — the original "datalake schema" vision). Multi-ATTACH
-   gives per-project *querying* over per-flow catalogs; what it does not
-   give is cross-flow atomic commits, which ionflow does not need.
-   Revisit only if multi-attach UX proves painful.
-3. **Transition state.** Does catalog mode maintain `ledger.parquet` as
-   a read-only compat mirror during a deprecation window, or is
-   `backfill` + a hard switch enough?
-4. **moto viability.** The catalog attach is a local file (download-
-   then-attach), so moto only serves the register blob and data parts —
-   both already proven — but ducklake-extension-under-moto needs the I0
-   spike before any test-suite commitment.
-5. **`ionflow migrate`.** Schema evolution (§2.4) deserves its own small
-   spec once the substrate exists: which `Table` diffs map to which
-   `ALTER`s, and how drift-check output proposes them.
+1. **run_id materialization.** Register files with a catalog-side
+   partition value (preferred; needs `ducklake_add_data_files`
+   partition support — schrein open question 3) vs run_id as a real
+   column in each part (breaks 0002's cheap server-side resume copies,
+   which would carry the origin's run_id). The I0 spike settles this.
+2. **Catalog granularity.** Per-flow (recommended: contention
+   isolation, 0004 alignment, small blast radius) vs per-project (one
+   attach for the whole lake). Multi-ATTACH over per-flow catalogs
+   gives project-wide *querying* without cross-flow commit coupling;
+   revisit only if that UX proves painful.
+3. **`shaped()` columns:** catalog DDL must use `persisted_type()`
+   (plain lists), the same read-side rule views and drift follow today.
+4. **moto viability.** The catalog attach is a local file
+   (download-then-attach), so moto only serves the register blob and
+   data parts — both already proven — but ducklake-under-moto needs the
+   I0 spike before any test-suite commitment.
+5. **`ionflow migrate`.** §3.3 deserves its own small spec once the
+   substrate exists: which `Table` diffs map to which `ALTER`s, and how
+   drift output proposes them.
+6. **Publish (0009).** Unchanged — a copy with a sidecar. Noted only:
+   within a catalog, publish-as-reference into a stable table becomes
+   safe (GC keeps referenced files), but that would be a new numbered
+   decision superseding 0009, not a silent change.
 
 ## 8. Sequencing
 
 - **Prereq:** schrein M0–M2 (register, DuckLake adapter, GC) shipped.
-- **I0 — spike (de-risk, throwaway):** moto + ducklake +
+- **I0 — spike (throwaway):** moto + ducklake +
   `ducklake_add_data_files` on boto3-written parts with a partition
-  value; settles §7.1 and §7.4. No merge.
-- **I1 — `RunStore` seam:** pure refactor, classic behavior bit-for-bit,
-  full suite green. Valuable on its own (it also isolates `ledger.py`
-  for the eventual `CasRegister` swap).
-- **I2 — `DuckLakeStore`, linear flows:** begin/complete/finish, query
-  attach, drift-via-catalog, behind the config flag, experimental.
-- **I3 — fan-out + keyed resume + `backfill`:** the full resume matrix
-  in catalog mode; GC wiring; exit = classic and catalog modes pass the
-  same `-m ""` suite.
-- **I4 — retention + decisions:** `clean`/expiry semantics; separate
-  ADRs for publish-as-reference (vs 0009) and register-don't-copy
-  resume (vs 0002) — written only if wanted, defaults stand.
+  value; settles §7.1 and §7.4.
+- **I1 — catalog hook + genesis + per-step registration** behind the
+  config flag; linear flows; `query.py`/`discovery.py` catalog read
+  path.
+- **I2 — fan-out + resume + `backfill`:** registration of copied parts
+  on resume; exit = classic and catalog modes pass the same `-m ""`
+  suite.
+- **I3 — retention + `ionflow migrate`:** expiry/GC wiring for
+  `clean`; the migration workflow (§3.3, §7.5).
