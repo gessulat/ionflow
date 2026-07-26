@@ -380,7 +380,6 @@ def run(
                 "finished": finished,
                 "commit": commit,
                 "origin_run_id": origin_run_id,
-                "steps_complete": sorted(completed),
                 **params,
                 **(custom or {}),
             },

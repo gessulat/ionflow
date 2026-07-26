@@ -178,7 +178,7 @@ in `schrein/docs/decisions/` (own numbering).
 - Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
   (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't
   collect it.
-- Its tests launch `schrein/tests/moto_server.py`, NOT bare moto: moto's
+- Its tests launch `schrein.testing`, NOT bare moto: moto's
   conditional PUTs race under threads and silently lose updates
   (schrein decision 0003).
 - The ducklake extension loads from the `duckdb-extension-ducklake` PyPI

@@ -153,4 +153,4 @@ def to_table(rows):
 def write_parquet(client, bucket, key, rows):
     """Upload sample rows as one parquet object (no-op for empty rows)."""
     if rows:
-        storage.put_parquet(client, bucket, key, to_table(rows))
+        client.put_object(Bucket=bucket, Key=key, Body=storage.parquet_bytes(to_table(rows)))

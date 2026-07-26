@@ -141,7 +141,7 @@ def _local_connection(threads=None, memory_mb=None):
     return con
 
 
-def secret_sql(cfg, name="s"):
+def secret_sql(cfg):
     """CREATE SECRET statement for the configured S3 endpoint.
 
     Explicit keys when the config carries them (MinIO/tests), otherwise the
@@ -159,7 +159,7 @@ def secret_sql(cfg, name="s"):
             "URL_STYLE 'path'",
             f"USE_SSL {str(u.scheme == 'https').lower()}",
         ]
-    return f"CREATE OR REPLACE SECRET {name} ({', '.join(parts)})"
+    return f"CREATE OR REPLACE SECRET s ({', '.join(parts)})"
 
 
 def connect(cfg, threads=None, memory_mb=None):
@@ -196,10 +196,6 @@ def _ndarray_table(arr, table):
     """
     if arr.dtype.names:
         return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
-    if table is None:
-        raise TypeError(
-            "bare ndarray with no declared Table: return {'col': array} or a structured array so columns have names"
-        )
     cols = table.columns()
     names = list(cols)
     if len(names) == 1 and (arr.ndim == 1 or cols[names[0]].is_vector()):
@@ -278,8 +274,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     Nothing touches S3 until the staged file is complete and validated, so a
     part object's existence implies the part is whole. Types are enforced by the cast
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
-    `table=None` (publish's copy path: the source is already typed) skips
-    both. `threads`/`memory_mb` keep pooled workers within their
+    `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak. `fanout_key`
     (a column name, for keyed fan-out parts) validates that the written file
     holds exactly one distinct non-NULL value of that column and returns it;
@@ -288,16 +283,15 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     # capability dispatch: covers relations and StepInput (which delegates
     # to_arrow_reader to its relation) without per-wrapper unwrap branches
     src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
-    if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
+    if missing := set(table.columns()) - set(src.schema.names):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
     con = _local_connection(threads, memory_mb)
     con.register("_src", src)
-    select = "SELECT * FROM _src" if table is None else table.cast_sql("_src")
+    select = table.cast_sql("_src")
     with tempfile.TemporaryDirectory(prefix="ionflow-part-") as tmp_dir:
         path = os.path.join(tmp_dir, "part.parquet")
         con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
-        if table is not None:
-            _validate_part(con, table, path, key)
+        _validate_part(con, table, path, key)
         key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
         if os.path.getsize(path) < MULTIPART_THRESHOLD:
             with open(path, "rb") as f:
@@ -316,15 +310,6 @@ def parquet_bytes(table):
 
 def table_from_bytes(blob):
     return pq.read_table(io.BytesIO(blob))
-
-
-def put_parquet(client, bucket, key, table):
-    """Upload a pyarrow Table as parquet."""
-    client.put_object(Bucket=bucket, Key=key, Body=parquet_bytes(table))
-
-
-def get_table(client, bucket, key):
-    return table_from_bytes(client.get_object(Bucket=bucket, Key=key)["Body"].read())
 
 
 def get_bytes_or_none(client, bucket, key):

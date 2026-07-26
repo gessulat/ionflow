@@ -92,12 +92,8 @@ class Catalog:
 
 
 def _table_ddl(step_name, table):
-    """CREATE TABLE from a step's Table: persisted types (what a reader sees),
-    NOT NULL only (all DuckLake enforces) — PK/CHECK stay ionflow-side (0003)."""
-    cols = ", ".join(
-        f"{n} {col.persisted_type()}{'' if col.nullable else ' NOT NULL'}" for n, col in table.columns().items()
-    )
-    return f"CREATE TABLE IF NOT EXISTS lake.{step_name} (run_id VARCHAR NOT NULL, {cols})"
+    """CREATE TABLE from a step's Table (persisted types; run_id partition first)."""
+    return f"CREATE TABLE IF NOT EXISTS lake.{step_name} (run_id VARCHAR NOT NULL, {table.persisted_ddl()})"
 
 
 def backfill(flow_cls, config, replace=False):

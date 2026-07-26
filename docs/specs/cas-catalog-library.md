@@ -486,259 +486,26 @@ INSTALL ducklake; LOAD ducklake;
 ATTACH 'ducklake:s3://mybucket/lake/catalog.ducklake' AS lake (READ_ONLY);
 ```
 
-## 7. What to extract from ionflow (with code)
+## 7. What was extracted from ionflow
 
-ionflow (this spec's origin repo) already runs the CAS pattern in
-production. Three things are worth carrying over — reproduced here so a
-fresh repo needs no access to ionflow.
+This section originally reproduced ~250 lines of code verbatim (the CAS
+loop condensed from `ledger.py`, a complete `register.py`, the DuckLake
+adapter sketch, and the moto conftest) so the library could be built in a
+blank repository. The library exists now — the code of record is
+`schrein/src/schrein/` and `schrein/tests/`, and the listings had already
+begun to drift from it. What carried over, and where it lives:
 
-### 7.1 The CAS loop — generalize `ledger.py::upsert_run` into `CasRegister`
-
-ionflow's ledger is an append-only Parquet file swapped by CAS
-(`src/ionflow/ledger.py`). The essence, plus the helpers it uses from
-`storage.py`:
-
-```python
-# ionflow's proven kernel (condensed):
-MISSING_KEY_CODES = {"NoSuchKey", "404"}      # ClientError codes: object absent
-_PRECONDITION    = {"PreconditionFailed", "412"}
-
-def error_code(err):                           # AWS error code from ClientError
-    return err.response["Error"]["Code"]
-
-# write with CAS: IfMatch when updating, IfNoneMatch="*" when creating
-cas = {"IfMatch" if etag else "IfNoneMatch": etag or "*"}
-client.put_object(Bucket=bucket, Key=key, Body=body, **cas)
-
-# the loop: read -> modify -> conditional write -> on 412, re-read and retry
-for _ in range(retries):
-    rows, etag = _read(client, bucket, key)    # returns ([], None) if absent
-    rows = modify(rows)
-    try:
-        _write(client, bucket, key, rows, etag)
-        return
-    except ClientError as e:
-        if error_code(e) in _PRECONDITION:
-            continue
-        raise
-raise RuntimeError("CAS failed after retries")
-```
-
-Generalized core for the new library (complete, runnable):
-
-```python
-# src/schrein/register.py
-"""A linearizable CAS register on one S3 key, via conditional writes."""
-import random
-import time
-
-from botocore.exceptions import ClientError
-
-MISSING = {"NoSuchKey", "404"}
-# 412 = etag mismatch; 409 ConditionalRequestConflict = concurrent conditional
-# PUTs raced on the key (AWS returns this; both mean "re-read and retry").
-RETRYABLE = {"PreconditionFailed", "412", "ConditionalRequestConflict", "409"}
-
-
-class CommitConflict(RuntimeError):
-    """CAS lost the race more than max_attempts times."""
-
-
-def _error_code(e: ClientError) -> str:
-    return e.response["Error"]["Code"]
-
-
-class CasRegister:
-    def __init__(self, client, bucket: str, key: str):
-        self.client, self.bucket, self.key = client, bucket, key
-
-    def read(self):
-        """-> (bytes | None, etag | None). Strongly consistent, atomic."""
-        try:
-            r = self.client.get_object(Bucket=self.bucket, Key=self.key)
-        except ClientError as e:
-            if _error_code(e) in MISSING:
-                return None, None
-            raise
-        return r["Body"].read(), r["ETag"]
-
-    def write(self, body: bytes, expect_etag: str | None) -> str:
-        """Conditional PUT: If-Match when updating, If-None-Match:* on genesis.
-        Raises ClientError (code in RETRYABLE) when the precondition fails."""
-        cas = {"IfMatch": expect_etag} if expect_etag else {"IfNoneMatch": "*"}
-        r = self.client.put_object(Bucket=self.bucket, Key=self.key, Body=body, **cas)
-        return r["ETag"]
-
-    def transact(self, fn, max_attempts: int = 8, base_delay: float = 0.5, cap: float = 30.0):
-        """fn(old_bytes | None) -> new_bytes; replayed until the CAS lands.
-        fn MUST be replayable: it may run once per attempt, each against a
-        fresh read. Returns the committed object's new etag."""
-        for attempt in range(max_attempts):
-            old, etag = self.read()
-            try:
-                return self.write(fn(old), etag)
-            except ClientError as e:
-                if _error_code(e) not in RETRYABLE:
-                    raise
-                time.sleep(random.uniform(0, min(cap, base_delay * 2**attempt)))
-        raise CommitConflict(f"s3://{self.bucket}/{self.key}: lost CAS race {max_attempts} times")
-```
-
-The DuckLake adapter wraps `transact`: `fn(old_bytes)` materializes the
-blob to a temp file (or creates a fresh catalog on genesis), attaches,
-runs the user closure, detaches, asserts no `.wal`, and returns the new
-file's bytes.
-
-```python
-# src/schrein/ducklake.py  (sketch; the register does the concurrency work)
-import pathlib
-import tempfile
-
-import duckdb
-
-
-class DuckLake:
-    def __init__(self, register, data_path: str, secret_sql: str | None = None):
-        self.register = register          # CasRegister on .../catalog.ducklake
-        self.data_path = data_path        # 's3://bucket/prefix/data/'
-        self.secret_sql = secret_sql      # CREATE SECRET ... for non-AWS endpoints
-
-    def _attach(self, con, local: pathlib.Path, read_only: bool = False):
-        con.execute("INSTALL ducklake; LOAD ducklake;")
-        if self.secret_sql:
-            con.execute(self.secret_sql)
-        ro = ", READ_ONLY" if read_only else ""
-        con.execute(
-            f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})"
-        )
-
-    def commit(self, user_fn, **transact_kwargs):
-        def fn(old: bytes | None) -> bytes:
-            with tempfile.TemporaryDirectory() as tmp:
-                local = pathlib.Path(tmp) / "catalog.ducklake"
-                if old is not None:
-                    local.write_bytes(old)          # rebase base; genesis: ATTACH creates it
-                con = duckdb.connect()
-                try:
-                    self._attach(con, local)
-                    user_fn(con)                    # replayable closure (§5.3)
-                    con.execute("DETACH lake")
-                finally:
-                    con.close()
-                wal = local.with_suffix(local.suffix + ".wal")
-                if wal.exists():                    # must be one clean file (§5.4)
-                    raise RuntimeError("catalog WAL not checkpointed on detach")
-                return local.read_bytes()
-
-        return self.register.transact(fn, **transact_kwargs)
-```
-
-### 7.2 The moto test harness — copy `tests/conftest.py` nearly verbatim
-
-ionflow's suite fakes S3 with a **moto server subprocess** started and
-warmed at conftest import, killed atexit; each test gets a unique bucket
-and no teardown. Two hard-won rules encoded in it:
-
-1. **Never run moto in-process.** DuckDB httpfs holds relations open while
-   reading; an in-process werkzeug server starves and wedges tests for
-   minutes. Subprocess only.
-2. moto implements S3 conditional writes, so the CAS paths (412 on stale
-   `If-Match`, `If-None-Match` create) are genuinely exercised — ionflow's
-   ledger tests prove this daily.
-
-```python
-# tests/conftest.py  (for the new repo — adapted from ionflow)
-import atexit
-import socket
-import subprocess
-import sys
-import threading
-import time
-
-import pytest
-
-_moto = {}
-
-
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _warm():
-    import boto3
-
-    port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    atexit.register(proc.kill)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.05)
-    _moto["endpoint"] = f"http://127.0.0.1:{port}"
-    boto3.client(
-        "s3", endpoint_url=_moto["endpoint"], region_name="us-east-1",
-        aws_access_key_id="warm", aws_secret_access_key="warm",
-    ).list_buckets()
-
-
-_warmup = threading.Thread(target=_warm, daemon=True)
-_warmup.start()
-
-
-@pytest.fixture(scope="session")
-def moto_endpoint():
-    _warmup.join()
-    return _moto["endpoint"]
-
-
-@pytest.fixture
-def s3(moto_endpoint, request):
-    import boto3
-
-    client = boto3.client(
-        "s3", endpoint_url=moto_endpoint, region_name="us-east-1",
-        aws_access_key_id="test", aws_secret_access_key="test",
-    )
-    bucket = f"b-{abs(hash(request.node.nodeid)) % 10**8}"   # unique per test, no cleanup
-    client.create_bucket(Bucket=bucket)
-    return client, bucket, moto_endpoint
-```
-
-DuckDB inside tests needs a secret pointing at moto (path-style, no SSL):
-
-```python
-SECRET_SQL = """
-CREATE OR REPLACE SECRET moto (
-    TYPE s3, KEY_ID 'test', SECRET 'test', REGION 'us-east-1',
-    ENDPOINT '{host_port}', USE_SSL false, URL_STYLE 'path'
-);
-"""  # host_port = moto endpoint without the scheme, e.g. 127.0.0.1:5000
-```
-
-### 7.3 Design lessons to inherit (ionflow conventions that transfer)
-
-- **Backblaze B2 is unsupported** (no `If-Match`). Probe at init: attempt a
-  conditional PUT on a scratch key; refuse with a clear error if the
-  backend ignores or rejects preconditions. (A backend that *ignores*
-  `If-Match` silently is worse than one that errors — probe for correct
-  412 behavior, not just for success.)
-- **DuckDB extension install race:** `INSTALL ducklake` downloads once per
-  DuckDB version. If the library ever spawns concurrent workers, install
-  from a single connection before fanning out (ionflow's runner does
-  this for httpfs).
-- **Timestamps naive UTC** if you store any in Parquet metadata you expect
-  DuckDB to read without pytz.
-- Bucket versioning is cheap insurance: every catalog version a rogue or
-  buggy writer clobbers remains recoverable.
+- **The CAS loop** (`upsert_run`'s read → modify → conditional-PUT →
+  retry-on-412) generalized into `register.py::CasRegister.transact`,
+  with jittered backoff and `CommitConflict` after exhausted attempts.
+- **The moto subprocess harness** — server started and warmed at conftest
+  import, unique bucket per test, never in-process (DuckDB httpfs starves
+  an in-process werkzeug server). Now `schrein.testing` + each suite's
+  `conftest.py`, with atomic conditional PUTs added (decision 0003).
+- **Design lessons**: Backblaze B2 refused via `CasRegister.probe`
+  (no working `If-Match`); extension installs serialized before fan-out
+  (the loader in `ducklake.py`, decision 0002); timestamps naive UTC;
+  bucket versioning as cheap insurance.
 
 ## 8. Out of scope: Apache Iceberg (decision 0004)
 
@@ -802,50 +569,11 @@ only boto3; adapter tests need duckdb.
 CI note: run tests with `pytest -n auto --dist worksteal` (pytest-xdist);
 the harness is parallel-safe by construction (one server, unique buckets).
 
-## 11. Fresh-repo skeleton
+## 11. Repository skeleton
 
-```
-schrein/
-  pyproject.toml
-  README.md                 <- distill §1, §4, §6 of this spec
-  src/schrein/
-    __init__.py             <- exports CasRegister, DuckLake, CommitConflict
-    register.py             <- §7.1 (complete)
-    ducklake.py             <- §7.1 sketch -> full adapter (genesis, read(), gc)
-    iceberg.py              <- phase 2 (§8), behind an optional extra
-  tests/
-    conftest.py             <- §7.2
-    test_register.py
-    test_ducklake.py
-  docs/
-    spec.md                 <- this document
-    decisions/              <- ADRs, numbered, one per non-obvious choice
-```
-
-```toml
-# pyproject.toml
-[project]
-name = "schrein"
-version = "0.0.1"
-description = "Zero-infrastructure lakehouse catalogs on S3 conditional writes (DuckLake, Iceberg)"
-requires-python = ">=3.12"
-dependencies = [
-  "boto3>=1.35",           # conditional-write (If-Match) support
-  "duckdb>=1.4",           # ducklake extension requires modern duckdb
-]
-
-[project.optional-dependencies]
-iceberg = ["pyiceberg>=0.9"]
-
-[dependency-groups]
-dev = ["pytest>=8", "pytest-xdist>=3", "moto[server,s3]>=5"]
-
-[tool.pytest.ini_options]
-addopts = "-n auto --dist worksteal"
-testpaths = ["tests"]
-```
-
-Bootstrap: `uv init --lib schrein && uv add boto3 duckdb && uv add --group dev pytest pytest-xdist "moto[server,s3]"`.
+Realized — see `schrein/` in this repository (a uv workspace member,
+schrein decision 0001): `src/schrein/{register,ducklake,testing}.py`,
+`tests/`, `docs/decisions/`. Packaging lives in `schrein/pyproject.toml`.
 
 ## 12. Milestones
 

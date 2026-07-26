@@ -1,5 +1,4 @@
 import atexit
-import pathlib
 import socket
 import subprocess
 import sys
@@ -13,8 +12,8 @@ from helpers import make_client
 # heavy imports (boto3) overlap with collection. The server runs as a
 # subprocess, never in-process: DuckDB httpfs holds relations open while
 # reading and starves an in-process werkzeug server (lesson from ionflow).
-# It is the moto_server.py wrapper, not bare moto: upstream moto's
-# conditional PUTs race under threads and lose updates (see that file).
+# It is schrein.testing, not bare moto: upstream moto's conditional PUTs
+# race under threads and lose updates (schrein decision 0003).
 _moto = {}
 
 
@@ -26,9 +25,8 @@ def _free_port():
 
 def _warm():
     port = _free_port()
-    server = pathlib.Path(__file__).parent / "moto_server.py"
     proc = subprocess.Popen(
-        [sys.executable, str(server), str(port)],
+        [sys.executable, "-m", "schrein.testing", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

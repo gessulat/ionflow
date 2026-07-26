@@ -105,7 +105,8 @@ def test_write_parquet_roundtrip(s3cfg):
     rows = [(1000.0, "load", None, 512, 4, 0.5, 0.1), (1001.0, "score", 2, 1024, 8, 1.5, 0.2)]
     client = storage.s3_client(s3cfg)
     metrics.write_parquet(client, s3cfg.bucket, "mf/F/runs/run_id=r1/_metrics.parquet", rows)
-    table = storage.get_table(client, s3cfg.bucket, "mf/F/runs/run_id=r1/_metrics.parquet")
+    blob = storage.get_bytes_or_none(client, s3cfg.bucket, "mf/F/runs/run_id=r1/_metrics.parquet")
+    table = storage.table_from_bytes(blob)
     assert table.schema.equals(metrics.SCHEMA)
     assert table.column("rss").to_pylist() == [512, 1024]
     assert table.column("branch").to_pylist() == [None, 2]

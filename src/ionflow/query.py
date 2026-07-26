@@ -14,7 +14,7 @@ from .storage import (
 # a flow with no runs has no ledger object; the view must still exist and type
 _EMPTY_LEDGER_SQL = (
     "SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
-    'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR[] AS steps_complete, '
+    'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", '
     "NULL::VARCHAR AS origin_run_id WHERE false"
 )
 

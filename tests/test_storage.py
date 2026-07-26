@@ -35,7 +35,7 @@ def test_write_part_roundtrips_list_columns(s3cfg):
     data = pa.table({"id": [1, 2], "vec": [[1.0, 2.0], [3.0]]})
     key = "mf/E/runs/run_id=r/e/part_0.parquet"
     storage.write_part(client, s3cfg.bucket, key, data, Emb)
-    assert storage.get_table(client, s3cfg.bucket, key).column("vec").to_pylist() == [
+    assert storage.table_from_bytes(storage.get_bytes_or_none(client, s3cfg.bucket, key)).column("vec").to_pylist() == [
         [1.0, 2.0],
         [3.0],
     ]

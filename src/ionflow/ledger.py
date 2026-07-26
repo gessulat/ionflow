@@ -12,7 +12,6 @@ _BASE_FIELDS = [
     pa.field("started", pa.timestamp("us")),
     pa.field("finished", pa.timestamp("us")),
     pa.field("commit", pa.string()),
-    pa.field("steps_complete", pa.list_(pa.string())),
     pa.field("origin_run_id", pa.string()),
 ]
 

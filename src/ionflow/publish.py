@@ -82,11 +82,9 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     # snapshots referencing an earlier publish keep their (immutable) file
     data_prefix = lake.data_path.removeprefix(f"s3://{dest_bucket}/")
     staged = f"{data_prefix}{table}/{run_id}-{uuid.uuid4().hex}.parquet"
-    write_part(client, dest_bucket, staged, rel, None)
+    write_part(client, dest_bucket, staged, rel, out_table)
 
-    ddl_cols = ", ".join(
-        f"{n} {c.persisted_type()}{'' if c.nullable else ' NOT NULL'}" for n, c in out_table.columns().items()
-    )
+    ddl_cols = out_table.persisted_ddl()
     row = {
         "table_name": table,
         "flow": flow_cls.flow_id(),

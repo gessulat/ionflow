@@ -25,13 +25,11 @@ def test_run_end_to_end(s3cfg, repo):
     assert width == [(64,)]
 
     # ledger row complete with the custom column populated
-    row = con.sql(
-        f"SELECT status, finished, n_docs, len(steps_complete) FROM ledger WHERE run_id = '{run_id}'"
-    ).fetchone()
+    row = con.sql(f"SELECT status, finished, n_docs FROM ledger WHERE run_id = '{run_id}'").fetchone()
     assert row[0] == "complete"
     assert row[1] is not None
     assert row[2] == 4  # n_docs custom ledger column
-    assert row[3] == 6  # docs/0, by_source/0+1, vectors/0+1, summary/0
+    # per-step progress (steps_complete) lives in _meta.json, not the ledger
 
     # resource metrics: every step sampled at least once; stats derivable
     from ionflow import query
