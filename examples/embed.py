@@ -8,6 +8,8 @@ A miniature embedding pipeline: load documents, fan out by source, embed each
 source's documents in parallel (numpy in, numpy out — the model is a stand-in
 that hashes the text), fan in to a summary. The DAG is the method signatures:
 `vectors` depends on `by_source` because it has a parameter named `by_source`.
+`source` is the fanout key, so `--resume latest` grows the corpus source by
+source, and the `min_len` param shows typed run inputs.
 """
 
 import hashlib
@@ -15,12 +17,24 @@ import hashlib
 import numpy as np
 import pyarrow as pa
 
-from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key, shaped
+from ionflow import (
+    Branch,
+    Collect,
+    Fanout,
+    Flow,
+    FlowParams,
+    LedgerColumns,
+    Table,
+    check,
+    fanout_key,
+    primary_key,
+    shaped,
+)
 
 
 class Doc(Table):
     doc_id: int = primary_key
-    source: str
+    source: str = fanout_key  # fan-out item identity -> incremental resume
     text: str
 
 
@@ -38,6 +52,9 @@ class Summary(Table):
 
 
 class EmbedDocs(Flow):
+    class Params(FlowParams):
+        min_len: int = 1  # skip docs shorter than this many characters
+
     class Ledger(LedgerColumns):
         n_docs: int
 
@@ -51,6 +68,7 @@ class EmbedDocs(Flow):
         )
 
     def by_source(self, docs: Doc) -> Fanout[Doc]:  # partitioning reuses the schema
+        docs = docs.filter(f"length(text) >= {self.min_len}")  # params are bound to self
         sources = [s for (s,) in docs.project("source").distinct().order("source").fetchall()]
         return [docs.filter(f"source = '{s}'") for s in sources]
 
