@@ -17,7 +17,7 @@ from .config import (
 )
 from .query import ledger_with_liveness, step_stats
 
-app = typer.Typer(add_completion=False, help="microflow: minimal flows on S3")
+app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3")
 
 
 @app.callback(invoke_without_command=True)
@@ -41,11 +41,11 @@ def _config_or_setup():
         cfg = Config.load()
     except ConfigMissing:
         if sys.stdin.isatty():
-            typer.echo("microflow isn't configured for this repo yet — let's set it up.\n")
+            typer.echo("ionflow isn't configured for this repo yet — let's set it up.\n")
             setup()
             typer.echo("\nSetup complete. Commit the change shown above, then re-run.")
             raise typer.Exit(0) from None
-        typer.echo("No microflow config found. Run `microflow setup`.")
+        typer.echo("No ionflow config found. Run `ionflow setup`.")
         raise typer.Exit(1) from None
     if not storage.aws_credentials_available():
         typer.echo(
@@ -65,10 +65,10 @@ def _add_to_gitignore(root):
 
 @app.command()
 def setup():
-    """Configure the S3 bucket for this repo (writes .microflow/config)."""
+    """Configure the S3 bucket for this repo (writes .ionflow/config)."""
     root = git.repo_root()
     if root is None:
-        typer.echo("Warning: not inside a git repository; microflow runs require one.")
+        typer.echo("Warning: not inside a git repository; ionflow runs require one.")
         root = Path.cwd()
     else:
         root = Path(root)

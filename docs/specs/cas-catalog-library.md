@@ -1,7 +1,7 @@
 # Spec: a zero-infrastructure lakehouse catalog on S3 conditional writes
 
 **Status:** draft for extraction into a fresh repository
-**Origin:** design discussion in the [microflow](https://github.com/gessulat/microflow) repo, 2026-07-25
+**Origin:** design discussion in the [ionflow](https://github.com/gessulat/ionflow) repo, 2026-07-25
 **Landscape checked:** 2026-07-26 (§2.1 — the niche is validated and unoccupied)
 **Working name:** `casket` (CAS + bucket — placeholder, rename freely)
 
@@ -10,7 +10,7 @@ makes a **multi-writer DuckLake catalog** (and later an **Apache Iceberg
 catalog**) work with **no infrastructure other than one S3-compatible
 bucket** — no Postgres, no catalog server, no lock service. An agent should
 be able to build the library from this document alone, in a blank
-repository, without access to microflow.
+repository, without access to ionflow.
 
 ---
 
@@ -61,7 +61,7 @@ protocol.
 | Project | What it proves | Link |
 |---|---|---|
 | **Frozen DuckLake** (DuckDB team, Oct 2025) | The *read* side is official: a DuckLake catalog written as a single DuckDB-format file, copied to object storage, attached read-only by any vanilla DuckDB client. Our library is "frozen, plus a safe multi-writer commit protocol." | [blog post](https://ducklake.select/2025/10/24/frozen-ducklake/), [guide](https://ducklake.select/docs/stable/duckdb/guides/public_ducklake_on_object_storage), [PyPI helper](https://pypi.org/project/frozen-ducklake/) |
-| **microflow `ledger.py`** | The exact CAS loop (read → modify → `If-Match` PUT → retry on 412) running in production against S3/moto/MinIO. Code reproduced in §7. | `src/microflow/ledger.py` in the microflow repo |
+| **ionflow `ledger.py`** | The exact CAS loop (read → modify → `If-Match` PUT → retry on 412) running in production against S3/moto/MinIO. Code reproduced in §7. | `src/ionflow/ledger.py` in the ionflow repo |
 | **Delta Lake S3 commit protocol** | Optimistic commits over object storage at scale. Historically needed DynamoDB for put-if-absent; delta-rs now uses native S3 conditional writes. This is the log-structured "second gear" of our design (§9). | [Delta storage docs](https://docs.delta.io/latest/delta-storage.html), [delta-rs](https://delta-io.github.io/delta-rs/) |
 | **Boring Catalog** | An Iceberg catalog as a *single JSON file on S3* using conditional writes, implemented as a PyIceberg custom catalog. Direct prior art for our Iceberg adapter (§8) — but **dormant**: 12 commits by a single author, 2025-04→2025-05, nothing since (§2.1). A design reference to read, not a dependency to adopt. | [GitHub](https://github.com/boringdata/boring-catalog), [design writeup](https://juhache.substack.com/p/boring-iceberg-catalog) |
 | **Quack** (DuckDB team, May 2026) | The server-shaped alternative: a protocol/extension making a DuckDB-file catalog safely shared via a server process. Proves demand; still requires running a process, which is what we avoid. | [overview](https://www.definite.app/blog/duckdb-quack-ducklake-catalog) |
@@ -400,20 +400,20 @@ INSTALL ducklake; LOAD ducklake;
 ATTACH 'ducklake:s3://mybucket/lake/catalog.ducklake' AS lake (READ_ONLY);
 ```
 
-## 7. What to extract from microflow (with code)
+## 7. What to extract from ionflow (with code)
 
-microflow (this spec's origin repo) already runs the CAS pattern in
+ionflow (this spec's origin repo) already runs the CAS pattern in
 production. Three things are worth carrying over — reproduced here so a
-fresh repo needs no access to microflow.
+fresh repo needs no access to ionflow.
 
 ### 7.1 The CAS loop — generalize `ledger.py::upsert_run` into `CasRegister`
 
-microflow's ledger is an append-only Parquet file swapped by CAS
-(`src/microflow/ledger.py`). The essence, plus the helpers it uses from
+ionflow's ledger is an append-only Parquet file swapped by CAS
+(`src/ionflow/ledger.py`). The essence, plus the helpers it uses from
 `storage.py`:
 
 ```python
-# microflow's proven kernel (condensed):
+# ionflow's proven kernel (condensed):
 MISSING_KEY_CODES = {"NoSuchKey", "404"}      # ClientError codes: object absent
 _PRECONDITION    = {"PreconditionFailed", "412"}
 
@@ -549,7 +549,7 @@ class DuckLake:
 
 ### 7.2 The moto test harness — copy `tests/conftest.py` nearly verbatim
 
-microflow's suite fakes S3 with a **moto server subprocess** started and
+ionflow's suite fakes S3 with a **moto server subprocess** started and
 warmed at conftest import, killed atexit; each test gets a unique bucket
 and no teardown. Two hard-won rules encoded in it:
 
@@ -557,11 +557,11 @@ and no teardown. Two hard-won rules encoded in it:
    reading; an in-process werkzeug server starves and wedges tests for
    minutes. Subprocess only.
 2. moto implements S3 conditional writes, so the CAS paths (412 on stale
-   `If-Match`, `If-None-Match` create) are genuinely exercised — microflow's
+   `If-Match`, `If-None-Match` create) are genuinely exercised — ionflow's
    ledger tests prove this daily.
 
 ```python
-# tests/conftest.py  (for the new repo — adapted from microflow)
+# tests/conftest.py  (for the new repo — adapted from ionflow)
 import atexit
 import socket
 import subprocess
@@ -638,7 +638,7 @@ CREATE OR REPLACE SECRET moto (
 """  # host_port = moto endpoint without the scheme, e.g. 127.0.0.1:5000
 ```
 
-### 7.3 Design lessons to inherit (microflow conventions that transfer)
+### 7.3 Design lessons to inherit (ionflow conventions that transfer)
 
 - **Backblaze B2 is unsupported** (no `If-Match`). Probe at init: attempt a
   conditional PUT on a scratch key; refuse with a clear error if the
@@ -647,7 +647,7 @@ CREATE OR REPLACE SECRET moto (
   412 behavior, not just for success.)
 - **DuckDB extension install race:** `INSTALL ducklake` downloads once per
   DuckDB version. If the library ever spawns concurrent workers, install
-  from a single connection before fanning out (microflow's runner does
+  from a single connection before fanning out (ionflow's runner does
   this for httpfs).
 - **Timestamps naive UTC** if you store any in Parquet metadata you expect
   DuckDB to read without pytz.
@@ -735,7 +735,7 @@ provider docs at build time**, same caveat as open question 3):
   `uri=https://s3tables.<region>.amazonaws.com/iceberg`,
   `rest.sigv4-enabled=true`, `rest.signing-name=s3tables`,
   `warehouse=<table-bucket ARN>`; credentials from the AWS default chain
-  (matching microflow's "never store credentials" convention). Maintenance
+  (matching ionflow's "never store credentials" convention). Maintenance
   (compaction, snapshot expiry) is built into the service — the §5.5 GC
   surface no-ops here.
 - **Cloudflare R2 Data Catalog** — `RestCatalog` with bearer token:
@@ -875,7 +875,7 @@ Bootstrap: `uv init --lib casket && uv add boto3 duckdb && uv add --group dev py
   S3 Tables / R2 / BigLake `RestCatalog` presets, endpoint spellings
   verified against current provider docs; manual smoke tests (real
   accounts — moto fakes none of these).
-- **M4 — (back in microflow, out of scope here).** `publish --to-ducklake`
+- **M4 — (back in ionflow, out of scope here).** `publish --to-ducklake`
   / `--to-iceberg` targets using this library.
 
 ## 13. Open questions
@@ -957,8 +957,8 @@ Commit-protocol prior art & contrast:
 [Litestream](https://litestream.io) ·
 [Cloud-Backed SQLite](https://sqlite.org/cloudsqlite/doc/trunk/www/index.wiki)
 
-microflow (origin repo; code reproduced in §7 so this doc stands alone):
-`src/microflow/ledger.py` (CAS loop) ·
-`src/microflow/storage.py` (`error_code`, `MISSING_KEY_CODES`, conditional `put_parquet`) ·
+ionflow (origin repo; code reproduced in §7 so this doc stands alone):
+`src/ionflow/ledger.py` (CAS loop) ·
+`src/ionflow/storage.py` (`error_code`, `MISSING_KEY_CODES`, conditional `put_parquet`) ·
 `tests/conftest.py` (moto subprocess harness) ·
 `docs/decisions/` (ADR practice worth copying)

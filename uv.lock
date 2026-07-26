@@ -457,6 +457,49 @@ wheels = [
 ]
 
 [[package]]
+name = "ionflow"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "boto3" },
+    { name = "duckdb" },
+    { name = "psutil" },
+    { name = "pyarrow" },
+    { name = "textual" },
+    { name = "typer" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "moto", extra = ["s3", "server"] },
+    { name = "numpy" },
+    { name = "pytest" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", specifier = ">=1.43.43" },
+    { name = "duckdb", specifier = ">=1.5.4" },
+    { name = "psutil", specifier = ">=7.2.2" },
+    { name = "pyarrow", specifier = ">=24.0.0" },
+    { name = "textual", specifier = ">=8.2.8" },
+    { name = "typer", specifier = ">=0.26.8" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "moto", extras = ["s3", "server"], specifier = ">=5.2.2" },
+    { name = "numpy", specifier = ">=2.5.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.15.21" },
+    { name = "ty", specifier = ">=0.0.63" },
+]
+
+[[package]]
 name = "itsdangerous"
 version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -713,49 +756,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
-]
-
-[[package]]
-name = "microflow"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "boto3" },
-    { name = "duckdb" },
-    { name = "psutil" },
-    { name = "pyarrow" },
-    { name = "textual" },
-    { name = "typer" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "moto", extra = ["s3", "server"] },
-    { name = "numpy" },
-    { name = "pytest" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", specifier = ">=1.43.43" },
-    { name = "duckdb", specifier = ">=1.5.4" },
-    { name = "psutil", specifier = ">=7.2.2" },
-    { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "textual", specifier = ">=8.2.8" },
-    { name = "typer", specifier = ">=0.26.8" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "moto", extras = ["s3", "server"], specifier = ">=5.2.2" },
-    { name = "numpy", specifier = ">=2.5.1" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.15.21" },
-    { name = "ty", specifier = ">=0.0.63" },
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ class Prototype:
     Prototype flows live in a scratch namespace (`<prefix>/_proto/`), may run
     from a dirty git tree (commit recorded as `dirty:<sha>`), may omit step
     output schemas (inferred at write, validation skipped), skip the startup
-    schema-drift check, and can be wiped with `microflow clean`. Remove the
+    schema-drift check, and can be wiped with `ionflow clean`. Remove the
     mixin to promote: the stable namespace starts clean and every guarantee
     (clean git, declared+validated schemas, immutable history) applies again.
     """

@@ -10,8 +10,8 @@ import uuid
 
 import pyarrow as pa
 
-from microflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table, fanout_key
-from microflow.storage import s3_client
+from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Prototype, Table, fanout_key
+from ionflow.storage import s3_client
 
 
 class Src(Table):

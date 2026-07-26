@@ -1,8 +1,8 @@
 import pytest
 
-from microflow.config import Config, ConfigMissing, find_config
+from ionflow.config import Config, ConfigMissing, find_config
 
-_ENV = ["MICROFLOW_BUCKET", "MICROFLOW_PREFIX", "MICROFLOW_ENDPOINT", "AWS_DEFAULT_REGION"]
+_ENV = ["IONFLOW_BUCKET", "IONFLOW_PREFIX", "IONFLOW_ENDPOINT", "AWS_DEFAULT_REGION"]
 
 
 @pytest.fixture(autouse=True)
@@ -12,8 +12,8 @@ def _clean_env(monkeypatch):
 
 
 def _write(root, text):
-    (root / ".microflow").mkdir()
-    (root / ".microflow" / "config").write_text(text)
+    (root / ".ionflow").mkdir()
+    (root / ".ionflow" / "config").write_text(text)
 
 
 def test_load_walks_up(tmp_path):
@@ -28,14 +28,21 @@ def test_load_walks_up(tmp_path):
 def test_endpoint_optional(tmp_path):
     _write(tmp_path, 'bucket = "b"\n')
     cfg = Config.load(str(tmp_path))
-    assert cfg.endpoint_url is None and cfg.prefix == "microflow" and cfg.flows is None
+    assert cfg.endpoint_url is None and cfg.prefix == "ionflow" and cfg.flows is None
 
 
 def test_flows_roundtrips(tmp_path):
-    from microflow.config import write_config
+    from ionflow.config import write_config
 
     write_config(tmp_path, Config(bucket="b", flows="myproj.flows"))
     assert Config.load(str(tmp_path)).flows == "myproj.flows"
+
+
+def test_write_escapes_special_characters(tmp_path):
+    from ionflow.config import write_config
+
+    write_config(tmp_path, Config(bucket="b", prefix='pre"fix\\path'))
+    assert Config.load(str(tmp_path)).prefix == 'pre"fix\\path'
 
 
 def test_missing_raises(tmp_path):
@@ -46,5 +53,5 @@ def test_missing_raises(tmp_path):
 
 def test_env_overrides_file(tmp_path, monkeypatch):
     _write(tmp_path, 'bucket = "filebucket"\n')
-    monkeypatch.setenv("MICROFLOW_BUCKET", "envbucket")
+    monkeypatch.setenv("IONFLOW_BUCKET", "envbucket")
     assert Config.load(str(tmp_path)).bucket == "envbucket"

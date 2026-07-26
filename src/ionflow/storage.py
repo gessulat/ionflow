@@ -47,7 +47,7 @@ class Layout:
     """S3 key scheme for one flow.
 
     Prototype flows live under a `_proto/` scratch namespace: disposable,
-    invisible to the flow's stable views, wiped by `microflow clean`.
+    invisible to the flow's stable views, wiped by `ionflow clean`.
 
     >>> l = Layout("mf", "ETL")
     >>> l.ledger
@@ -143,7 +143,7 @@ def _local_connection(threads=None, memory_mb=None):
     instance would otherwise claim all cores and 80% of RAM.
     """
     con = duckdb.connect()
-    spill = tempfile.mkdtemp(prefix="microflow-duck-")
+    spill = tempfile.mkdtemp(prefix="ionflow-duck-")
     weakref.finalize(con, shutil.rmtree, spill, ignore_errors=True)
     con.execute(f"SET temp_directory = '{spill}'")
     if threads:
@@ -300,7 +300,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     con = _local_connection(threads, memory_mb)
     con.register("_src", src)
     select = "SELECT * FROM _src" if table is None else table.cast_sql("_src")
-    with tempfile.TemporaryDirectory(prefix="microflow-part-") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="ionflow-part-") as tmp_dir:
         path = os.path.join(tmp_dir, "part.parquet")
         con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
         if table is not None:

@@ -4,9 +4,9 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from microflow import storage
-from microflow.config import Config
-from microflow.schema import Table, check, primary_key
+from ionflow import storage
+from ionflow.config import Config
+from ionflow.schema import Table, check, primary_key
 
 
 class Features(Table):
@@ -108,7 +108,7 @@ def test_httpfs_write_unsafe_canary(s3cfg):
 
     A `COPY TO s3://` that errors mid-stream still finalizes its multipart
     upload — httpfs closes the file handle with no abort-on-error path — so a
-    corrupt part becomes visible on S3, which microflow's completeness and
+    corrupt part becomes visible on S3, which ionflow's completeness and
     resume logic would trust. If this test FAILS after a DuckDB upgrade,
     native writes have become failure-atomic: supersede ADR 0013 before
     deleting the canary.

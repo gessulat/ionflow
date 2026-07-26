@@ -4,8 +4,8 @@ import pyarrow as pa
 import pytest
 from flows import DupKeyFlow, KeyedFlow, KeyedItem, TwoKeyFlow
 
-from microflow import ConstraintViolation, ledger
-from microflow.storage import Layout, s3_client, write_part
+from ionflow import ConstraintViolation, ledger
+from ionflow.storage import Layout, s3_client, write_part
 
 
 def _put_n(cfg, n):

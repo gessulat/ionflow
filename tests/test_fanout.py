@@ -50,7 +50,7 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         FlakyFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=3)
 
-    from microflow import storage
+    from ionflow import storage
 
     con = FlakyFlow.duck(s3cfg)
     run_id = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
@@ -78,7 +78,7 @@ def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkey
 
 
 def test_steps_read_side_inputs_via_config(s3cfg, repo):
-    from microflow.storage import s3_client
+    from ionflow.storage import s3_client
 
     s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key="side/n", Body=b"3")
     run_id = SideInputFlow.run(s3cfg, repo=repo, use_processes=False)

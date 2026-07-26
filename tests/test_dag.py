@@ -1,7 +1,7 @@
 import pytest
 
-from microflow.dag import Branch, Collect, Fanout, build_dag
-from microflow.schema import Table
+from ionflow.dag import Branch, Collect, Fanout, build_dag
+from ionflow.schema import Table
 
 
 class Raw(Table):
