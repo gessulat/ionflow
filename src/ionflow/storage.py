@@ -153,14 +153,12 @@ def _local_connection(threads=None, memory_mb=None):
     return con
 
 
-def connect(cfg, threads=None, memory_mb=None):
-    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
+def secret_sql(cfg, name="s"):
+    """CREATE SECRET statement for the configured S3 endpoint.
 
-    Uses explicit keys when the config carries them (MinIO/tests), otherwise the
-    standard AWS credential chain.
+    Explicit keys when the config carries them (MinIO/tests), otherwise the
+    standard AWS credential chain. Shared by connect() and the catalog.
     """
-    con = _local_connection(threads, memory_mb)
-    con.execute("INSTALL httpfs; LOAD httpfs")
     parts = ["TYPE s3", f"REGION '{cfg.region}'"]
     if cfg.access_key:
         parts += [f"KEY_ID '{cfg.access_key}'", f"SECRET '{cfg.secret_key}'"]
@@ -173,7 +171,14 @@ def connect(cfg, threads=None, memory_mb=None):
             "URL_STYLE 'path'",
             f"USE_SSL {str(u.scheme == 'https').lower()}",
         ]
-    con.execute(f"CREATE OR REPLACE SECRET s ({', '.join(parts)})")
+    return f"CREATE OR REPLACE SECRET {name} ({', '.join(parts)})"
+
+
+def connect(cfg, threads=None, memory_mb=None):
+    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs)."""
+    con = _local_connection(threads, memory_mb)
+    con.execute("INSTALL httpfs; LOAD httpfs")
+    con.execute(secret_sql(cfg))
     return con
 
 

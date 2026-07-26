@@ -49,6 +49,32 @@ class CasRegister:
         r = self.client.put_object(Bucket=self.bucket, Key=self.key, Body=body, **cas)
         return r["ETag"]
 
+    def probe(self) -> None:
+        """Verify the backend enforces conditional writes; raise if it doesn't.
+
+        Backends that silently ignore If-Match (e.g. Backblaze B2) would turn
+        every CAS commit into a lost-update hazard — refuse loudly at init
+        instead. Uses a scratch key next to the register's; cleans up after.
+        """
+        key = self.key + ".probe"
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+        scratch = CasRegister(self.client, self.bucket, key)
+        scratch.write(b"probe", None)
+        try:
+            for stale in (None, '"schrein-bogus-etag"'):  # second genesis; stale If-Match
+                try:
+                    scratch.write(b"clobber", stale)
+                except ClientError as e:
+                    if _error_code(e) in RETRYABLE:
+                        continue
+                    raise
+                raise RuntimeError(
+                    f"s3://{self.bucket}: backend accepted a conditional PUT that must fail "
+                    "(If-Match/If-None-Match not enforced) — unsafe for CAS commits"
+                )
+        finally:
+            self.client.delete_object(Bucket=self.bucket, Key=key)
+
     def transact(self, fn, max_attempts: int = 8, base_delay: float = 0.5, cap: float = 30.0) -> str:
         """fn(old_bytes | None) -> new_bytes; replayed until the CAS lands.
 

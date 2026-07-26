@@ -1,4 +1,4 @@
-from . import metrics
+from . import catalog, metrics
 from .storage import (
     Layout,
     connect,
@@ -103,18 +103,24 @@ def ledger_with_liveness(flow_cls, config, con=None):
 def duck(flow_cls, config):
     """DuckDB connection with a view per step table + a `ledger` view.
 
-    Views glob every run, so `SELECT ... WHERE run_id = ...` time-travels and
-    new runs appear with nothing to sync.
+    Classic mode globs every run's parts; catalog mode attaches the flow's
+    DuckLake read-only (a consistent snapshot) and views its tables. Either
+    way `SELECT ... WHERE run_id = ...` time-travels and new runs appear with
+    nothing to sync. `ledger` and `metrics` keep their non-catalog plumbing.
     """
     con = connect(config)
     layout = Layout.for_flow(config, flow_cls)
     present, has_metrics = _scan_parts(s3_client(config), config, layout)
-    for name, step in flow_cls._dag.steps.items():
-        if name in present:
-            body = read_parquet_sql(uri(config, layout.table_glob(name)))
-        else:
-            body = _empty_view_sql(step.output_table)
-        con.execute(f"CREATE VIEW {name} AS {body}")
+    if catalog.for_flow(config, flow_cls).attach_readonly(con):
+        for name in flow_cls._dag.steps:
+            con.execute(f"CREATE VIEW {name} AS SELECT * FROM lake.{name}")
+    else:  # classic (or a catalog-mode flow that hasn't run yet)
+        for name, step in flow_cls._dag.steps.items():
+            if name in present:
+                body = read_parquet_sql(uri(config, layout.table_glob(name)))
+            else:
+                body = _empty_view_sql(step.output_table)
+            con.execute(f"CREATE VIEW {name} AS {body}")
     if has_metrics:
         metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
     else:

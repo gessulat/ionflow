@@ -196,6 +196,19 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
     step_stats(con, run_id).show()
 
 
+@app.command("catalog-backfill")
+def catalog_backfill(
+    flow: str,
+    replace: bool = typer.Option(False, "--replace", help="Rebuild an existing catalog from the run folders"),
+):
+    """Register all complete runs into the flow's DuckLake catalog (catalog mode)."""
+    from . import catalog
+
+    cls = _load(flow)
+    n = catalog.backfill(cls, _config_or_setup(), replace=replace)
+    typer.echo(f"registered {n} complete run(s) into the catalog")
+
+
 @app.command()
 def clean(
     flow: str,

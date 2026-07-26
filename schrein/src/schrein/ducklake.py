@@ -7,6 +7,7 @@ so they always see exactly one committed version.
 """
 
 import contextlib
+import datetime as dt
 import functools
 import importlib
 import pathlib
@@ -117,3 +118,71 @@ class DuckLake:
             raise FileNotFoundError(f"no catalog at s3://{self.register.bucket}/{self.register.key}")
         with self._open(blob, read_only=True) as (con, _):
             yield con
+
+    def expire_snapshots(self, older_than_days: float) -> str:
+        """CAS commit expiring snapshots older than the cutoff — metadata only.
+
+        Data files those snapshots referenced stay on S3 until gc().
+        """
+        cutoff = _utc_literal(older_than_days)
+        return self.commit(lambda con: con.execute(f"CALL ducklake_expire_snapshots('lake', older_than => {cutoff})"))
+
+    def _live_files(self) -> set[str]:
+        """Basenames of every data-path file a retained snapshot still needs.
+
+        Read from the catalog's own metadata tables via a plain (non-ducklake)
+        ATTACH of the downloaded artifact — the full historical file list,
+        minus files expiry already scheduled for deletion. Basenames suffice:
+        DuckLake names its files with UUIDs.
+        """
+        blob, _ = self.register.read()
+        if blob is None:
+            return set()
+        with tempfile.TemporaryDirectory() as tmp:
+            local = pathlib.Path(tmp) / CATALOG_KEY
+            local.write_bytes(blob)
+            con = duckdb.connect()
+            try:
+                con.execute(f"ATTACH '{local}' AS meta (READ_ONLY)")
+
+                def names(table):
+                    return {
+                        pathlib.PurePosixPath(r[0]).name for r in con.sql(f"SELECT path FROM meta.{table}").fetchall()
+                    }
+
+                live = names("ducklake_data_file") | names("ducklake_delete_file")
+                return live - names("ducklake_files_scheduled_for_deletion")
+            finally:
+                con.close()
+
+    def gc(self, grace_days: float = 7.0, dry_run: bool = True) -> list[str]:
+        """Delete (or with dry_run just list) data-path objects that are BOTH
+        unneeded by every retained snapshot AND older than the grace TTL — so an
+        in-flight writer's just-uploaded files can never be reaped before its
+        commit lands (spec §5.5). Covers expiry leftovers and commit orphans
+        alike; reads the catalog, never commits. Returns the object keys.
+        """
+        live = self._live_files()
+        bucket, _, prefix = self.data_path.removeprefix("s3://").partition("/")
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=grace_days)
+        client = self.register.client
+        dead = []
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if pathlib.PurePosixPath(obj["Key"]).name in live or obj["LastModified"] >= cutoff:
+                    continue
+                dead.append(obj["Key"])
+        if not dry_run:
+            for i in range(0, len(dead), 1000):  # DeleteObjects caps at 1000 keys
+                client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in dead[i : i + 1000]]})
+        return dead
+
+
+def _utc_literal(days_ago: float) -> str:
+    """Naive-UTC TIMESTAMP literal for `days_ago` days before now.
+
+    Microsecond precision: truncating to seconds would round the cutoff BELOW
+    snapshots committed in the same second, silently expiring nothing.
+    """
+    t = dt.datetime.now(dt.UTC).replace(tzinfo=None) - dt.timedelta(days=days_ago)
+    return f"TIMESTAMP '{t.isoformat(sep=' ', timespec='microseconds')}'"

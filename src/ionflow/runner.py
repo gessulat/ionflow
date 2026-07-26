@@ -9,7 +9,7 @@ from multiprocessing import get_context
 
 import psutil
 
-from . import ledger, metrics
+from . import catalog, ledger, metrics
 from .config import Config
 from .git import commit_or_dirty, require_clean
 from .storage import (
@@ -264,6 +264,7 @@ def run(
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = connect(config)
+    cat = catalog.for_flow(config, flow_cls)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
@@ -373,6 +374,7 @@ def run(
             "fanout_keys": fanout_keys,
             "params": params,
             "custom": custom or {},
+            "catalog": cat.mode,
         }
         ledger.write_meta(client, config.bucket, layout.meta(run_id), meta)
 
@@ -411,6 +413,7 @@ def run(
             pass
 
     try:
+        cat.ensure_tables(flow_cls)
         for name in dag.order:
             step = dag.steps[name]
             if name in lazy_reuse and work_lists_unchanged(name):
@@ -479,6 +482,7 @@ def run(
                 result = _call(con, client, config, layout, flow, step, run_id, None)
                 write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
                 completed.add(_key(name, 0))
+            cat.register_step(run_id, name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
             flush()
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]

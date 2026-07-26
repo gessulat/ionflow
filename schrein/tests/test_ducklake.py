@@ -124,3 +124,45 @@ def test_lost_update_hammer_ducklake(s3, tmp_path):
     with lake_at(s3).read() as con:
         ids = [r[0] for r in con.sql("SELECT id FROM lake.events ORDER BY id").fetchall()]
     assert ids == list(range(n_threads * n_commits))
+
+
+def test_expire_and_gc(lake, s3):
+    """M2: expiry is a metadata commit; gc reaps expired + orphaned files only
+    past the grace TTL, and the catalog stays readable throughout."""
+    client, bucket, _ = s3
+    lake.commit(lambda con: con.execute("CREATE TABLE lake.t (id INTEGER)"))
+    # big enough to defeat data inlining, so a real parquet lands in data/
+    lake.commit(lambda con: con.execute("INSERT INTO lake.t SELECT unnest(range(5000))::INTEGER"))
+    lake.commit(lambda con: con.execute("DROP TABLE lake.t"))  # old snapshots still reference it
+    client.put_object(Bucket=bucket, Key="lake/data/orphan.parquet", Body=b"junk")  # never committed
+
+    assert lake.gc(grace_days=7, dry_run=True) == []  # everything is younger than the grace TTL
+    assert lake.gc(grace_days=-1, dry_run=True) == ["lake/data/orphan.parquet"]  # data file still retained
+    lake.expire_snapshots(older_than_days=0)
+    # expiry may or may not physically delete the dropped table's file itself;
+    # either way gc must reap whatever is left, orphan included
+    dead = lake.gc(grace_days=-1, dry_run=True)
+    assert "lake/data/orphan.parquet" in dead
+    lake.gc(grace_days=-1, dry_run=False)
+    assert client.list_objects_v2(Bucket=bucket, Prefix="lake/data/").get("Contents", []) == []
+    with lake.read() as con:  # catalog stays attachable after maintenance
+        assert con.sql("SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake'").fetchone()[0] == 0
+
+
+def test_probe_passes_on_moto_and_rejects_lax_backend(s3):
+    from schrein import CasRegister
+
+    client, bucket, _ = s3
+    reg = CasRegister(client, bucket, "lake/catalog.ducklake")
+    reg.probe()  # moto (wrapped) enforces conditions: must pass
+
+    class Lax:  # a backend that ignores preconditions entirely
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def put_object(self, **kw):
+            kw.pop("IfMatch", None), kw.pop("IfNoneMatch", None)
+            return client.put_object(**kw)
+
+    with pytest.raises(RuntimeError, match="conditional"):
+        CasRegister(Lax(), bucket, "lake/catalog.ducklake").probe()
