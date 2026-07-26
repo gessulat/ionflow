@@ -1,8 +1,9 @@
+"""Ledger semantics. The CAS precondition contract itself (412 on stale
+If-Match, genesis conflicts) is schrein's and is tested in its suite."""
+
 import datetime as dt
 
 import pyarrow as pa
-import pytest
-from botocore.exceptions import ClientError
 
 from ionflow import ledger, storage
 
@@ -66,16 +67,6 @@ def test_custom_columns_stored(s3cfg):
     )
     rows = ledger.read_all(c, s3cfg.bucket, key)
     assert rows[0]["auc"] == 0.9
-
-
-def test_stale_etag_rejected_by_backend(s3cfg):
-    """Confirms the backend enforces If-Match (CAS precondition)."""
-    c = _client(s3cfg)
-    key = "mf/ETL/ledger.parquet"
-    ledger.upsert_run(c, s3cfg.bucket, key, _row("r1", _dt(1)))
-    with pytest.raises(ClientError) as e:
-        c.put_object(Bucket=s3cfg.bucket, Key=key, Body=b"x", IfMatch='"deadbeef"')
-    assert e.value.response["Error"]["Code"] in ("PreconditionFailed", "412")
 
 
 def test_meta_roundtrip(s3cfg):

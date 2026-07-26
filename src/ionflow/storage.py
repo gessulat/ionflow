@@ -314,16 +314,34 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     return key_value
 
 
-def put_parquet(client, bucket, key, table):
-    """Upload a pyarrow Table as parquet."""
+def parquet_bytes(table):
+    """Serialize a pyarrow Table to parquet bytes — the repo's one spelling of it."""
     buf = io.BytesIO()
     pq.write_table(table, buf)
-    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    return buf.getvalue()
+
+
+def table_from_bytes(blob):
+    return pq.read_table(io.BytesIO(blob))
+
+
+def put_parquet(client, bucket, key, table):
+    """Upload a pyarrow Table as parquet."""
+    client.put_object(Bucket=bucket, Key=key, Body=parquet_bytes(table))
 
 
 def get_table(client, bucket, key):
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    return pq.read_table(io.BytesIO(body))
+    return table_from_bytes(client.get_object(Bucket=bucket, Key=key)["Body"].read())
+
+
+def get_bytes_or_none(client, bucket, key):
+    """GET an object's bytes, or None if it doesn't exist."""
+    try:
+        return client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ClientError as e:
+        if error_code(e) in MISSING_KEY_CODES:
+            return None
+        raise
 
 
 def delete_prefix(client, bucket, prefix):

@@ -8,7 +8,8 @@ contents unchanged) makes a **multi-writer
 catalog) work with **no infrastructure other than one S3-compatible bucket**
 — no Postgres, no catalog server, no lock service.
 
-Full spec: [`../docs/specs/cas-catalog-library.md`](../docs/specs/cas-catalog-library.md).
+Full spec: [docs/specs/cas-catalog-library.md](https://github.com/gessulat/ionflow/blob/main/docs/specs/cas-catalog-library.md)
+(an absolute link so it survives packaging and extraction).
 Status: M0 (CAS core) and M1 (DuckLake adapter) implemented.
 
 ## The idea

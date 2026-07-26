@@ -1,11 +1,9 @@
 """M0: register basics, zombie writer, replay, and the lost-update hammer."""
 
-import threading
-
 import pytest
 from botocore.exceptions import ClientError
-from conftest import make_client
-from schrein.register import RETRYABLE, _error_code
+from helpers import make_client, run_threads
+from schrein.register import RETRYABLE
 
 from schrein import CasRegister, CommitConflict
 
@@ -15,6 +13,10 @@ KEY = "reg/state"
 def register_for(s3):
     client, bucket, _ = s3
     return CasRegister(client, bucket, KEY)
+
+
+def _code(excinfo):
+    return excinfo.value.response["Error"]["Code"]
 
 
 def test_read_absent(s3):
@@ -32,7 +34,7 @@ def test_second_genesis_fails(s3):
     reg.write(b"v1", None)
     with pytest.raises(ClientError) as e:
         reg.write(b"v2", None)
-    assert _error_code(e.value) in RETRYABLE
+    assert _code(e) in RETRYABLE
 
 
 def test_stale_ifmatch_is_retryable(s3):
@@ -41,7 +43,7 @@ def test_stale_ifmatch_is_retryable(s3):
     reg.write(b"v2", etag1)
     with pytest.raises(ClientError) as e:
         reg.write(b"stale", etag1)
-    assert _error_code(e.value) in RETRYABLE
+    assert _code(e) in RETRYABLE
 
 
 def test_zombie_writer_rebases(s3):
@@ -111,12 +113,7 @@ def test_lost_update_hammer(s3):
                 base_delay=0.01,
             )
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
+    run_threads(worker, n_threads)
     final, _ = register_for(s3).read()
     rows = final.split(b"\n")
     assert len(rows) == n_threads * n_commits

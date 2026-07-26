@@ -7,6 +7,8 @@ so they always see exactly one committed version.
 """
 
 import contextlib
+import functools
+import importlib
 import pathlib
 import tempfile
 
@@ -17,32 +19,37 @@ from .register import CasRegister
 CATALOG_KEY = "catalog.ducklake"
 
 
-def load_ducklake(con) -> None:
-    """LOAD ducklake: already-installed copy, else the PyPI wheel, else INSTALL."""
+def load_extension(con, name: str) -> None:
+    """LOAD a DuckDB extension: installed copy, else its PyPI wheel, else INSTALL."""
     try:
-        con.execute("LOAD ducklake")
+        con.execute(f"LOAD {name}")
         return
     except duckdb.Error:
         pass
-    ext = _wheel_extension()
+    ext = _wheel_extension(name)
     if ext is not None:
         con.execute(f"LOAD '{ext}'")
         return
-    con.execute("INSTALL ducklake; LOAD ducklake")
+    con.execute(f"INSTALL {name}; LOAD {name}")
 
 
-def _wheel_extension() -> pathlib.Path | None:
-    """Extension binary shipped by the optional duckdb-extension-ducklake wheel."""
+def load_ducklake(con) -> None:
+    load_extension(con, "ducklake")
+
+
+@functools.cache
+def _wheel_extension(name: str) -> pathlib.Path | None:
+    """Extension binary shipped by the optional duckdb-extension-<name> wheel.
+
+    Wheels are published in lockstep with duckdb, so only the directory
+    matching the running duckdb version is trusted.
+    """
     try:
-        import duckdb_extension_ducklake
+        wheel = importlib.import_module(f"duckdb_extension_{name}")
     except ImportError:
         return None
-    root = pathlib.Path(duckdb_extension_ducklake.__file__).parent / "extensions"
-    exact = root / f"v{duckdb.__version__}" / "ducklake.duckdb_extension"
-    if exact.exists():
-        return exact
-    hits = sorted(root.glob("*/ducklake.duckdb_extension"))
-    return hits[-1] if hits else None
+    ext = pathlib.Path(wheel.__file__).parent / "extensions" / f"v{duckdb.__version__}" / f"{name}.duckdb_extension"
+    return ext if ext.exists() else None
 
 
 def _assert_clean(local: pathlib.Path) -> None:
@@ -66,12 +73,23 @@ class DuckLake:
         register = CasRegister(client, bucket, f"{prefix}/{CATALOG_KEY}")
         return cls(register, f"s3://{bucket}/{prefix}/data/", secret_sql)
 
-    def _attach(self, con, local: pathlib.Path, read_only: bool = False) -> None:
-        load_ducklake(con)
-        if self.secret_sql:
-            con.execute(self.secret_sql)
-        ro = ", READ_ONLY" if read_only else ""
-        con.execute(f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})")
+    @contextlib.contextmanager
+    def _open(self, blob: bytes | None, read_only: bool = False):
+        """Materialize the catalog locally and attach it; yields (con, local)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            local = pathlib.Path(tmp) / CATALOG_KEY
+            if blob is not None:
+                local.write_bytes(blob)  # rebase base; genesis: ATTACH creates it
+            con = duckdb.connect()
+            try:
+                load_ducklake(con)
+                if self.secret_sql:
+                    con.execute(self.secret_sql)
+                ro = ", READ_ONLY" if read_only else ""
+                con.execute(f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})")
+                yield con, local
+            finally:
+                con.close()
 
     def commit(self, user_fn, **transact_kwargs) -> str:
         """Run user_fn(con) as one catalog transaction; CAS-swap the result.
@@ -83,17 +101,9 @@ class DuckLake:
         """
 
         def fn(old: bytes | None) -> bytes:
-            with tempfile.TemporaryDirectory() as tmp:
-                local = pathlib.Path(tmp) / CATALOG_KEY
-                if old is not None:
-                    local.write_bytes(old)  # rebase base; genesis: ATTACH creates it
-                con = duckdb.connect()
-                try:
-                    self._attach(con, local)
-                    user_fn(con)
-                    con.execute("DETACH lake")
-                finally:
-                    con.close()
+            with self._open(old) as (con, local):
+                user_fn(con)
+                con.execute("DETACH lake")
                 _assert_clean(local)
                 return local.read_bytes()
 
@@ -105,12 +115,5 @@ class DuckLake:
         blob, _ = self.register.read()
         if blob is None:
             raise FileNotFoundError(f"no catalog at s3://{self.register.bucket}/{self.register.key}")
-        with tempfile.TemporaryDirectory() as tmp:
-            local = pathlib.Path(tmp) / CATALOG_KEY
-            local.write_bytes(blob)
-            con = duckdb.connect()
-            try:
-                self._attach(con, local, read_only=True)
-                yield con
-            finally:
-                con.close()
+        with self._open(blob, read_only=True) as (con, _):
+            yield con

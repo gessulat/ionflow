@@ -1,10 +1,10 @@
-import io
 import json
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from schrein import CasRegister
+
+from . import storage
 
 _BASE_FIELDS = [
     pa.field("run_id", pa.string()),
@@ -20,13 +20,7 @@ BASE_COLS = {f.name for f in _BASE_FIELDS}  # names params/custom columns must n
 
 
 def _rows(blob):
-    return [] if blob is None else pq.read_table(io.BytesIO(blob)).to_pylist()
-
-
-def _parquet(rows, schema):
-    buf = io.BytesIO()
-    pq.write_table(pa.Table.from_pylist(rows, schema=schema), buf)
-    return buf.getvalue()
+    return [] if blob is None else storage.table_from_bytes(blob).to_pylist()
 
 
 def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_conflict=False):
@@ -43,17 +37,17 @@ def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_c
         rows.append(dict(row))  # from_pylist fills any missing schema columns with null
         rows.sort(key=lambda r: r["started"])
         try:
-            return _parquet(rows, schema)
+            return storage.parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
         except (pa.ArrowInvalid, pa.ArrowTypeError):  # old rows don't fit the current schema
             if not reset_on_conflict:
                 raise
-            return _parquet([dict(row)], schema)
+            return storage.parquet_bytes(pa.Table.from_pylist([dict(row)], schema=schema))
 
     CasRegister(client, bucket, key).transact(fn, max_attempts=retries, base_delay=0.05)
 
 
 def read_all(client, bucket, key):
-    return _rows(CasRegister(client, bucket, key).read()[0])
+    return _rows(storage.get_bytes_or_none(client, bucket, key))
 
 
 def write_meta(client, bucket, key, meta):
@@ -61,5 +55,5 @@ def write_meta(client, bucket, key, meta):
 
 
 def read_meta(client, bucket, key):
-    blob, _ = CasRegister(client, bucket, key).read()
+    blob = storage.get_bytes_or_none(client, bucket, key)
     return None if blob is None else json.loads(blob)

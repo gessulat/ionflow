@@ -33,4 +33,5 @@ dev = [
 # Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
 addopts = "-n 5 --dist worksteal -m 'not slow'"
 testpaths = ["tests"]
+pythonpath = ["tests"]  # pins `from helpers import ...` under any import mode
 markers = ["slow: heavy CAS-contention integration tests; run with -m ''"]

@@ -62,5 +62,6 @@ class CasRegister:
             except ClientError as e:
                 if _error_code(e) not in RETRYABLE:
                     raise
-                time.sleep(random.uniform(0, min(cap, base_delay * 2**attempt)))
+                if attempt + 1 < max_attempts:  # no backoff after the final attempt
+                    time.sleep(random.uniform(0, min(cap, base_delay * 2**attempt)))
         raise CommitConflict(f"s3://{self.bucket}/{self.key}: lost CAS race {max_attempts} times")

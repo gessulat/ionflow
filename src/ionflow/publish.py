@@ -1,5 +1,3 @@
-import json
-
 from . import ledger
 from .storage import (
     Layout,
@@ -71,5 +69,5 @@ def publish(flow_cls, config, run_id, step, dest, where=None, force=False):
         "commit": meta.get("commit"),
         "published_at": utc_now().isoformat(),
     }
-    client.put_object(Bucket=dest_bucket, Key=manifest_key(dest_key), Body=json.dumps(manifest).encode())
+    ledger.write_meta(client, dest_bucket, manifest_key(dest_key), manifest)
     return manifest
