@@ -149,12 +149,14 @@ ionflow query myproj.flows:Training \
   LIST); schema-drift check (one parquet footer per step).
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
-- `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
+- `cli.py`     — typer CLI; bare `ionflow` launches the TUI, which lives in the
+  `ionflow-tui` workspace package (0017) — lazy import, install hint if absent.
 
 ## Conventions & gotchas
 
-- Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
-  **no pandas/polars in core** (steps may return anything arrow-convertible).
+- Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer —
+  **no pandas/polars in core** (steps may return anything arrow-convertible);
+  textual lives only in `ionflow-tui` (0017).
 - Runs refuse a dirty git tree, without exception. Tests always create/commit
   a repo first.
 - Untyped steps (no return annotation) are a class-definition error.
@@ -165,6 +167,14 @@ ionflow query myproj.flows:Training \
 - A run killed by SIGKILL stays `running` in the ledger forever (can't catch it),
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
   has been quiet for 300s; its metrics survive up to the last flush.
+
+## ionflow-tui (uv workspace member, `ionflow-tui/`)
+
+The Textual TUI, package `ionflow_tui` (0017): depends on ionflow (never the
+reverse — core stays UI-free), published as the `ionflow[tui]` extra, and in
+the root dev group so `uv run ionflow` opens it in the workspace. No tests
+(see above) and no entry point of its own — the bare `ionflow` command is the
+launcher.
 
 ## schrein (uv workspace member, `schrein/`)
 

@@ -1,0 +1,26 @@
+[project]
+name = "ionflow-tui"
+version = "0.1.0"
+description = "Terminal UI for ionflow: browse flows, runs, step outputs and resource stats."
+readme = "README.md"
+authors = [
+    { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
+]
+requires-python = ">=3.12"
+license = "MIT"
+keywords = ["ionflow", "tui", "textual", "duckdb", "parquet", "s3"]
+dependencies = [
+    "ionflow",
+    "textual>=8.2.8",
+]
+
+[project.urls]
+Repository = "https://github.com/gessulat/ionflow"
+Issues = "https://github.com/gessulat/ionflow/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+ionflow = { workspace = true }

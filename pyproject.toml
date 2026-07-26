@@ -26,9 +26,11 @@ dependencies = [
     "psutil>=7.2.2",
     "pyarrow>=24.0.0",
     "schrein",
-    "textual>=8.2.8",
     "typer>=0.26.8",
 ]
+
+[project.optional-dependencies]
+tui = ["ionflow-tui"]
 
 [project.urls]
 Repository = "https://github.com/gessulat/ionflow"
@@ -42,13 +44,15 @@ requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.workspace]
-members = ["schrein"]
+members = ["schrein", "ionflow-tui"]
 
 [tool.uv.sources]
 schrein = { workspace = true }
+ionflow-tui = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "ionflow-tui",  # so bare `uv run ionflow` opens the TUI in the workspace
     "moto[s3,server]>=5.2.2",
     "numpy>=2.5.1",
     "pytest>=9.1.1",
@@ -62,7 +66,7 @@ dev = [
 # annotations deliberately mean "output schema", not runtime type (a step
 # annotated `-> Summary` returns an arrow table; a `Branch[Part]` param is a
 # lazy relation) — a nominal checker rejects that by design.
-include = ["src"]
+include = ["src", "ionflow-tui/src"]
 
 [tool.ruff]
 line-length = 120

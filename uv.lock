@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "ionflow",
+    "ionflow-tui",
     "schrein",
 ]
 
@@ -487,12 +488,17 @@ dependencies = [
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "schrein" },
-    { name = "textual" },
     { name = "typer" },
+]
+
+[package.optional-dependencies]
+tui = [
+    { name = "ionflow-tui" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "ionflow-tui" },
     { name = "moto", extra = ["s3", "server"] },
     { name = "numpy" },
     { name = "pytest" },
@@ -505,21 +511,38 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.43.43" },
     { name = "duckdb", specifier = ">=1.5.4" },
+    { name = "ionflow-tui", marker = "extra == 'tui'", editable = "ionflow-tui" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "schrein", editable = "schrein" },
-    { name = "textual", specifier = ">=8.2.8" },
     { name = "typer", specifier = ">=0.26.8" },
 ]
+provides-extras = ["tui"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ionflow-tui", editable = "ionflow-tui" },
     { name = "moto", extras = ["s3", "server"], specifier = ">=5.2.2" },
     { name = "numpy", specifier = ">=2.5.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.15.21" },
     { name = "ty", specifier = ">=0.0.63" },
+]
+
+[[package]]
+name = "ionflow-tui"
+version = "0.1.0"
+source = { editable = "ionflow-tui" }
+dependencies = [
+    { name = "ionflow" },
+    { name = "textual" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ionflow", editable = "." },
+    { name = "textual", specifier = ">=8.2.8" },
 ]
 
 [[package]]

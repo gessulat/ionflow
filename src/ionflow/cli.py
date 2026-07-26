@@ -24,9 +24,13 @@ app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3")
 def _default(ctx: typer.Context):
     """Launch the TUI when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        from . import tui as _tui
+        try:
+            from ionflow_tui import run_tui
+        except ImportError:
+            typer.echo("The TUI ships separately. Install it with: pip install 'ionflow[tui]'")
+            raise typer.Exit(1) from None
 
-        _tui.run_tui()  # config resolution (incl. the flows package) is the TUI's own job
+        run_tui()  # config resolution (incl. the flows package) is the TUI's own job
 
 
 def _load(spec):

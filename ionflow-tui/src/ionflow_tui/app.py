@@ -20,8 +20,8 @@ from textual.widgets import (
     Tabs,
 )
 
-from . import discovery, git, query
-from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
+from ionflow import discovery, git, query
+from ionflow.config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 

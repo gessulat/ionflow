@@ -34,6 +34,13 @@ configure is one S3-compatible bucket.
 uv add ionflow    # or: pip install ionflow
 ```
 
+The interactive terminal UI ships as a separate package so the core library
+stays UI-free — add the `tui` extra to get it:
+
+```bash
+uv add "ionflow[tui]"    # or: pip install "ionflow[tui]"
+```
+
 ## Configure (the only setup)
 
 Run the wizard once per repo:
@@ -282,9 +289,9 @@ never reached. For a quick listing without SQL there's
 
 ## Browse in the terminal (TUI)
 
-Bare `ionflow` (no subcommand) opens an interactive terminal UI (the screenshots
-show the `EmbedDocs` flow from above, runnable from this repo as
-`examples/embed.py`):
+Bare `ionflow` (no subcommand) opens an interactive terminal UI — installed via
+the `ionflow[tui]` extra (see Install) — shown here on the `EmbedDocs` flow from
+above, runnable from this repo as `examples/embed.py`:
 
 ```bash
 ionflow
