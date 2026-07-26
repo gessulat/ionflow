@@ -19,3 +19,9 @@ networks need nothing beyond `duckdb`, while the test suite runs without
 access to `extensions.duckdb.org`. Because the wheel pins `duckdb==<exact>`,
 the workspace lock holds duckdb at the wheel's version — upgrade both
 together.
+
+In remote Claude Code sessions the repo's SessionStart hook
+(`.claude/hooks/session-start.sh`) additionally seeds `ducklake` into
+DuckDB's extension cache the same way it already seeds `httpfs`/`aws` for
+ionflow, so path 1 (`LOAD ducklake`) normally succeeds there and the wheel
+is a belt-and-suspenders fallback for environments without the hook.

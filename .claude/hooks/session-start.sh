@@ -23,7 +23,7 @@ import duckdb
 ver = duckdb.__version__
 plat = duckdb.execute("PRAGMA platform").fetchone()[0]
 dest = Path.home() / ".duckdb" / "extensions" / f"v{ver}" / plat
-missing = [e for e in ("httpfs", "aws") if not (dest / f"{e}.duckdb_extension").exists()]
+missing = [e for e in ("httpfs", "aws", "ducklake") if not (dest / f"{e}.duckdb_extension").exists()]
 if not missing:
     print(f"duckdb extensions already cached in {dest}")
     sys.exit(0)
