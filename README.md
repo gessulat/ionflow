@@ -69,22 +69,25 @@ table per source, `vectors` **embeds** each source's documents **in parallel**
 model is a stand-in that hashes each text into a vector, so the flow runs
 as-is; everything else is the real shape of such a pipeline. Note there is no
 wiring code — `vectors` depends on `by_source` purely because it has a
-parameter named `by_source`.
+parameter named `by_source`. This one flow is the example for the whole README:
+every section below — params, queries, the TUI, metrics, resume, incremental
+runs, publish — works on it.
 
 ```python
 import hashlib
 
 import numpy as np
 import pyarrow as pa
-from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key, shaped
+from ionflow import (Branch, Collect, Fanout, Flow, FlowParams, LedgerColumns,
+                     Table, check, fanout_key, primary_key, shaped)
 
 
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
 # A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
-# defaults: `= primary_key`, `= check("...")`, `= field(...)`.
+# defaults: `= primary_key`, `= check("...")`, `= fanout_key`, `= field(...)`.
 class Doc(Table):
     doc_id: int = primary_key
-    source: str
+    source: str = fanout_key                # fan-out item identity ("Incremental runs" below)
     text: str
 
 
@@ -102,6 +105,9 @@ class Summary(Table):
 
 
 class EmbedDocs(Flow):
+    class Params(FlowParams):                           # typed run inputs, bound to `self`
+        min_len: int = 1                                # skip docs shorter than this
+
     # Extra ledger columns, populated during the run (small metadata only).
     class Ledger(LedgerColumns):
         n_docs: int
@@ -114,6 +120,7 @@ class EmbedDocs(Flow):
         })
 
     def by_source(self, docs: Doc) -> Fanout[Doc]:      # fan-out: one table per source;
+        docs = docs.filter(f"length(text) >= {self.min_len}")
         sources = [s for (s,) in                        # partitioning reuses the schema
                    docs.project("source").distinct().order("source").fetchall()]
         return [docs.filter(f"source = '{s}'") for s in sources]
@@ -196,32 +203,31 @@ set — `--threads` runs branches in threads instead of processes, and
 ## Parameters
 
 Typed run inputs, declared like everything else — annotations on an inner class.
-A bare type is required; a class value is the default.
+A bare type is required; a class value is the default. `EmbedDocs` declares one,
+and its `by_source` step reads it from `self`:
 
 ```python
-from ionflow import FlowParams
-
-class Training(Flow):
+class EmbedDocs(Flow):
     class Params(FlowParams):
-        dataset: str          # required
-        batch_size: int = 32
+        min_len: int = 1                    # a bare type (no default) would be required
 
-    def load(self) -> Raw:
-        return read(self.dataset)          # params are bound to self
+    def by_source(self, docs: Doc) -> Fanout[Doc]:
+        docs = docs.filter(f"length(text) >= {self.min_len}")   # params are bound to self
+        ...
 ```
 
 ```bash
-ionflow run mymodule:Training -p dataset=d1 -p batch_size=64
+ionflow run mymodule:EmbedDocs -p min_len=12
 ```
 
 ```python
-Training.run(params={"dataset": "d1"})
+EmbedDocs.run(params={"min_len": 12})
 ```
 
 Every param becomes a **ledger column** (queryable per run, recorded from the moment
-the run starts) and is stored in the run's meta; `resume` always reuses the origin
-run's params. Types are limited to `int`/`float`/`str`/`bool` so params round-trip
-JSON, parquet, and the command line.
+the run starts — see the `min_len` column in the ledger query below) and is stored in
+the run's meta; `resume` always reuses the origin run's params. Types are limited to
+`int`/`float`/`str`/`bool` so params round-trip JSON, parquet, and the command line.
 
 ## Query every run as one database
 
@@ -232,13 +238,40 @@ Views glob every run, so a new run shows up with nothing to sync — `run_id` is
 con = EmbedDocs.duck()
 con.sql("SELECT run_id, avg_norm FROM summary ORDER BY run_id").show()
 con.sql("SELECT source, norm FROM vectors WHERE run_id = ? ", params=[run_id]).show()
-con.sql("SELECT run_id, started, finished, n_docs FROM ledger").show()
 ```
 
+The same from the shell — here after a few runs, one of them with `-p min_len=12`
+(it embedded only the 3 docs long enough) and one that failed:
+
 ```bash
-ionflow query mymodule:EmbedDocs "SELECT * FROM summary"
-ionflow ls mymodule:EmbedDocs
+$ ionflow query mymodule:EmbedDocs "SELECT n_sources, n_docs, avg_norm, run_id FROM summary ORDER BY run_id"
+┌───────────┬────────┬────────────────────┬────────────────────────┐
+│ n_sources │ n_docs │      avg_norm      │         run_id         │
+├───────────┼────────┼────────────────────┼────────────────────────┤
+│         2 │      4 │ 1173.1059265136719 │ 1785035386815-d729b08e │
+│         2 │      4 │ 1173.1059265136719 │ 1785035388014-b7457449 │
+│         2 │      3 │ 1155.3343098958333 │ 1785035389462-66856443 │
+│         2 │      4 │ 1173.1059265136719 │ 1785035390513-81e8a70b │
+└───────────┴────────┴────────────────────┴────────────────────────┘
+
+$ ionflow query mymodule:EmbedDocs "SELECT run_id, status, min_len, n_docs FROM ledger ORDER BY started"
+┌────────────────────────┬──────────┬─────────┬────────┐
+│         run_id         │  status  │ min_len │ n_docs │
+├────────────────────────┼──────────┼─────────┼────────┤
+│ 1785035386815-d729b08e │ complete │       1 │      4 │
+│ 1785035388014-b7457449 │ complete │       1 │      4 │
+│ 1785035389080-5d573181 │ failed   │       1 │   NULL │
+│ 1785035389462-66856443 │ complete │      12 │      4 │
+│ 1785035390513-81e8a70b │ complete │       1 │      4 │
+└────────────────────────┴──────────┴─────────┴────────┘
 ```
+
+The `min_len` param and the custom `n_docs` ledger column are ordinary queryable
+columns (the ledger's `n_docs` counts the `docs` table — the corpus — so it stays
+4 even for the `min_len=12` run that embedded 3). The failed run is in the ledger
+too, with its params but no `n_docs` — that column is set by the fan-in step it
+never reached. For a quick listing without SQL there's
+`ionflow ls mymodule:EmbedDocs`.
 
 ## Browse in the terminal (TUI)
 
@@ -250,12 +283,12 @@ show the `EmbedDocs` flow from above, runnable from this repo as
 ionflow
 ```
 
-![The runs table: five runs of the EmbedDocs example flow, with status and the flow's custom n_docs ledger column](docs/screenshots/tui-runs.svg)
+![The runs table: five runs of the EmbedDocs example flow, with status, the min_len param and the flow's custom n_docs ledger column](docs/screenshots/tui-runs.svg)
 
 - one **tab per Flow** in your project (point `ionflow setup` at your `flows` package —
   every `Flow` subclass auto-registers on import),
 - each tab is a table of that flow's runs: `run_id`, `status`, `started`, `finished`, **plus
-  that flow's custom ledger columns**,
+  that flow's params and custom ledger columns** (`min_len`, `n_docs`),
 - `Tab` cycles flows; `j`/`k`/PageUp/PageDown move the row cursor,
 - **Enter** drills into a run to preview each step's output table; **Esc** goes back.
 
@@ -284,10 +317,10 @@ $ ionflow stats mymodule:EmbedDocs         # defaults to the latest run
 ┌───────────┬─────────┬─────────────┬───────────┬─────────────┬───────────┐
 │   step    │ seconds │ peak_rss_mb │ avg_cores │ max_threads │ processes │
 ├───────────┼─────────┼─────────────┼───────────┼─────────────┼───────────┤
-│ docs      │     0.0 │       228.0 │       0.0 │          24 │         1 │
-│ by_source │     0.0 │       228.0 │       0.0 │          24 │         1 │
-│ vectors   │     0.2 │       209.0 │      1.61 │          15 │         2 │
-│ summary   │     0.1 │       228.0 │      0.73 │          24 │         1 │
+│ docs      │     0.0 │       192.0 │       0.0 │          24 │         1 │
+│ by_source │     0.0 │       192.0 │       0.0 │          24 │         1 │
+│ vectors   │     0.1 │       173.0 │      1.71 │          15 │         2 │
+│ summary   │     0.1 │       193.0 │      0.79 │          24 │         1 │
 └───────────┴─────────┴─────────────┴───────────┴─────────────┴───────────┘
 
 $ ionflow query mymodule:EmbedDocs "SELECT * FROM metrics WHERE step='vectors'"
@@ -307,17 +340,18 @@ and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 ## Prototyping
 
 Iterating on a flow fights the production guarantees (clean git, declared schemas,
-immutable history). Mark a flow as a prototype to relax them — visibly, in code:
+immutable history). While reshaping `EmbedDocs`, mark it as a prototype to relax
+them — visibly, in code:
 
 ```python
 from ionflow import Flow, Prototype
 
-class Scratch(Prototype, Flow):
-    def numbers(self):              # untyped step: schema inferred at write
-        return pa.table({"x": [1, 2, 3]})
+class EmbedDocs(Prototype, Flow):
+    def docs(self):                             # untyped step: schema inferred at write
+        return pa.table({"doc_id": [9], "source": ["scratch"], "text": ["…"]})
 
-    def total(self, numbers) -> Totals:   # typed steps still validate as usual
-        return numbers.aggregate("count(*) AS n, sum(x) AS total")
+    def by_source(self, docs) -> Fanout[Doc]:   # typed steps still validate as usual
+        ...
 ```
 
 Prototype flows:
@@ -325,10 +359,10 @@ Prototype flows:
 - run in a **scratch namespace** (`<prefix>/_proto/<flow_id>/…`) — stable views, drift
   checks, and other clients never see the churn, and stable data is never touched;
 - may run from a **dirty git tree** (ledger records `dirty:<sha>`);
-- may **omit step output schemas** (untyped steps can't fan out — annotate
-  `Fanout[...]` for that);
+- may **omit step output schemas** (untyped steps can't fan out — `by_source`
+  keeps its `Fanout[...]` annotation);
 - tolerate ledger schema churn (a conflicting old scratch ledger is reset);
-- can be wiped: `ionflow clean mymodule:Scratch` (refused for stable flows —
+- can be wiped: `ionflow clean mymodule:EmbedDocs` (refused for stable flows —
   deletion is explicit and scratch-only, never a side effect of running).
 
 Remove the mixin to promote: the flow points back at the stable namespace, and every
@@ -352,47 +386,49 @@ prototype flows only warn, since they relinquish provenance anyway.
 
 ## Incremental runs (growing corpora)
 
-For a corpus that grows file-by-file, declare which column identifies a fan-out item —
+For a corpus that grows item-by-item, declare which column identifies a fan-out item —
 its **fanout key** — and resume stops matching branches by position and starts matching
-them by identity:
+them by identity. `EmbedDocs` already declares one:
 
 ```python
-class RawFile(Table):
-    path: str = fanout_key               # one distinct value per fan-out item
-    size: int
-
-class Annotate(Flow):
-    def files(self) -> Fanout[RawFile]:
-        return [one_file_manifest(f) for f in list_raw_files(self.config)]
-
-    def annotate(self, files: Branch[RawFile]) -> Annotated: ...
+class Doc(Table):
+    doc_id: int = primary_key
+    source: str = fanout_key             # one distinct value per fan-out item
+    text: str
 ```
 
+Treat each source as an immutable batch — a crawl dump, a monthly export — and
+growing the corpus batch-by-batch costs only the new batch's compute:
+
 ```bash
-ionflow run mymodule:Annotate --resume latest
+ionflow run mymodule:EmbedDocs --resume latest
 ```
 
 `--resume latest` resumes from the latest complete run (a first run is a normal full run).
-The fan-out re-runs to pick up the current work-list; branch outputs whose key already
-exists in the origin are **server-side copied**, only new keys compute, and removed keys
-drop out. Downstream steps (the fan-in and beyond) recompute whenever the key set
-changed. The result is still one complete, immutable run folder — adding 5 files to 500
-costs 5 files' compute, and `SELECT ... WHERE run_id = <new>` is always the full corpus.
+The fan-out re-runs to pick up the current work-list; branches whose source already
+exists in the origin are **server-side copied**, only new sources are embedded, and
+removed sources drop out. Downstream steps (the fan-in and beyond) recompute whenever
+the key set changed. The result is still one complete, immutable run folder — adding
+one source to five hundred costs one source's compute, and
+`SELECT ... WHERE run_id = <new>` is always the full corpus.
 
-The key is a contract: **same key must mean same content**. If a source file can be
-re-uploaded in place, put its etag (or mtime) in the key column. The commit gate applies
-unchanged — after a code change, run without `--resume` to recompute the corpus, or
-force with `--allow-commit-drift` to keep old-code outputs.
+The key is a contract: **same key must mean same content**. Keying by `source` is
+right only because a batch never changes after it lands; if items can be re-uploaded
+in place, key at the item level and put an etag (or mtime) in the key column. The
+commit gate applies unchanged — this toy flow keeps its documents in code, so growing
+it changes the commit (recompute without `--resume`, or force with
+`--allow-commit-drift`); a real flow lists external inputs via `self.config`, and
+growing the corpus doesn't touch the repo.
 
 ## Publish (stable paths for consumers)
 
 Run outputs live in immutable `run_id=` folders. Consumers that just want "the current
-training set at a fixed path" — a trainer, a cron job, another team — shouldn't need
-ionflow or a run_id:
+embeddings at a fixed path" — a vector-index builder, a cron job, another team —
+shouldn't need ionflow or a run_id:
 
 ```bash
-ionflow publish mymodule:Annotate <run_id> annotate s3://bucket/stable/training.parquet \
-    --where "split = 'training'"
+ionflow publish mymodule:EmbedDocs <run_id> vectors s3://bucket/stable/embeddings.parquet \
+    --where "source = 'wiki'"
 ```
 
 This copies the step's output (optionally filtered) to one parquet object plus a
@@ -423,165 +459,6 @@ A flow's durable identity is its **module-qualified class name** (`flow_id`), so
 same-named classes in different modules never share data. The flip side: renaming a
 flow class *or* moving it to another module makes it a new flow — old runs stay under
 the old id.
-
-## Tutorial: every feature in one flow
-
-A ten-minute tour. One small flow — count words across a growing set of documents —
-touches everything above: typed tables with constraints, fan-out/fan-in, params,
-custom ledger columns, querying, resource stats, incremental runs via a fanout key,
-and publishing. Save it as `tutorial.py` in a configured repo (`ionflow setup`),
-commit, and follow along.
-
-```python
-"""tutorial.py — one flow that touches every ionflow feature."""
-
-import pyarrow as pa
-
-from ionflow import (
-    Branch, Collect, Fanout, Flow, FlowParams,
-    LedgerColumns, Table, check, fanout_key, primary_key,
-)
-
-# Stand-in for external inputs. Real flows would list files in a bucket or
-# read a manifest here — see the incremental note below.
-CORPUS = {
-    "docs/zen.txt": "simple is better than complex",
-    "docs/fox.txt": "the quick brown fox jumps over the lazy dog",
-}
-
-
-class Doc(Table):
-    path: str = fanout_key              # item identity -> incremental resume
-    text: str
-
-
-class WordCount(Table):
-    path: str
-    word: str = primary_key             # unique within each branch's output
-    n: int = check("n >= 1")
-
-
-class Report(Table):
-    n_docs: int
-    n_words: int
-    top_word: str | None                # `T | None` = nullable column
-
-
-class WordFlow(Flow):
-    class Params(FlowParams):           # typed run inputs, bound to `self`
-        min_count: int = 1
-
-    class Ledger(LedgerColumns):        # extra queryable ledger columns
-        distinct_words: int
-
-    def docs(self) -> Fanout[Doc]:      # root fan-out: one table per item
-        return [pa.table({"path": [p], "text": [t]}) for p, t in sorted(CORPUS.items())]
-
-    def counts(self, docs: Branch[Doc]) -> WordCount:   # once per doc, in parallel
-        words = docs.project("path, unnest(string_split(text, ' ')) AS word")
-        return words.aggregate("path, word, count(*) AS n").filter(f"n >= {self.min_count}")
-
-    def report(self, counts: Collect[WordCount]) -> Report:   # fan-in
-        self.distinct_words = counts.aggregate("count(DISTINCT word) AS c").fetchone()[0]
-        return counts.aggregate(
-            "count(DISTINCT path) AS n_docs, sum(n)::BIGINT AS n_words, arg_max(word, n) AS top_word"
-        )
-```
-
-Notice what's *not* here: no wiring (`counts` depends on `docs` because its parameter
-is named `docs`), no schema DDL (the `Table` classes compile to DuckDB constraints,
-validated on every write), no S3 paths, no serialization code.
-
-**1. Run it.** Params come in with `-p`; each fan-out branch runs in its own worker
-process (cap with `--max-workers`, retry flaky branches with `--branch-retries`):
-
-```bash
-$ ionflow run tutorial:WordFlow -p min_count=1
-1784996729416-c93d0d1b                              # the new run_id
-```
-
-A dirty working tree would have been refused — the run is pinned to your commit.
-If a branch had failed, `ionflow run tutorial:WordFlow --resume <run_id>` would
-re-run only the incomplete branches into a fresh run, copying the finished ones.
-
-**2. Query it.** Every step is a SQL view spanning all runs (`run_id` is a column),
-and the ledger — including your params and custom columns — is a view too:
-
-```bash
-$ ionflow query tutorial:WordFlow "SELECT * FROM report"
-┌────────┬─────────┬──────────┬────────────────────────┐
-│ n_docs │ n_words │ top_word │         run_id         │
-├────────┼─────────┼──────────┼────────────────────────┤
-│      2 │      14 │ the      │ 1784996729416-c93d0d1b │
-└────────┴─────────┴──────────┴────────────────────────┘
-
-$ ionflow query tutorial:WordFlow "SELECT run_id, status, min_count, distinct_words FROM ledger"
-┌────────────────────────┬──────────┬───────────┬────────────────┐
-│         run_id         │  status  │ min_count │ distinct_words │
-├────────────────────────┼──────────┼───────────┼────────────────┤
-│ 1784996729416-c93d0d1b │ complete │         1 │             13 │
-└────────────────────────┴──────────┴───────────┴────────────────┘
-```
-
-The same works in Python — `WordFlow.duck()` returns the connection — and bare
-`ionflow` opens the TUI to browse runs and preview step outputs interactively.
-
-**3. Check what it cost.** Metrics are always on:
-
-```bash
-$ ionflow stats tutorial:WordFlow
-┌─────────┬─────────┬─────────────┬───────────┬─────────────┬───────────┐
-│  step   │ seconds │ peak_rss_mb │ avg_cores │ max_threads │ processes │
-├─────────┼─────────┼─────────────┼───────────┼─────────────┼───────────┤
-│ docs    │     0.0 │       192.0 │       0.0 │          14 │         1 │
-│ counts  │     0.6 │       208.0 │      1.08 │          15 │         2 │
-│ report  │     0.1 │       213.0 │      0.75 │          19 │         1 │
-└─────────┴─────────┴─────────────┴───────────┴─────────────┴───────────┘
-```
-
-The raw time series is the `metrics` view (`SELECT ts, rss FROM metrics WHERE step='counts'`).
-
-**4. Grow the corpus.** Add a document to `CORPUS`, commit, and run incrementally.
-Because `Doc.path` is the **fanout key**, resume matches branches by identity, not
-position: the two old documents' outputs are server-side copied, only `cat.txt` is
-counted, and the fan-in recomputes because the key set changed:
-
-```bash
-$ ionflow run tutorial:WordFlow --resume latest --allow-commit-drift
-1784996755141-193f9a4b
-
-$ ionflow query tutorial:WordFlow "SELECT run_id, n_docs, n_words FROM report ORDER BY run_id"
-┌────────────────────────┬────────┬─────────┐
-│         run_id         │ n_docs │ n_words │
-├────────────────────────┼────────┼─────────┤
-│ 1784996729416-c93d0d1b │      2 │      14 │
-│ 1784996755141-193f9a4b │      3 │      20 │
-└────────────────────────┴────────┴─────────┘
-```
-
-`--allow-commit-drift` is needed here only because this tutorial keeps its corpus
-*in the code*, so adding a document changes the commit. A real incremental flow
-lists external inputs (files in a bucket via `self.config`, a manifest, …), and
-growing the corpus doesn't touch the repo — plain `--resume latest` suffices, and
-the commit gate keeps guarding actual code changes.
-
-**5. Publish for consumers.** Hand downstream users one stable path instead of a
-run_id, with provenance in a sidecar:
-
-```bash
-$ ionflow publish tutorial:WordFlow 1784996755141-193f9a4b counts \
-    s3://my-bucket/stable/wordcounts.parquet --where "n >= 2"
-published tutorial.WordFlow/counts from run 1784996755141-193f9a4b to s3://my-bucket/stable/wordcounts.parquet
-```
-
-`wordcounts.parquet.meta.json` next to it records the flow, run_id, commit, filter,
-and publish time.
-
-**6. Iterate freely.** While reshaping the flow, add the `Prototype` mixin
-(`class WordFlow(Prototype, Flow)`): runs move to a scratch namespace, a dirty git
-tree is allowed, steps may omit their return annotation, and `ionflow clean
-tutorial:WordFlow` wipes the scratch data. Remove the mixin to promote — every
-guarantee applies again from the first stable run.
 
 ## Notes & limits
 
