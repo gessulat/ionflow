@@ -1,4 +1,4 @@
-# microflow — agent notes
+# ionflow — agent notes
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
 persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
@@ -32,13 +32,13 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 
 ```bash
 uv sync                       # install (uv-managed, Python >=3.12)
-uv run microflow               # bare command opens the TUI
-uv run microflow setup         # wizard: writes .microflow/config (TOML)
-uv run microflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
-uv run microflow run myproj:Annotate --resume latest # keyed resume from latest complete run
-uv run microflow query examples.etl:ETLFlow "SELECT * FROM summary"
-uv run microflow stats examples.etl:ETLFlow          # per-step resources, latest run
-uv run microflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
+uv run ionflow               # bare command opens the TUI
+uv run ionflow setup         # wizard: writes .ionflow/config (TOML)
+uv run ionflow run examples.etl:ETLFlow            # sizing: --max-workers/--threads/--branch-retries
+uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
+uv run ionflow query examples.etl:ETLFlow "SELECT * FROM summary"
+uv run ionflow stats examples.etl:ETLFlow          # per-step resources, latest run
+uv run ionflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -47,9 +47,9 @@ Every run records CPU/memory for every step and branch — always on, stored as
 `_metrics.parquet` in the run folder, exposed as the `metrics` SQL view.
 
 ```bash
-microflow stats myproj.flows:Training [run_id]   # per-step: seconds, peak_rss_mb,
+ionflow stats myproj.flows:Training [run_id]   # per-step: seconds, peak_rss_mb,
                                                 # avg_cores, max_threads, processes
-microflow query myproj.flows:Training \
+ionflow query myproj.flows:Training \
   "SELECT ts, rss/1e6 AS mb FROM metrics WHERE run_id='...' AND step='features' ORDER BY ts"
 ```
 
@@ -64,7 +64,7 @@ microflow query myproj.flows:Training \
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
 
-## Architecture (one line per module, src/microflow/)
+## Architecture (one line per module, src/ionflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` /
@@ -88,7 +88,7 @@ microflow query myproj.flows:Training \
   (written from run start); resume reuses the origin's params from `_meta.json`.
   `Prototype` mixin (sets `prototype = True`; the mixin is the only documented
   spelling): scratch namespace (`_proto/`), dirty git
-  allowed, untyped steps allowed, drift check skipped, `microflow clean` wipes it.
+  allowed, untyped steps allowed, drift check skipped, `ionflow clean` wipes it.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
   warn), in-worker branch retries (`branch_retries`), git gate,
@@ -135,9 +135,9 @@ microflow query myproj.flows:Training \
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
   LIST); schema-drift check (one parquet footer per step).
-- `config.py`  — `.microflow/config` (TOML) found by walking up like `.git`;
-  `MICROFLOW_*` env vars override; credentials only from the AWS chain, never stored.
-- `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `microflow` launches it).
+- `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
+  `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
+- `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
 
 ## Conventions & gotchas
 

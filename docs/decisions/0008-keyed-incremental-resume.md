@@ -18,7 +18,7 @@ considered and rejected.
 
 - A fan-out item's identity is a user-declared column: `field(branch_key=True)`
   on the fan-out step's output Table (one column, str/int, NOT NULL; exactly
-  one distinct value per item, enforced at write). microflow never guesses
+  one distinct value per item, enforced at write). ionflow never guesses
   identity — hashing parquet bytes is not canonical, and identity (path,
   etag, params) lives in the user's data anyway.
 - Every run records `branch_keys` (fan-out step -> key per branch index) in

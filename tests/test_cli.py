@@ -3,7 +3,7 @@ import tomllib
 import pytest
 from typer.testing import CliRunner
 
-from microflow import cli, config
+from ionflow import cli, config
 
 runner = CliRunner()
 
@@ -12,7 +12,7 @@ runner = CliRunner()
 def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # the CLI treats cwd as the git repo
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
-    monkeypatch.setattr("microflow.storage.aws_credentials_available", lambda: True)
+    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: True)
 
     r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow"])
     assert r.exit_code == 0, r.output
@@ -37,10 +37,10 @@ def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
 def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
     """run passes the resume/sizing knobs through to runner.run (no flow executed)."""
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
-    monkeypatch.setattr("microflow.storage.aws_credentials_available", lambda: True)
+    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: True)
     seen = {}
     monkeypatch.setattr(
-        "microflow.runner.run",
+        "ionflow.runner.run",
         lambda flow_cls, cfg, repo=".", **kw: seen.update(kw) or "rid",
     )
 
@@ -71,24 +71,24 @@ def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
 
 
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
-    monkeypatch.chdir(clean_repo)  # own repo: setup writes .microflow/ + .gitignore
-    monkeypatch.setattr("microflow.storage.aws_credentials_available", lambda: False)
+    monkeypatch.chdir(clean_repo)  # own repo: setup writes .ionflow/ + .gitignore
+    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: False)
 
     # bucket, prefix, endpoint(blank), region, flows(blank), gitignore? -> yes
-    r = runner.invoke(cli.app, ["setup"], input="mybucket\nmicroflow\n\nus-east-1\n\ny\n")
+    r = runner.invoke(cli.app, ["setup"], input="mybucket\nionflow\n\nus-east-1\n\ny\n")
     assert r.exit_code == 0, r.output
 
     path = config.find_config(clean_repo)  # resolves symlinks; robust on macOS
     assert path is not None
     cfg = tomllib.loads(path.read_text())
-    assert cfg == {"bucket": "mybucket", "prefix": "microflow", "region": "us-east-1"}
-    assert ".microflow/" in (path.parent.parent / ".gitignore").read_text()
+    assert cfg == {"bucket": "mybucket", "prefix": "ionflow", "region": "us-east-1"}
+    assert ".ionflow/" in (path.parent.parent / ".gitignore").read_text()
 
 
 def test_cli_run_without_config_errors(clean_repo, monkeypatch):
-    monkeypatch.chdir(clean_repo)  # own repo: must contain no .microflow/config
-    monkeypatch.delenv("MICROFLOW_BUCKET", raising=False)
+    monkeypatch.chdir(clean_repo)  # own repo: must contain no .ionflow/config
+    monkeypatch.delenv("IONFLOW_BUCKET", raising=False)
 
     r = runner.invoke(cli.app, ["run", "examples.etl:ETLFlow"])  # CliRunner stdin is not a tty
     assert r.exit_code == 1
-    assert "microflow setup" in r.output
+    assert "ionflow setup" in r.output

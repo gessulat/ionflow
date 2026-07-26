@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 from flows import EmptyFanFlow, FlakyFlow
 
-from microflow.storage import s3_client
+from ionflow.storage import s3_client
 
 
 def _get(client, bucket, key):

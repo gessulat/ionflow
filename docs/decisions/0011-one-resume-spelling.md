@@ -36,7 +36,7 @@ A run_id can never collide with the sentinel: ids are
 
 - One concept to learn and document; every sizing flag exists exactly
   once; the runner loses a two-parameter invariant.
-- Scripts using `microflow resume` or `--incremental` must switch to
+- Scripts using `ionflow resume` or `--incremental` must switch to
   `--resume` (pre-1.0, no deprecation shim).
 - "Resume a failed run" and "incremental corpus run" are now visibly the
   same operation with a different origin — which they always were.

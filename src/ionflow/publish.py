@@ -33,7 +33,7 @@ def publish(flow_cls, config, run_id, step, dest, where=None, force=False):
     """Copy `step`'s output from a complete run to `dest`; returns the manifest.
 
     The destination is one plain parquet object plus a `<dest>.meta.json`
-    provenance sidecar, so consumers read a fixed path with no microflow
+    provenance sidecar, so consumers read a fixed path with no ionflow
     dependency. Always a copy — run folders stay immutable. Replacing an
     object (`force`) is one atomic PUT, but two related objects published
     separately can still be observed mid-swap; consumers needing consistency

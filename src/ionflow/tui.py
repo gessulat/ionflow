@@ -111,7 +111,7 @@ class OverviewScreen(Screen):
         if self.warnings:
             yield Static("\n".join("⚠ " + w for w in self.warnings), id="banner")
         if not self.flows:
-            yield Static("No flows found. Set `flows` in .microflow/config to your flows package.")
+            yield Static("No flows found. Set `flows` in .ionflow/config to your flows package.")
         with TabbedContent():
             for name, cls in self.flows.items():
                 with TabPane(name + (" [proto]" if cls.prototype else ""), id=f"flow-{_slug(name)}"):
@@ -168,15 +168,15 @@ class OverviewScreen(Screen):
 
 
 class SetupScreen(Screen):
-    """Shown when the repo isn't configured; writes .microflow/config.
+    """Shown when the repo isn't configured; writes .ionflow/config.
 
     The form is generated from SETUP_FIELDS — the same spec that drives
-    `microflow setup`'s prompts.
+    `ionflow setup`'s prompts.
     """
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Label("Configure microflow for this repo")
+        yield Label("Configure ionflow for this repo")
         for key, label, default in SETUP_FIELDS:
             yield Label(label)
             yield Input(value=default or "", id=key)
@@ -196,12 +196,12 @@ class SetupScreen(Screen):
         cfg = config_from_setup(vals)
         root = git.repo_root()
         write_config(Path(root) if root else Path.cwd(), cfg)
-        app = cast("MicroflowTUI", self.app)
+        app = cast("IonflowTUI", self.app)
         app.switch_screen(app.overview_screen(cfg))
 
 
-class MicroflowTUI(App):
-    TITLE = "microflow"
+class IonflowTUI(App):
+    TITLE = "ionflow"
     BINDINGS = [Binding("q", "quit", "Quit")]
 
     def __init__(self, config=None):
@@ -234,4 +234,4 @@ class MicroflowTUI(App):
 
 
 def run_tui(config=None):
-    MicroflowTUI(config).run()
+    IonflowTUI(config).run()
