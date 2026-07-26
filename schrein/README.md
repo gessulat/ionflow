@@ -1,16 +1,18 @@
 # schrein
 
-Zero-infrastructure lakehouse catalogs on S3 conditional writes.
+Zero-infrastructure DuckLake catalogs on S3 conditional writes.
 
 *Schrein* (German: shrine/reliquary — a sealed casket built to preserve its
 contents unchanged) makes a **multi-writer
-[DuckLake](https://ducklake.select/) catalog** (and later an Apache Iceberg
-catalog) work with **no infrastructure other than one S3-compatible bucket**
-— no Postgres, no catalog server, no lock service.
+[DuckLake](https://ducklake.select/) catalog** work with **no
+infrastructure other than one S3-compatible bucket** — no Postgres, no
+catalog server, no lock service. DuckLake only, deliberately
+(decision 0004).
 
 Full spec: [docs/specs/cas-catalog-library.md](https://github.com/gessulat/ionflow/blob/main/docs/specs/cas-catalog-library.md)
 (an absolute link so it survives packaging and extraction).
-Status: M0 (CAS core) and M1 (DuckLake adapter) implemented.
+Status: M0 (CAS core), M1 (DuckLake adapter), and M2 (maintenance:
+expire/gc/probe) implemented — the full DuckLake-only scope.
 
 ## The idea
 

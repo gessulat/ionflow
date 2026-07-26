@@ -1,14 +1,14 @@
 [project]
 name = "schrein"
 version = "0.0.1"
-description = "Zero-infrastructure lakehouse catalogs on S3 conditional writes (DuckLake, Iceberg)"
+description = "Zero-infrastructure DuckLake catalogs on S3 conditional writes"
 readme = "README.md"
 authors = [
     { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
 ]
 requires-python = ">=3.12"
 license = "MIT"
-keywords = ["ducklake", "iceberg", "lakehouse", "catalog", "duckdb", "s3", "cas"]
+keywords = ["ducklake", "lakehouse", "catalog", "duckdb", "s3", "cas"]
 dependencies = [
     "boto3>=1.35",
     "duckdb>=1.4",

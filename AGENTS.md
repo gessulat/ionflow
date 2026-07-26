@@ -166,8 +166,8 @@ ionflow query myproj.flows:Training \
 
 ## schrein (uv workspace member, `schrein/`)
 
-Sibling library: zero-infrastructure lakehouse catalogs on S3 conditional
-writes. Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
+Sibling library: zero-infrastructure DuckLake catalogs on S3 conditional
+writes (DuckLake only — schrein decision 0004). Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
 two things — `CasRegister` under the ledger (0014) and `DuckLake` under
 the catalog (0015); schrein must never import ionflow. Its decisions live
