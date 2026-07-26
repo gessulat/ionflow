@@ -27,7 +27,7 @@ class Doc(Table):
 class DocVector(Table):
     doc_id: int
     source: str
-    embedding: shaped(np.float32, 64)      # fixed shape: a wrong-length row fails the write
+    embedding: shaped(np.float32, 64)  # fixed shape: a wrong-length row fails the write
     norm: np.float32 = check("norm >= 0")  # narrow dtypes persist as-is (FLOAT, not DOUBLE)
 
 
