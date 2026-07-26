@@ -62,62 +62,81 @@ region   = "us-east-1"
 
 ## A complete flow
 
-Load orders, **fan out** by region, total each region **in parallel**, then **fan in**
-to a summary. Note there is no wiring code — `region_totals` depends on `by_region`
-purely because it has a parameter named `by_region`.
+A miniature embedding pipeline — a job every data or ML team has run in some
+form. `docs` **loads** a table of documents, `by_source` **fans out** into one
+table per source, `vectors` **embeds** each source's documents **in parallel**
+(numpy in, numpy out), and `summary` **fans in** to a single summary table. The
+model is a stand-in that hashes each text into a vector, so the flow runs
+as-is; everything else is the real shape of such a pipeline. Note there is no
+wiring code — `vectors` depends on `by_source` purely because it has a
+parameter named `by_source`.
 
 ```python
+import hashlib
+
+import numpy as np
 import pyarrow as pa
-from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key
+from ionflow import Branch, Collect, Fanout, Flow, LedgerColumns, Table, check, primary_key, shaped
 
 
 # --- Output schemas: annotations, compiled to DuckDB DDL on write ---
 # A bare type is NOT NULL; `T | None` is nullable. Constraints attach as
 # defaults: `= primary_key`, `= check("...")`, `= field(...)`.
-class Order(Table):
-    order_id: int = primary_key
-    region: str
-    amount: float
+class Doc(Table):
+    doc_id: int = primary_key
+    source: str
+    text: str
 
 
-class RegionTotal(Table):
-    region: str
-    total: float = check("total >= 0")
+class DocVector(Table):
+    doc_id: int
+    source: str
+    embedding: shaped(np.float32, 64)      # fixed shape: a wrong-length row fails the write
+    norm: np.float32 = check("norm >= 0")  # narrow dtypes persist as-is (FLOAT, not DOUBLE)
 
 
 class Summary(Table):
-    n_regions: int
-    grand_total: float
+    n_sources: int
+    n_docs: int
+    avg_norm: float
 
 
-class ETLFlow(Flow):
+class EmbedDocs(Flow):
     # Extra ledger columns, populated during the run (small metadata only).
     class Ledger(LedgerColumns):
-        n_orders: int
+        n_docs: int
 
-    def orders(self) -> Order:                             # root step (only `self`)
+    def docs(self) -> Doc:                              # root step (only `self`)
         return pa.table({
-            "order_id": [1, 2, 3, 4],
-            "region": ["eu", "eu", "us", "us"],
-            "amount": [1.0, 2.0, 3.0, 4.0],
+            "doc_id": [1, 2, 3, 4],
+            "source": ["wiki", "wiki", "arxiv", "arxiv"],
+            "text": ["ducks type", "tables persist", "vectors search", "flows fan out"],
         })
 
-    def by_region(self, orders: Order) -> Fanout[Order]:   # fan-out: one table per region;
-        regions = [r[0] for r in                           # partitioning reuses the schema
-                   orders.project("region").distinct().order("region").fetchall()]
-        return [orders.filter(f"region = '{r}'") for r in regions]
+    def by_source(self, docs: Doc) -> Fanout[Doc]:      # fan-out: one table per source;
+        sources = [s for (s,) in                        # partitioning reuses the schema
+                   docs.project("source").distinct().order("source").fetchall()]
+        return [docs.filter(f"source = '{s}'") for s in sources]
 
-    def region_totals(self, by_region: Branch[Order]) -> RegionTotal:   # once per branch,
-        return by_region.aggregate("region, sum(amount) AS total")      # in parallel
+    def vectors(self, by_source: Branch[Doc]) -> DocVector:     # once per branch, in parallel
+        texts = by_source.np("text")                            # numpy in: one column as ndarray
+        vecs = np.stack([                                       # stand-in for a real model
+            np.frombuffer(hashlib.sha512(t.encode()).digest(), np.uint8) for t in texts
+        ]).astype(np.float32)                                   # (n, 64) float32
+        return {"doc_id": by_source.np("doc_id"),               # numpy out: dict of ndarrays,
+                "source": by_source.np("source"),               # the 2D one becomes the
+                "embedding": vecs,                              # fixed-size-list column
+                "norm": np.linalg.norm(vecs, axis=1)}
 
-    def summary(self, region_totals: Collect[RegionTotal], orders: Order) -> Summary:  # fan-in
-        self.n_orders = orders.aggregate("count(*) AS c").fetchone()[0]  # -> ledger column
-        return region_totals.aggregate("count(*) AS n_regions, sum(total) AS grand_total")
+    def summary(self, vectors: Collect[DocVector], docs: Doc) -> Summary:  # fan-in
+        self.n_docs = docs.aggregate("count(*) AS c").fetchone()[0]        # -> ledger column
+        return vectors.aggregate(
+            "count(DISTINCT source) AS n_sources, count(*) AS n_docs, avg(norm) AS avg_norm")
 ```
 
-Columns can be lists: `embedding: list[float]` maps to DuckDB `DOUBLE[]` /
-Arrow `list<double>` (nesting works too), so vectors don't need to be widened
-into hundreds of scalar columns.
+Columns can also be variable-length lists: `embedding: list[float]` maps to
+DuckDB `DOUBLE[]` / Arrow `list<double>` (nesting works too), so vectors never
+need to be widened into hundreds of scalar columns.
 
 Wide or generated schemas don't have to be written out by hand —
 `Table.make("FullAnnotation", {"peptide": str, **{f"frag_{i}": float | None for i in range(200)}})`
@@ -131,33 +150,11 @@ and return any of those. Outputs stream too: validated and written to a local
 temp file, then multipart-uploaded — a step's output can exceed RAM and S3's
 5GB single-PUT limit.
 
-## numpy in, numpy out
+### numpy in, numpy out
 
-Steps that live in numpy — signal processing, point clouds, spectra — need no
-conversion scaffolding in either direction:
-
-```python
-import numpy as np
-from ionflow import Flow, Table, check, shaped
-
-class Spectra(Table):
-    frame: np.int32                      # narrow dtypes persist as-is (INTEGER, not BIGINT)
-    spectrum: shaped(np.float32, 4096)   # fixed shape: a wrong-length row fails the write
-
-class Peaks(Table):
-    frame: np.int32
-    peak: np.float32 = check("peak >= 0")
-
-class DSP(Flow):
-    def spectra(self) -> Spectra:
-        iq = load_capture()                                  # (n, 4096) samples
-        return {"frame": np.arange(len(iq), dtype=np.int32),
-                "spectrum": np.abs(np.fft.fft(iq)).astype(np.float32)}
-
-    def peaks(self, spectra: Spectra) -> Peaks:
-        spec = spectra.np("spectrum")                        # (n, 4096) float32, stacked
-        return {"frame": spectra.np("frame"), "peak": spec.max(axis=1)}
-```
+The `vectors` step above lives in numpy, as steps doing signal processing,
+point clouds, or spectra do — none of them need conversion scaffolding in
+either direction:
 
 - **Returning:** a dict of ndarrays (2D+ values become fixed-size-list columns,
   zero-copy), a structured array, or a bare ndarray mapped onto the declared
@@ -168,8 +165,8 @@ class DSP(Flow):
   stored dtype, rectangular list columns stacked to `(N, d, ...)` — and `.np()`
   returns every column as a dict in one scan. Ragged or NULL-bearing columns raise instead
   of degrading to object arrays. Filter/project first when the input is large.
-- **Shapes:** `shaped(np.float32, 4096)` compiles to a DuckDB fixed array
-  (`FLOAT[4096]`), so shape violations fail at write time. Parquet round-trips
+- **Shapes:** `shaped(np.float32, 64)` compiles to a DuckDB fixed array
+  (`FLOAT[64]`), so shape violations fail at write time. Parquet round-trips
   fixed arrays as plain lists — queries and `.np()` see an ordinary list column.
 - **NaN is a value, not NULL:** a `NOT NULL` float column accepts NaN (SQL
   semantics — usually what measurement data wants).
@@ -182,13 +179,13 @@ project has it installed.
 ## Run it
 
 ```python
-run_id = ETLFlow.run()          # reads .ionflow/config (or pass config=Config(...))
+run_id = EmbedDocs.run()        # reads .ionflow/config (or pass config=Config(...))
 ```
 
 or from the shell:
 
 ```bash
-ionflow run mymodule:ETLFlow
+ionflow run mymodule:EmbedDocs
 ```
 
 Sizing knobs (mirroring the Python API): `--max-workers N`
@@ -232,20 +229,21 @@ JSON, parquet, and the command line.
 Views glob every run, so a new run shows up with nothing to sync — `run_id` is a column.
 
 ```python
-con = ETLFlow.duck()
-con.sql("SELECT run_id, grand_total FROM summary ORDER BY run_id").show()
-con.sql("SELECT region, total FROM region_totals WHERE run_id = ? ", params=[run_id]).show()
-con.sql("SELECT run_id, started, finished, n_orders FROM ledger").show()
+con = EmbedDocs.duck()
+con.sql("SELECT run_id, avg_norm FROM summary ORDER BY run_id").show()
+con.sql("SELECT source, norm FROM vectors WHERE run_id = ? ", params=[run_id]).show()
+con.sql("SELECT run_id, started, finished, n_docs FROM ledger").show()
 ```
 
 ```bash
-ionflow query mymodule:ETLFlow "SELECT * FROM summary"
-ionflow ls mymodule:ETLFlow
+ionflow query mymodule:EmbedDocs "SELECT * FROM summary"
+ionflow ls mymodule:EmbedDocs
 ```
 
 ## Browse in the terminal (TUI)
 
-Bare `ionflow` (no subcommand) opens an interactive terminal UI:
+Bare `ionflow` (no subcommand) opens an interactive terminal UI (the screenshots
+show the small ETL flow from this repo's `examples/etl.py`):
 
 ```bash
 ionflow
@@ -280,9 +278,9 @@ interval doubles when the 1024-sample cap folds the buffer), so even multi-day r
 stay bounded while peaks are preserved.
 
 ```bash
-ionflow stats mymodule:ETLFlow            # per-step: seconds, peak_rss_mb, avg_cores,
+ionflow stats mymodule:EmbedDocs          # per-step: seconds, peak_rss_mb, avg_cores,
                                            # max_threads (defaults to the latest run)
-ionflow query mymodule:ETLFlow "SELECT * FROM metrics WHERE step='region_totals'"
+ionflow query mymodule:EmbedDocs "SELECT * FROM metrics WHERE step='vectors'"
 ```
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
@@ -330,7 +328,7 @@ flow are a **class-definition error**.
 ## Resume
 
 ```bash
-ionflow run mymodule:ETLFlow --resume <origin_run_id>   # API: ETLFlow.run(resume=run_id)
+ionflow run mymodule:EmbedDocs --resume <origin_run_id>   # API: EmbedDocs.run(resume=run_id)
 ```
 
 A **new** `run_id` is created; completed step outputs are copied from the origin run
@@ -397,13 +395,13 @@ mid-swap — consumers needing cross-file consistency should compare the sidecar
 
 ```
 s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
-  ledger.parquet                           #   e.g. mymodule.ETLFlow
+  ledger.parquet                           #   e.g. mymodule.EmbedDocs
   runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
-      orders/part_0.parquet
-      by_region/part_0.parquet      by_region/part_1.parquet
-      region_totals/part_0.parquet  region_totals/part_1.parquet
+      docs/part_0.parquet
+      by_source/part_0.parquet   by_source/part_1.parquet
+      vectors/part_0.parquet     vectors/part_1.parquet
       summary/part_0.parquet
 ```
 
