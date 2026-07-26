@@ -6,7 +6,6 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from itertools import batched
 from urllib.parse import urlparse
 
 import boto3
@@ -14,14 +13,14 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
+from schrein.ducklake import load_extension
 
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover
     np = None  # ty: ignore[invalid-assignment]
 
-METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects; they sit at run-dir
-# depth (like _meta.json), which is what keeps them invisible to parse_key
+METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
 MISSING_KEY_CODES = {"NoSuchKey", "404"}  # ClientError codes meaning "object absent"
 BATCH_ROWS = 122880  # arrow reader batch = one parquet row group
@@ -46,36 +45,28 @@ def error_code(err):
 class Layout:
     """S3 key scheme for one flow.
 
-    Prototype flows live under a `_proto/` scratch namespace: disposable,
-    invisible to the flow's stable views, wiped by `ionflow clean`.
-
     >>> l = Layout("mf", "ETL")
     >>> l.ledger
     'mf/ETL/ledger.parquet'
     >>> l.part("r1", "raw")
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
-    >>> l.table_glob("raw")
-    'mf/ETL/runs/*/raw/*.parquet'
-    >>> Layout("mf", "ETL", proto=True).ledger
-    'mf/_proto/ETL/ledger.parquet'
     """
 
     prefix: str
     flow: str
-    proto: bool = False
 
     @classmethod
     def for_flow(cls, config, flow_cls):
-        """The layout a flow class writes to — the one place identity and flag are read.
+        """The layout a flow class writes to — the one place identity is read.
 
         `flow` is the module-qualified `flow_id()`, so same-named classes in
         different modules never share a namespace or ledger.
         """
-        return cls(config.prefix, flow_cls.flow_id(), getattr(flow_cls, "prototype", False))
+        return cls(config.prefix, flow_cls.flow_id())
 
     @property
     def root(self):
-        return f"{self.prefix}/_proto/{self.flow}" if self.proto else f"{self.prefix}/{self.flow}"
+        return f"{self.prefix}/{self.flow}"
 
     @property
     def ledger(self):
@@ -103,9 +94,6 @@ class Layout:
 
     def part(self, run_id, step, branch=0):
         return f"{self.step_dir(run_id, step)}/part_{branch}.parquet"
-
-    def table_glob(self, step):
-        return f"{self.root}/runs/*/{step}/*.parquet"
 
 
 def s3_client(cfg):
@@ -153,14 +141,12 @@ def _local_connection(threads=None, memory_mb=None):
     return con
 
 
-def connect(cfg, threads=None, memory_mb=None):
-    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs).
+def secret_sql(cfg):
+    """CREATE SECRET statement for the configured S3 endpoint.
 
-    Uses explicit keys when the config carries them (MinIO/tests), otherwise the
-    standard AWS credential chain.
+    Explicit keys when the config carries them (MinIO/tests), otherwise the
+    standard AWS credential chain. Shared by connect() and the catalog.
     """
-    con = _local_connection(threads, memory_mb)
-    con.execute("INSTALL httpfs; LOAD httpfs")
     parts = ["TYPE s3", f"REGION '{cfg.region}'"]
     if cfg.access_key:
         parts += [f"KEY_ID '{cfg.access_key}'", f"SECRET '{cfg.secret_key}'"]
@@ -173,7 +159,14 @@ def connect(cfg, threads=None, memory_mb=None):
             "URL_STYLE 'path'",
             f"USE_SSL {str(u.scheme == 'https').lower()}",
         ]
-    con.execute(f"CREATE OR REPLACE SECRET s ({', '.join(parts)})")
+    return f"CREATE OR REPLACE SECRET s ({', '.join(parts)})"
+
+
+def connect(cfg, threads=None, memory_mb=None):
+    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs)."""
+    con = _local_connection(threads, memory_mb)
+    load_extension(con, "httpfs")  # schrein's loader: cache, then wheel, then INSTALL
+    con.execute(secret_sql(cfg))
     return con
 
 
@@ -203,10 +196,6 @@ def _ndarray_table(arr, table):
     """
     if arr.dtype.names:
         return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
-    if table is None:
-        raise TypeError(
-            "bare ndarray from an untyped step: return {'col': array} or a structured array so columns have names"
-        )
     cols = table.columns()
     names = list(cols)
     if len(names) == 1 and (arr.ndim == 1 or cols[names[0]].is_vector()):
@@ -285,8 +274,7 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     Nothing touches S3 until the staged file is complete and validated, so a
     part object's existence implies the part is whole. Types are enforced by the cast
     projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
-    `table=None` (untyped prototype step) skips both — the schema is whatever
-    the data infers. `threads`/`memory_mb` keep pooled workers within their
+    `threads`/`memory_mb` keep pooled workers within their
     share during the write, the pipeline's memory/CPU peak. `fanout_key`
     (a column name, for keyed fan-out parts) validates that the written file
     holds exactly one distinct non-NULL value of that column and returns it;
@@ -295,16 +283,15 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     # capability dispatch: covers relations and StepInput (which delegates
     # to_arrow_reader to its relation) without per-wrapper unwrap branches
     src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
-    if table is not None and (missing := set(table.columns()) - set(src.schema.names)):
+    if missing := set(table.columns()) - set(src.schema.names):
         raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
     con = _local_connection(threads, memory_mb)
     con.register("_src", src)
-    select = "SELECT * FROM _src" if table is None else table.cast_sql("_src")
+    select = table.cast_sql("_src")
     with tempfile.TemporaryDirectory(prefix="ionflow-part-") as tmp_dir:
         path = os.path.join(tmp_dir, "part.parquet")
         con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
-        if table is not None:
-            _validate_part(con, table, path, key)
+        _validate_part(con, table, path, key)
         key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
         if os.path.getsize(path) < MULTIPART_THRESHOLD:
             with open(path, "rb") as f:
@@ -314,24 +301,25 @@ def write_part(client, bucket, key, data, table, threads=None, memory_mb=None, f
     return key_value
 
 
-def put_parquet(client, bucket, key, table, **extra):
-    """Upload a pyarrow Table as parquet; `extra` passes PutObject kwargs (e.g. IfMatch)."""
+def parquet_bytes(table):
+    """Serialize a pyarrow Table to parquet bytes — the repo's one spelling of it."""
     buf = io.BytesIO()
     pq.write_table(table, buf)
-    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), **extra)
+    return buf.getvalue()
 
 
-def get_table(client, bucket, key):
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    return pq.read_table(io.BytesIO(body))
+def table_from_bytes(blob):
+    return pq.read_table(io.BytesIO(blob))
 
 
-def delete_prefix(client, bucket, prefix):
-    """Delete every object under `prefix`; returns the number deleted."""
-    keys = list_keys(client, bucket, prefix)
-    for batch in batched(keys, 1000):  # DeleteObjects caps at 1000 keys
-        client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]})
-    return len(keys)
+def get_bytes_or_none(client, bucket, key):
+    """GET an object's bytes, or None if it doesn't exist."""
+    try:
+        return client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ClientError as e:
+        if error_code(e) in MISSING_KEY_CODES:
+            return None
+        raise
 
 
 def object_age(client, bucket, key):
@@ -350,57 +338,14 @@ def object_age(client, bucket, key):
     return (server_now - r["LastModified"]).total_seconds()
 
 
+def part_keys(client, bucket, layout, run_id, step):
+    """A step's part keys for one run, sorted — the one registration/read order."""
+    return sorted(list_keys(client, bucket, layout.step_dir(run_id, step) + "/"))
+
+
 def list_keys(client, bucket, prefix):
     pages = client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
     return [o["Key"] for page in pages for o in page.get("Contents", [])]
-
-
-def parse_key(prefix, key):
-    """Reverse of Layout's key scheme, for keys under `prefix` (ends with "/").
-
-    Returns (flow, None) for a flow's ledger, (flow, step) for a run part,
-    or None for anything else (e.g. _meta.json, or prototype `_proto/` keys —
-    scratch must stay invisible to stable scans; namespace-scoped readers pass
-    the `_proto/` prefix themselves).
-
-    >>> parse_key("mf/", "mf/ETL/ledger.parquet")
-    ('ETL', None)
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/raw/part_0.parquet")
-    ('ETL', 'raw')
-    >>> parse_key("mf/", "mf/_proto/ETL/ledger.parquet") is None
-    True
-    >>> parse_key("mf/_proto/", "mf/_proto/ETL/ledger.parquet")
-    ('ETL', None)
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_meta.json") is None
-    True
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics.parquet") is None
-    True
-    >>> parse_key("mf/", "mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet") is None
-    True
-    """
-    parts = key.removeprefix(prefix).split("/")
-    if parts[1:] == ["ledger.parquet"]:
-        return parts[0], None
-    if len(parts) == 5 and parts[1] == "runs" and parts[4].endswith(".parquet"):
-        return parts[0], parts[3]
-    return None
-
-
-def is_metrics_key(key):
-    """True for metrics objects — the orchestrator's or a branch worker's.
-
-    The positive complement of parse_key's exclusion, kept beside the key
-    scheme so recognition can't drift from construction.
-
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics.parquet")
-    True
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/_metrics_scored_0.parquet")
-    True
-    >>> is_metrics_key("mf/ETL/runs/run_id=r1/raw/part_0.parquet")
-    False
-    """
-    name = key.rsplit("/", 1)[-1]
-    return name.startswith(METRICS_PREFIX) and name.endswith(".parquet")
 
 
 def _np_column(name, arr):

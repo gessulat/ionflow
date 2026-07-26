@@ -9,7 +9,7 @@ import pyarrow as pa
 import pytest
 
 from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped, storage
-from ionflow.storage import Layout, get_table, s3_client, to_arrow
+from ionflow.storage import Layout, get_bytes_or_none, s3_client, table_from_bytes, to_arrow
 
 # --- schema: numpy dtype annotations ---
 
@@ -105,11 +105,6 @@ def test_bare_ndarray_shape_mismatch_is_actionable():
         to_arrow(np.zeros((2, 3)), Pair)
 
 
-def test_bare_ndarray_untyped_step_is_actionable():
-    with pytest.raises(TypeError, match="untyped step"):
-        to_arrow(np.zeros(3))
-
-
 def test_complex_arrays_rejected():
     with pytest.raises(TypeError, match="complex"):
         to_arrow({"iq": np.zeros(3, dtype=np.complex64)})
@@ -128,7 +123,7 @@ def test_write_part_persists_narrow_dtypes(s3cfg):
     key = "mf/F/runs/run_id=r/pts/part_0.parquet"
     data = {"frame": np.arange(2, dtype=np.int32), "x": np.ones(2, dtype=np.float32)}
     storage.write_part(client, s3cfg.bucket, key, data, Frame)
-    schema = get_table(client, s3cfg.bucket, key).schema
+    schema = table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).schema
     assert schema.field("frame").type == pa.int32()
     assert schema.field("x").type == pa.float32()
 
@@ -146,7 +141,7 @@ def test_nan_is_a_value_not_null(s3cfg):
     key = "mf/F/runs/run_id=r3/pts/part_0.parquet"
     data = {"frame": np.zeros(1, dtype=np.int32), "x": np.array([np.nan], dtype=np.float32)}
     storage.write_part(client, s3cfg.bucket, key, data, Table.make("NanOk", {"frame": np.int32, "x": np.float32}))
-    assert np.isnan(get_table(client, s3cfg.bucket, key).column("x").to_pylist()[0])
+    assert np.isnan(table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).column("x").to_pylist()[0])
 
 
 # --- shaped(...): fixed-shape array columns ---
@@ -248,7 +243,7 @@ def test_write_part_accepts_an_input_returned_unchanged(s3cfg):
     key = "mf/F/runs/run_id=r4/pts/part_0.parquet"
     inp = _input(pa.table({"frame": pa.array([1], pa.int32()), "x": pa.array([2.0], pa.float32())}))
     storage.write_part(client, s3cfg.bucket, key, inp, Frame)
-    assert get_table(client, s3cfg.bucket, key).column("x").to_pylist() == [2.0]
+    assert table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).column("x").to_pylist() == [2.0]
 
 
 # --- end to end: a numpy-native flow, fan-out included ---
@@ -296,11 +291,10 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     assert all(p > 0 for (p,) in peaks)
     # narrow dtypes survived the whole pipeline onto S3 (fixed shape persists as list)
     layout = Layout.for_flow(s3cfg, SignalFlow)
-    schema = get_table(s3_client(s3cfg), s3cfg.bucket, layout.part(run_id, "spectra")).schema
+    schema = table_from_bytes(get_bytes_or_none(s3_client(s3cfg), s3cfg.bucket, layout.part(run_id, "spectra"))).schema
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
     # the drift check compares against the persisted (list) form: no false positive
     from ionflow import discovery
 
-    _, samples, _ = discovery.scan_runs(s3cfg)
-    assert discovery.schema_drift(SignalFlow, con, s3cfg, samples[SignalFlow.flow_id()]) == []
+    assert discovery.schema_drift(SignalFlow, s3cfg) == []

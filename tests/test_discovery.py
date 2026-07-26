@@ -35,26 +35,22 @@ def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
 
 
-def test_flows_with_data(s3cfg):
+def test_scan_runs(s3cfg):
     from ionflow import storage
 
-    assert discovery.flows_with_data(s3cfg) == set()
+    assert discovery.scan_runs(s3cfg) == set()
     # key presence is all that matters here; no need for a full flow run
     storage.s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")
-    assert discovery.flows_with_data(s3cfg) == {"Alpha"}
+    assert discovery.scan_runs(s3cfg) == {"Alpha"}
 
 
 def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
     from tui_flows.pipeline import Alpha
 
-    from ionflow import storage
-
     Alpha.run(s3cfg, repo=repo, use_processes=False)
-    con = storage.connect(s3cfg)
-    _, samples, _ = discovery.scan_runs(s3cfg)
-    assert discovery.schema_drift(Alpha, con, s3cfg, samples[Alpha.flow_id()]) == []
+    assert discovery.schema_drift(Alpha, s3cfg) == []
 
     # pretend the code now declares `x` as text instead of the stored bigint
     monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = discovery.schema_drift(Alpha, con, s3cfg, samples[Alpha.flow_id()])
+    issues = discovery.schema_drift(Alpha, s3cfg)
     assert any("data" in i and "x" in i for i in issues)

@@ -6,9 +6,11 @@
 **Working name:** `schrein` (German: shrine/reliquary — a sealed casket built to preserve its contents unchanged)
 
 This document is self-contained. It specifies a small Python library that
-makes a **multi-writer DuckLake catalog** (and later an **Apache Iceberg
-catalog**) work with **no infrastructure other than one S3-compatible
-bucket** — no Postgres, no catalog server, no lock service. An agent should
+makes a **multi-writer DuckLake catalog** work with **no infrastructure
+other than one S3-compatible bucket** — no Postgres, no catalog server,
+no lock service. DuckLake is the only target format (schrein decision
+0004) — Apache Iceberg support was considered and scrapped; §2's
+landscape analysis is retained as historical context. An agent should
 be able to build the library from this document alone, in a blank
 repository, without access to ionflow.
 
@@ -28,9 +30,7 @@ Parquet. The catch is the catalog database. Per the
 - **Multiple users / remote clients → run PostgreSQL.**
 
 For teams whose entire infrastructure is "one S3 bucket," the Postgres
-requirement kills the whole idea. The same shape of problem exists for
-Iceberg: the format itself is files-on-object-storage, but a *catalog
-service* traditionally holds the mutable pointer.
+requirement kills the whole idea.
 
 **Observation that unlocks the design:** for many workloads (batch
 pipelines, published datasets, ML feature tables) the catalog changes
@@ -75,16 +75,11 @@ What §7 extracts from `ledger.py` is only the proven CAS commit loop
 (`upsert_run` → `CasRegister`), i.e. the coordination primitive. Nothing
 of the ledger's run-tracking semantics carries over.
 
-ionflow flows do **not** run on schrein, and the ledger stays in ionflow
-unchanged after schrein exists. The only planned integration is M4:
-`ionflow publish --to-ducklake / --to-iceberg` — ionflow *publishes
-into* a schrein-managed lake; it does not use schrein as its run
-substrate. (Reimplementing the ledger on `CasRegister` would be a
-mechanical refactor ionflow could adopt later; it would not merge the
-two roles.) An *optional* mode where ionflow registers completed step
-outputs into a schrein lake is explored separately in the ionflow repo
-(`docs/specs/ionflow-on-schrein.md`); even there the roles stay
-distinct — the ledger remains a separate object and keeps sole
+ionflow flows do **not** run on schrein; the ledger's CAS loop is
+schrein's `CasRegister` (ionflow decision 0014 — same mechanism, roles
+untouched), and ionflow registers completed step outputs into a per-flow
+schrein lake (`docs/specs/ionflow-on-schrein.md`). The roles stay
+distinct throughout: the ledger remains a separate object and keeps sole
 authority over run bookkeeping; the catalog only ever receives table
 schemas and data-file registrations.
 
@@ -95,7 +90,7 @@ schemas and data-file registrations.
 | **Frozen DuckLake** (DuckDB team, Oct 2025) | The *read* side is official: a DuckLake catalog written as a single DuckDB-format file, copied to object storage, attached read-only by any vanilla DuckDB client. Our library is "frozen, plus a safe multi-writer commit protocol." | [blog post](https://ducklake.select/2025/10/24/frozen-ducklake/), [guide](https://ducklake.select/docs/stable/duckdb/guides/public_ducklake_on_object_storage), [PyPI helper](https://pypi.org/project/frozen-ducklake/) |
 | **ionflow `ledger.py`** | The exact CAS loop (read → modify → `If-Match` PUT → retry on 412) running in production against S3/moto/MinIO. Code reproduced in §7. | `src/ionflow/ledger.py` in the ionflow repo |
 | **Delta Lake S3 commit protocol** | Optimistic commits over object storage at scale. Historically needed DynamoDB for put-if-absent; delta-rs now uses native S3 conditional writes. This is the log-structured "second gear" of our design (§9). | [Delta storage docs](https://docs.delta.io/latest/delta-storage.html), [delta-rs](https://delta-io.github.io/delta-rs/) |
-| **Boring Catalog** | An Iceberg catalog as a *single JSON file on S3* using conditional writes, implemented as a PyIceberg custom catalog. Direct prior art for our Iceberg adapter (§8) — but **dormant**: 12 commits by a single author, 2025-04→2025-05, nothing since (§2.1). A design reference to read, not a dependency to adopt. | [GitHub](https://github.com/boringdata/boring-catalog), [design writeup](https://juhache.substack.com/p/boring-iceberg-catalog) |
+| **Boring Catalog** | An Iceberg catalog as a *single JSON file on S3* using conditional writes, implemented as a PyIceberg custom catalog. Validates the catalog-file-plus-conditional-writes shape — but **dormant**: 12 commits by a single author, 2025-04→2025-05, nothing since (§2.1). A design reference to read, not a dependency to adopt. | [GitHub](https://github.com/boringdata/boring-catalog), [design writeup](https://juhache.substack.com/p/boring-iceberg-catalog) |
 | **Quack** (DuckDB team, May 2026) | The server-shaped alternative: a protocol/extension making a DuckDB-file catalog safely shared via a server process. Proves demand; still requires running a process, which is what we avoid. | [overview](https://www.definite.app/blog/duckdb-quack-ducklake-catalog) |
 | **Litestream / Cloud-Backed SQLite** | Why *live* SQLite-on-blob-storage is the wrong framing: both end up single-writer or lock-based. Rare writes let us skip all of it. | [litestream.io](https://litestream.io), [sqlite.org/cloudsqlite](https://sqlite.org/cloudsqlite/doc/trunk/www/index.wiki) |
 | **AWS S3 Tables** | Managed Iceberg with built-in catalog — the "buy" option on native AWS; irrelevant for MinIO/R2/self-hosted. | [first look](https://meltware.com/2024/12/04/s3-tables.html) |
@@ -262,9 +257,9 @@ questions:
   Iceberg catalogs don't offer. You build it for ecosystem
   compatibility, not because it answers the manifesto.
 
-Prioritization follows: the DuckLake adapter is the main event; the
-Iceberg adapter is a compatibility bridge (consistent with the §12
-milestone order).
+Prioritization followed: the DuckLake adapter is the main event — and
+after it shipped, the Iceberg adapter was scrapped outright (decision
+0004): ecosystem hedging, not something schrein's actual consumer needs.
 
 ## 3. Non-goals
 
@@ -274,8 +269,9 @@ milestone order).
 - **Not a security boundary.** Nothing stops a client with bucket write
   access from an unconditional PUT. Discipline is enforced by tooling, same
   trust model as any file-based catalog.
-- **No constraint enforcement beyond the formats' own** (DuckLake:
-  NOT NULL only; Iceberg: none enforced).
+- **No constraint enforcement beyond DuckLake's own** (NOT NULL only).
+- **No Apache Iceberg support** (decision 0004): no adapter, no managed
+  REST-catalog presets. One format, one adapter.
 - **No Backblaze B2 support** — B2 lacks `If-Match` conditional PUT. (AWS
   S3, Cloudflare R2, MinIO, Tigris, and moto all support it.) Detect and
   refuse loudly at init.
@@ -284,30 +280,30 @@ milestone order).
 
 ## 4. Architecture
 
-Three components; the adapters differ only in *what the register holds*.
+Two components: the register (coordination) and the DuckLake adapter
+(what the register holds).
 
 ```
-┌───────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────┐
 │ schrein.register  —  CAS core (~150 lines, no deps > boto3)│
 │  A linearizable register on one S3 key:                    │
 │    read() -> (bytes|None, etag|None)                       │
 │    write(bytes, expect_etag) -> etag     # If-Match CAS    │
 │    create(bytes) -> etag                 # If-None-Match * │
 │    transact(fn)   # read→fn→write loop, backoff+jitter     │
-└─────────────┬─────────────────────────┬───────────────────┘
-              │                         │
-┌─────────────▼─────────────┐ ┌─────────▼───────────────────┐
-│ schrein.ducklake (phase 1)│ │ schrein.iceberg  (phase 2)  │
-│ register holds the        │ │ register holds a JSON       │
-│ .ducklake catalog file    │ │ pointer map:                │
-│ (DuckDB-format);          │ │   {table -> metadata.json}  │
-│ transactions = replayable │ │ implemented as a PyIceberg  │
-│ closures over local ATTACH│ │ custom Catalog; rebase via  │
-│                           │ │ PyIceberg's own retry logic │
-└───────────────────────────┘ └─────────────────────────────┘
+└─────────────┬──────────────────────────────────────────────┘
+              │
+┌─────────────▼─────────────┐
+│ schrein.ducklake          │
+│ register holds the        │
+│ .ducklake catalog file    │
+│ (DuckDB-format);          │
+│ transactions = replayable │
+│ closures over local ATTACH│
+└───────────────────────────┘
 ```
 
-Bucket layout (DuckLake adapter):
+Bucket layout:
 
 ```
 s3://bucket/<prefix>/
@@ -490,368 +486,39 @@ INSTALL ducklake; LOAD ducklake;
 ATTACH 'ducklake:s3://mybucket/lake/catalog.ducklake' AS lake (READ_ONLY);
 ```
 
-## 7. What to extract from ionflow (with code)
-
-ionflow (this spec's origin repo) already runs the CAS pattern in
-production. Three things are worth carrying over — reproduced here so a
-fresh repo needs no access to ionflow.
-
-### 7.1 The CAS loop — generalize `ledger.py::upsert_run` into `CasRegister`
-
-ionflow's ledger is an append-only Parquet file swapped by CAS
-(`src/ionflow/ledger.py`). The essence, plus the helpers it uses from
-`storage.py`:
-
-```python
-# ionflow's proven kernel (condensed):
-MISSING_KEY_CODES = {"NoSuchKey", "404"}      # ClientError codes: object absent
-_PRECONDITION    = {"PreconditionFailed", "412"}
-
-def error_code(err):                           # AWS error code from ClientError
-    return err.response["Error"]["Code"]
-
-# write with CAS: IfMatch when updating, IfNoneMatch="*" when creating
-cas = {"IfMatch" if etag else "IfNoneMatch": etag or "*"}
-client.put_object(Bucket=bucket, Key=key, Body=body, **cas)
-
-# the loop: read -> modify -> conditional write -> on 412, re-read and retry
-for _ in range(retries):
-    rows, etag = _read(client, bucket, key)    # returns ([], None) if absent
-    rows = modify(rows)
-    try:
-        _write(client, bucket, key, rows, etag)
-        return
-    except ClientError as e:
-        if error_code(e) in _PRECONDITION:
-            continue
-        raise
-raise RuntimeError("CAS failed after retries")
-```
-
-Generalized core for the new library (complete, runnable):
-
-```python
-# src/schrein/register.py
-"""A linearizable CAS register on one S3 key, via conditional writes."""
-import random
-import time
-
-from botocore.exceptions import ClientError
-
-MISSING = {"NoSuchKey", "404"}
-# 412 = etag mismatch; 409 ConditionalRequestConflict = concurrent conditional
-# PUTs raced on the key (AWS returns this; both mean "re-read and retry").
-RETRYABLE = {"PreconditionFailed", "412", "ConditionalRequestConflict", "409"}
-
-
-class CommitConflict(RuntimeError):
-    """CAS lost the race more than max_attempts times."""
-
-
-def _error_code(e: ClientError) -> str:
-    return e.response["Error"]["Code"]
-
-
-class CasRegister:
-    def __init__(self, client, bucket: str, key: str):
-        self.client, self.bucket, self.key = client, bucket, key
-
-    def read(self):
-        """-> (bytes | None, etag | None). Strongly consistent, atomic."""
-        try:
-            r = self.client.get_object(Bucket=self.bucket, Key=self.key)
-        except ClientError as e:
-            if _error_code(e) in MISSING:
-                return None, None
-            raise
-        return r["Body"].read(), r["ETag"]
-
-    def write(self, body: bytes, expect_etag: str | None) -> str:
-        """Conditional PUT: If-Match when updating, If-None-Match:* on genesis.
-        Raises ClientError (code in RETRYABLE) when the precondition fails."""
-        cas = {"IfMatch": expect_etag} if expect_etag else {"IfNoneMatch": "*"}
-        r = self.client.put_object(Bucket=self.bucket, Key=self.key, Body=body, **cas)
-        return r["ETag"]
-
-    def transact(self, fn, max_attempts: int = 8, base_delay: float = 0.5, cap: float = 30.0):
-        """fn(old_bytes | None) -> new_bytes; replayed until the CAS lands.
-        fn MUST be replayable: it may run once per attempt, each against a
-        fresh read. Returns the committed object's new etag."""
-        for attempt in range(max_attempts):
-            old, etag = self.read()
-            try:
-                return self.write(fn(old), etag)
-            except ClientError as e:
-                if _error_code(e) not in RETRYABLE:
-                    raise
-                time.sleep(random.uniform(0, min(cap, base_delay * 2**attempt)))
-        raise CommitConflict(f"s3://{self.bucket}/{self.key}: lost CAS race {max_attempts} times")
-```
-
-The DuckLake adapter wraps `transact`: `fn(old_bytes)` materializes the
-blob to a temp file (or creates a fresh catalog on genesis), attaches,
-runs the user closure, detaches, asserts no `.wal`, and returns the new
-file's bytes.
-
-```python
-# src/schrein/ducklake.py  (sketch; the register does the concurrency work)
-import pathlib
-import tempfile
-
-import duckdb
-
-
-class DuckLake:
-    def __init__(self, register, data_path: str, secret_sql: str | None = None):
-        self.register = register          # CasRegister on .../catalog.ducklake
-        self.data_path = data_path        # 's3://bucket/prefix/data/'
-        self.secret_sql = secret_sql      # CREATE SECRET ... for non-AWS endpoints
-
-    def _attach(self, con, local: pathlib.Path, read_only: bool = False):
-        con.execute("INSTALL ducklake; LOAD ducklake;")
-        if self.secret_sql:
-            con.execute(self.secret_sql)
-        ro = ", READ_ONLY" if read_only else ""
-        con.execute(
-            f"ATTACH 'ducklake:{local}' AS lake (DATA_PATH '{self.data_path}'{ro})"
-        )
-
-    def commit(self, user_fn, **transact_kwargs):
-        def fn(old: bytes | None) -> bytes:
-            with tempfile.TemporaryDirectory() as tmp:
-                local = pathlib.Path(tmp) / "catalog.ducklake"
-                if old is not None:
-                    local.write_bytes(old)          # rebase base; genesis: ATTACH creates it
-                con = duckdb.connect()
-                try:
-                    self._attach(con, local)
-                    user_fn(con)                    # replayable closure (§5.3)
-                    con.execute("DETACH lake")
-                finally:
-                    con.close()
-                wal = local.with_suffix(local.suffix + ".wal")
-                if wal.exists():                    # must be one clean file (§5.4)
-                    raise RuntimeError("catalog WAL not checkpointed on detach")
-                return local.read_bytes()
-
-        return self.register.transact(fn, **transact_kwargs)
-```
-
-### 7.2 The moto test harness — copy `tests/conftest.py` nearly verbatim
-
-ionflow's suite fakes S3 with a **moto server subprocess** started and
-warmed at conftest import, killed atexit; each test gets a unique bucket
-and no teardown. Two hard-won rules encoded in it:
-
-1. **Never run moto in-process.** DuckDB httpfs holds relations open while
-   reading; an in-process werkzeug server starves and wedges tests for
-   minutes. Subprocess only.
-2. moto implements S3 conditional writes, so the CAS paths (412 on stale
-   `If-Match`, `If-None-Match` create) are genuinely exercised — ionflow's
-   ledger tests prove this daily.
-
-```python
-# tests/conftest.py  (for the new repo — adapted from ionflow)
-import atexit
-import socket
-import subprocess
-import sys
-import threading
-import time
-
-import pytest
-
-_moto = {}
-
-
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _warm():
-    import boto3
-
-    port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    atexit.register(proc.kill)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.05)
-    _moto["endpoint"] = f"http://127.0.0.1:{port}"
-    boto3.client(
-        "s3", endpoint_url=_moto["endpoint"], region_name="us-east-1",
-        aws_access_key_id="warm", aws_secret_access_key="warm",
-    ).list_buckets()
-
-
-_warmup = threading.Thread(target=_warm, daemon=True)
-_warmup.start()
-
-
-@pytest.fixture(scope="session")
-def moto_endpoint():
-    _warmup.join()
-    return _moto["endpoint"]
-
-
-@pytest.fixture
-def s3(moto_endpoint, request):
-    import boto3
-
-    client = boto3.client(
-        "s3", endpoint_url=moto_endpoint, region_name="us-east-1",
-        aws_access_key_id="test", aws_secret_access_key="test",
-    )
-    bucket = f"b-{abs(hash(request.node.nodeid)) % 10**8}"   # unique per test, no cleanup
-    client.create_bucket(Bucket=bucket)
-    return client, bucket, moto_endpoint
-```
-
-DuckDB inside tests needs a secret pointing at moto (path-style, no SSL):
-
-```python
-SECRET_SQL = """
-CREATE OR REPLACE SECRET moto (
-    TYPE s3, KEY_ID 'test', SECRET 'test', REGION 'us-east-1',
-    ENDPOINT '{host_port}', USE_SSL false, URL_STYLE 'path'
-);
-"""  # host_port = moto endpoint without the scheme, e.g. 127.0.0.1:5000
-```
-
-### 7.3 Design lessons to inherit (ionflow conventions that transfer)
-
-- **Backblaze B2 is unsupported** (no `If-Match`). Probe at init: attempt a
-  conditional PUT on a scratch key; refuse with a clear error if the
-  backend ignores or rejects preconditions. (A backend that *ignores*
-  `If-Match` silently is worse than one that errors — probe for correct
-  412 behavior, not just for success.)
-- **DuckDB extension install race:** `INSTALL ducklake` downloads once per
-  DuckDB version. If the library ever spawns concurrent workers, install
-  from a single connection before fanning out (ionflow's runner does
-  this for httpfs).
-- **Timestamps naive UTC** if you store any in Parquet metadata you expect
-  DuckDB to read without pytz.
-- Bucket versioning is cheap insurance: every catalog version a rogue or
-  buggy writer clobbers remains recoverable.
-
-## 8. Phase 2 — the Iceberg adapter
-
-Iceberg is structurally an even better fit: *all* metadata (snapshots,
-manifests, file lists) already lives in immutable files; a catalog holds
-only a tiny mutable pointer per table ("current `metadata.json` is X").
-The register therefore holds a small JSON pointer map, not a database file
-— and rebase-on-conflict is *native* to Iceberg's spec (optimistic commit
-retries are how every Iceberg catalog works; they just assume a server
-holds the pointer).
-
-Plan:
-
-1. **Read [Boring Catalog](https://github.com/boringdata/boring-catalog)
-   first — an evening, not an evaluation.** It proves the shape ("single
-   `catalog.json` on S3 + conditional writes + PyIceberg custom catalog"),
-   but it is dormant (§2.1), so the earlier "adopt it behind the library's
-   interface" option is off the table: an unmaintained single-author POC
-   must not hold the correctness-critical commit path. Build on
-   `CasRegister`; port its PyIceberg-integration details where they check
-   out, and run the §10 hammer against our implementation from day one.
-2. Building it: subclass `pyiceberg.catalog.Catalog`
-   ([PyIceberg docs](https://py.iceberg.apache.org/configuration/)); state
-   is `{namespace.table: metadata_location}` in the register; the
-   CAS-relevant method is `_commit_table` — PyIceberg writes the new
-   immutable `metadata.json`, then:
-
-```python
-def _commit_table(self, request):            # sketch: the pointer swap
-    def fn(old_bytes):
-        state = json.loads(old_bytes) if old_bytes else {"tables": {}}
-        current = state["tables"].get(ident)
-        # delegate conflict detection/rebase to PyIceberg's update machinery
-        new_metadata_location = write_new_metadata(request, base=current)
-        state["tables"][ident] = new_metadata_location
-        return json.dumps(state).encode()
-    self.register.transact(fn)
-```
-
-3. A bonus most real Iceberg catalogs don't offer: all pointers in one
-   register → **atomic multi-table commits** via a single CAS.
-
-Ecosystem notes (as of mid-2026):
-
-- DuckDB *reads* Iceberg without any catalog
-  (`iceberg_scan('s3://…/metadata.json')`) once the pointer is resolved.
-- DuckDB *writes* Iceberg only through a REST catalog
-  ([writes announcement](https://duckdb.org/2025/11/28/iceberg-writes-in-duckdb),
-  [v1.5.3 features](https://duckdb.org/2026/05/29/new-iceberg-features),
-  [REST catalog docs](https://duckdb.org/docs/lts/core_extensions/iceberg/iceberg_rest_catalogs)).
-  DuckDB-native writes through our catalog would need a small **in-process
-  localhost REST shim** wrapping the PyIceberg catalog — still zero shared
-  infrastructure. Otherwise, write via PyIceberg directly.
-- Iceberg metadata sprawls (every commit = new `metadata.json` +
-  manifests); snapshot expiry and orphan cleanup are routine maintenance —
-  PyIceberg has the tooling; wire it to the §5.5 grace-TTL rule.
-
-### 8.1 Thin adapters to the managed catalogs (S3 Tables, R2, BigLake)
-
-All three managed offerings speak the **standard Iceberg REST catalog
-protocol**, so an "adapter" here is *not* a catalog implementation — it is
-a ~30-line config preset over PyIceberg's built-in `RestCatalog` plus
-credential wiring. No CAS, no register: the service serializes commits
-server-side. What the presets buy is one uniform entry point where the
-backend is just a URI:
-
-```python
-from schrein import open_catalog
-
-open_catalog("cas+s3://bucket/prefix")            # self-hosted: this spec's CAS catalog
-open_catalog("s3tables://<table-bucket-arn>")     # AWS S3 Tables
-open_catalog("r2://<account_id>/<bucket>")        # Cloudflare R2 Data Catalog
-open_catalog("biglake://<project>/<region>/<cat>")# Google BigLake metastore
-```
-
-Per-preset sketch (endpoint spellings drift — **verify against current
-provider docs at build time**, same caveat as open question 3):
-
-- **AWS S3 Tables** — `RestCatalog` with SigV4 request signing:
-  `uri=https://s3tables.<region>.amazonaws.com/iceberg`,
-  `rest.sigv4-enabled=true`, `rest.signing-name=s3tables`,
-  `warehouse=<table-bucket ARN>`; credentials from the AWS default chain
-  (matching ionflow's "never store credentials" convention). Maintenance
-  (compaction, snapshot expiry) is built into the service — the §5.5 GC
-  surface no-ops here.
-- **Cloudflare R2 Data Catalog** — `RestCatalog` with bearer token:
-  `uri=https://catalog.cloudflarestorage.com/<account_id>/<bucket>`,
-  `warehouse=<account_id>_<bucket>`, `token=<R2 API token>`. Zero egress
-  fees make it the natural cross-cloud read target.
-- **Google BigLake metastore** — `RestCatalog` with Google OAuth:
-  `uri=https://biglake.googleapis.com/iceberg/v1/restcatalog`, bearer
-  token from `google.auth` application-default credentials plus the
-  `x-goog-user-project` header.
-
-Notes:
-
-- **DuckDB-native writes work on the managed backends today** — DuckDB
-  writes Iceberg through REST catalogs (see the ecosystem notes above), and
-  managed = REST. The localhost REST shim is only ever needed for the
-  `cas+s3` backend.
-- The presets cannot be tested against moto (it fakes none of these
-  services); smoke tests are manual against real accounts. The §10 hammer
-  applies only to the `cas+s3` backend.
-- **Positioning consequence:** with these presets the library's pitch
-  becomes "one zero-ops Iceberg catalog API — managed REST where your
-  cloud provides one, CAS-on-conditional-writes where it doesn't (MinIO,
-  on-prem, moto, any plain S3-compatible bucket)." The CAS core stays the
-  novel part; the presets make the same user code portable across all four
-  backends by swapping a URI.
+## 7. What was extracted from ionflow
+
+This section originally reproduced ~250 lines of code verbatim (the CAS
+loop condensed from `ledger.py`, a complete `register.py`, the DuckLake
+adapter sketch, and the moto conftest) so the library could be built in a
+blank repository. The library exists now — the code of record is
+`schrein/src/schrein/` and `schrein/tests/`, and the listings had already
+begun to drift from it. What carried over, and where it lives:
+
+- **The CAS loop** (`upsert_run`'s read → modify → conditional-PUT →
+  retry-on-412) generalized into `register.py::CasRegister.transact`,
+  with jittered backoff and `CommitConflict` after exhausted attempts.
+- **The moto subprocess harness** — server started and warmed at conftest
+  import, unique bucket per test, never in-process (DuckDB httpfs starves
+  an in-process werkzeug server). Now `schrein.testing` + each suite's
+  `conftest.py`, with atomic conditional PUTs added (decision 0003).
+- **Design lessons**: Backblaze B2 refused via `CasRegister.probe`
+  (no working `If-Match`); extension installs serialized before fan-out
+  (the loader in `ducklake.py`, decision 0002); timestamps naive UTC;
+  bucket versioning as cheap insurance.
+
+## 8. Out of scope: Apache Iceberg (decision 0004)
+
+This section previously specified an Iceberg adapter (register holding a
+JSON pointer map, a PyIceberg custom `Catalog`, a localhost REST shim for
+DuckDB writers) and §8.1, thin config presets over the managed REST
+catalogs (AWS S3 Tables, Cloudflare R2 Data Catalog, Google BigLake).
+Both are scrapped: schrein targets DuckLake only. The Iceberg adapter was
+compatibility hedging with a strictly worse pitch (§2.3 — the metadata
+labyrinth is the format itself), and the managed presets contained no
+schrein at all — they were PyIceberg `RestCatalog` configuration, worth a
+gist, not a library surface. The section number is kept so §9–§14
+references and the test-plan numbering stay stable.
 
 ## 9. Scaling limits and the upgrade path
 
@@ -902,71 +569,27 @@ only boto3; adapter tests need duckdb.
 CI note: run tests with `pytest -n auto --dist worksteal` (pytest-xdist);
 the harness is parallel-safe by construction (one server, unique buckets).
 
-## 11. Fresh-repo skeleton
+## 11. Repository skeleton
 
-```
-schrein/
-  pyproject.toml
-  README.md                 <- distill §1, §4, §6 of this spec
-  src/schrein/
-    __init__.py             <- exports CasRegister, DuckLake, CommitConflict
-    register.py             <- §7.1 (complete)
-    ducklake.py             <- §7.1 sketch -> full adapter (genesis, read(), gc)
-    iceberg.py              <- phase 2 (§8), behind an optional extra
-  tests/
-    conftest.py             <- §7.2
-    test_register.py
-    test_ducklake.py
-  docs/
-    spec.md                 <- this document
-    decisions/              <- ADRs, numbered, one per non-obvious choice
-```
-
-```toml
-# pyproject.toml
-[project]
-name = "schrein"
-version = "0.0.1"
-description = "Zero-infrastructure lakehouse catalogs on S3 conditional writes (DuckLake, Iceberg)"
-requires-python = ">=3.12"
-dependencies = [
-  "boto3>=1.35",           # conditional-write (If-Match) support
-  "duckdb>=1.4",           # ducklake extension requires modern duckdb
-]
-
-[project.optional-dependencies]
-iceberg = ["pyiceberg>=0.9"]
-
-[dependency-groups]
-dev = ["pytest>=8", "pytest-xdist>=3", "moto[server,s3]>=5"]
-
-[tool.pytest.ini_options]
-addopts = "-n auto --dist worksteal"
-testpaths = ["tests"]
-```
-
-Bootstrap: `uv init --lib schrein && uv add boto3 duckdb && uv add --group dev pytest pytest-xdist "moto[server,s3]"`.
+Realized — see `schrein/` in this repository (a uv workspace member,
+schrein decision 0001): `src/schrein/{register,ducklake,testing}.py`,
+`tests/`, `docs/decisions/`. Packaging lives in `schrein/pyproject.toml`.
 
 ## 12. Milestones
 
-- **M0 — CAS core.** `register.py` + tests 1–3 (register-level). Exit:
-  hammer test green at N=8, M=25.
+All shipped:
+
+- **M0 — CAS core.** `register.py` + tests 1–3; lost-update hammer green.
 - **M1 — DuckLake adapter.** `commit`/`read`/genesis + secret handling +
-  WAL hygiene + tests 2, 5–7 at the DuckLake layer. Exit: two processes on
-  one moto bucket interleave 50 commits, zero lost updates, vanilla-DuckDB
-  reader sees the final state.
-- **M2 — Maintenance.** `expire_snapshots`, `gc` with grace TTL, test 4;
-  conditional-write probe at init (test 8); optional real-backend smoke
-  (MinIO container; R2/AWS manual).
-- **M3 — Iceberg.** Read Boring Catalog as prior art (§8.1 note: do not
-  adopt — dormant); implement `iceberg.py` on `CasRegister` under the §10
-  hammer; optional localhost REST shim for DuckDB writers.
-- **M3b — Managed presets (§8.1).** `open_catalog()` URI dispatch +
-  S3 Tables / R2 / BigLake `RestCatalog` presets, endpoint spellings
-  verified against current provider docs; manual smoke tests (real
-  accounts — moto fakes none of these).
-- **M4 — (back in ionflow, out of scope here).** `publish --to-ducklake`
-  / `--to-iceberg` targets using this library.
+  WAL hygiene + tests 2, 5–7 at the DuckLake layer.
+- **M2 — Maintenance.** `expire_snapshots`, `gc` with grace TTL,
+  conditional-write probe (test 8).
+
+Former M3/M3b (Iceberg adapter, managed presets) are scrapped — decision
+0004. A former M4 (`ionflow publish` targeting an external schrein lake)
+is unnecessary: every ionflow flow already *is* a schrein lake (ionflow
+decision 0015), and `publish` blesses outputs into a stable publish
+DuckLake of its own (ionflow decision 0009).
 
 ## 13. Open questions
 
@@ -979,10 +602,11 @@ Bootstrap: `uv init --lib schrein && uv add boto3 duckdb && uv add --group dev p
    across ducklake extension versions are themselves CAS commits; how to
    coordinate a fleet of writers on mixed versions? (Likely: record the
    ducklake spec version in the catalog, refuse older writers.)
-3. **`ducklake_add_data_files` semantics** — verify current signature and
-   constraints (types must match; check behavior with partial/hive paths)
-   against [current docs](https://ducklake.select/docs/stable) at build
-   time; the function is load-bearing for cheap replays.
+3. **`ducklake_add_data_files` semantics** — settled empirically: the
+   function accepts `hive_partitioning => true` and infers partition
+   values (e.g. `run_id=`) from the file path; types must match the
+   table's persisted types. Load-bearing for cheap replays and for
+   ionflow's registration (its decision 0015).
 4. **GCS/Azure:** both have equivalent primitives (GCS
    `x-goog-if-generation-match`, Azure ETag If-Match). The register is the
    only backend-specific code — worth an interface, not worth building
@@ -1021,15 +645,6 @@ DuckLake-vs-Iceberg background (§2.2):
 S3 primitives:
 [conditional writes user guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
 (If-None-Match GA Aug 2024; If-Match GA Nov 2024; strong consistency since Dec 2020)
-
-Iceberg:
-[Boring Catalog](https://github.com/boringdata/boring-catalog) ·
-[boring iceberg catalog — design writeup](https://juhache.substack.com/p/boring-iceberg-catalog) ·
-[PyIceberg configuration](https://py.iceberg.apache.org/configuration/) ·
-[DuckDB-Iceberg writes](https://duckdb.org/2025/11/28/iceberg-writes-in-duckdb) ·
-[DuckDB-Iceberg v1.5.3 features](https://duckdb.org/2026/05/29/new-iceberg-features) ·
-[DuckDB Iceberg REST catalogs](https://duckdb.org/docs/lts/core_extensions/iceberg/iceberg_rest_catalogs) ·
-[AWS S3 Tables first look](https://meltware.com/2024/12/04/s3-tables.html)
 
 Catalog landscape (checked 2026-07-26, §2.1):
 [State of Apache Iceberg Catalogs, June 2026](https://amdatalakehouse.substack.com/p/the-state-of-apache-iceberg-catalogs) ·

@@ -1,9 +1,8 @@
-import io
 import json
 
 import pyarrow as pa
-import pyarrow.parquet as pq
-from botocore.exceptions import ClientError
+
+from schrein import CasRegister
 
 from . import storage
 
@@ -13,72 +12,31 @@ _BASE_FIELDS = [
     pa.field("started", pa.timestamp("us")),
     pa.field("finished", pa.timestamp("us")),
     pa.field("commit", pa.string()),
-    pa.field("steps_complete", pa.list_(pa.string())),
     pa.field("origin_run_id", pa.string()),
 ]
 
 BASE_COLS = {f.name for f in _BASE_FIELDS}  # names params/custom columns must not take
 
-_PRECONDITION = {"PreconditionFailed", "412"}
+
+def _rows(blob):
+    return [] if blob is None else storage.table_from_bytes(blob).to_pylist()
 
 
-def _get_or_none(client, bucket, key):
-    try:
-        return client.get_object(Bucket=bucket, Key=key)
-    except ClientError as e:
-        if storage.error_code(e) in storage.MISSING_KEY_CODES:
-            return None
-        raise
+def upsert_run(client, bucket, key, row, custom_fields=(), retries=5):
+    """Insert or replace this run's ledger row; the CAS loop is schrein's CasRegister."""
+    schema = pa.schema(_BASE_FIELDS + list(custom_fields))
 
-
-def _read(client, bucket, key):
-    r = _get_or_none(client, bucket, key)
-    if r is None:
-        return [], None
-    table = pq.read_table(io.BytesIO(r["Body"].read()))
-    return table.to_pylist(), r["ETag"]
-
-
-def _write(client, bucket, key, rows, custom_fields, etag):
-    schema = pa.schema(_BASE_FIELDS + custom_fields)
-    cas = {"IfMatch" if etag else "IfNoneMatch": etag or "*"}
-    storage.put_parquet(client, bucket, key, pa.Table.from_pylist(rows, schema=schema), **cas)
-
-
-def upsert_run(client, bucket, key, row, custom_fields=(), retries=5, reset_on_conflict=False):
-    """Insert or replace this run's ledger row via S3 compare-and-swap.
-
-    `reset_on_conflict` (prototype flows): when existing rows no longer fit
-    the current schema — scratch flows churn types freely — start a fresh
-    ledger holding only this run instead of failing.
-    """
-    for _ in range(retries):
-        rows, etag = _read(client, bucket, key)
-        rows = [r for r in rows if r["run_id"] != row["run_id"]]
+    def fn(old):
+        rows = [r for r in _rows(old) if r["run_id"] != row["run_id"]]
         rows.append(dict(row))  # from_pylist fills any missing schema columns with null
         rows.sort(key=lambda r: r["started"])
-        try:
-            _write(client, bucket, key, rows, list(custom_fields), etag)
-            return
-        except ClientError as e:
-            if storage.error_code(e) in _PRECONDITION:
-                continue
-            raise
-        except (pa.ArrowInvalid, pa.ArrowTypeError):  # old rows don't fit the current schema
-            if not reset_on_conflict:
-                raise
-            try:
-                _write(client, bucket, key, [dict(row)], list(custom_fields), etag)
-                return
-            except ClientError as e:
-                if storage.error_code(e) in _PRECONDITION:  # lost the CAS race; re-read and retry
-                    continue
-                raise
-    raise RuntimeError(f"ledger CAS failed after {retries} retries: {key}")
+        return storage.parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
+
+    CasRegister(client, bucket, key).transact(fn, max_attempts=retries, base_delay=0.05)
 
 
 def read_all(client, bucket, key):
-    return _read(client, bucket, key)[0]
+    return _rows(storage.get_bytes_or_none(client, bucket, key))
 
 
 def write_meta(client, bucket, key, meta):
@@ -86,5 +44,5 @@ def write_meta(client, bucket, key, meta):
 
 
 def read_meta(client, bucket, key):
-    r = _get_or_none(client, bucket, key)
-    return None if r is None else json.loads(r["Body"].read())
+    blob = storage.get_bytes_or_none(client, bucket, key)
+    return None if blob is None else json.loads(blob)

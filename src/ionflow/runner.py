@@ -9,16 +9,16 @@ from multiprocessing import get_context
 
 import psutil
 
-from . import ledger, metrics
+from . import catalog, ledger, metrics
 from .config import Config
-from .git import commit_or_dirty, require_clean
+from .git import require_clean
 from .storage import (
     Layout,
     StepInput,
     connect,
     empty_relation,
     input_relation,
-    list_keys,
+    part_keys,
     s3_client,
     utc_now,
     write_part,
@@ -46,9 +46,8 @@ def _keyed_fanouts(dag):
     """Fan-out step name -> its output table's fanout_key column, keyed steps only."""
     out = {}
     for name, step in dag.steps.items():
-        key_col = getattr(step.output_table, "fanout_key_column", None)
-        if step.is_fanout and key_col is not None and key_col():
-            out[name] = key_col()
+        if step.is_fanout and step.output_table.fanout_key_column():
+            out[name] = step.output_table.fanout_key_column()
     return out
 
 
@@ -80,12 +79,8 @@ def _fair_share(workers):
 
 def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
-        keys = sorted(list_keys(client, cfg.bucket, layout.step_dir(run_id, dep) + "/"))
+        keys = part_keys(client, cfg.bucket, layout, run_id, dep)
         if not keys:  # empty fan-out: hand the reducer a typed empty table
-            if dep_table is None:
-                raise RuntimeError(
-                    f"empty fan-out from untyped step '{dep}'; declare its Table to type the empty input"
-                )
             return empty_relation(con, dep_table)
     else:
         keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
@@ -131,11 +126,10 @@ def _branch_worker(payload):
             os.environ.setdefault(var, str(threads))
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
-    # identity and namespace travel in the payload, never derived here: the
-    # re-imported class's __module__ is the loader's ("_mf_flow"), so its own
-    # flow_id() is wrong; and a mid-run edit flipping `prototype` must not
-    # split the run across namespaces
-    layout = Layout(cfg.prefix, payload["flow_id"], payload["proto"])
+    # identity travels in the payload, never derived here: the re-imported
+    # class's __module__ is the loader's ("_mf_flow"), so its own flow_id()
+    # is wrong
+    layout = Layout(cfg.prefix, payload["flow_id"])
     con = connect(cfg, threads=threads, memory_mb=memory_mb)
     client = s3_client(cfg)
     flow = flow_cls()
@@ -205,7 +199,6 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         "sample": use_processes,
         "retries": retries,
         "params": params,
-        "proto": flow_cls.prototype,
         "workers": workers,  # workers derive their own caps: same machine, one formula
     }
     if use_processes:
@@ -254,8 +247,7 @@ def run(
         raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
     if resume and params:
         raise ValueError("resume reuses the origin run's params; do not pass params")
-    # prototype runs relinquish provenance: dirty tree allowed, recorded honestly
-    commit = commit_or_dirty(repo) if flow_cls.prototype else require_clean(repo)
+    commit = require_clean(repo)
     started = utc_now()
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
@@ -264,6 +256,7 @@ def run(
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = connect(config)
+    cat = catalog.Catalog(config, flow_cls)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
@@ -333,9 +326,8 @@ def run(
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
-            # a mixed-commit run must be a visible, deliberate choice; prototypes
-            # already relinquish provenance, so they stay warn-only
-            if not (allow_commit_drift or flow_cls.prototype):
+            # a mixed-commit run must be a visible, deliberate choice
+            if not allow_commit_drift:
                 raise CommitDriftError(
                     f"origin run {origin_run_id} is at commit {origin.get('commit')}, HEAD is "
                     f"{commit}; reused steps would keep old-code outputs. Pass "
@@ -388,14 +380,13 @@ def run(
                 "finished": finished,
                 "commit": commit,
                 "origin_run_id": origin_run_id,
-                "steps_complete": sorted(completed),
                 **params,
                 **(custom or {}),
             },
             custom_fields,
-            reset_on_conflict=flow_cls.prototype,  # scratch ledger history is disposable
         )
 
+    cat.ensure_tables(flow_cls)  # before any run object exists: a run implies a catalog
     flush()
     upsert("running")
 
@@ -479,6 +470,7 @@ def run(
                 result = _call(con, client, config, layout, flow, step, run_id, None)
                 write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
                 completed.add(_key(name, 0))
+            cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
             flush()
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]

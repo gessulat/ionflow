@@ -1,38 +1,44 @@
-from . import metrics
+import duckdb
+
+from . import catalog, metrics
 from .storage import (
     Layout,
     connect,
-    is_metrics_key,
-    list_keys,
     object_age,
-    parse_key,
     read_parquet_sql,
     s3_client,
     uri,
     utc_now,
 )
 
+# a flow with no runs has no ledger object; the view must still exist and type
+_EMPTY_LEDGER_SQL = (
+    "SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
+    'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", '
+    "NULL::VARCHAR AS origin_run_id WHERE false"
+)
+
 
 def _empty_view_sql(table):
-    """Typed, zero-row SELECT so a step that produced no parts is still queryable.
+    """Typed, zero-row SELECT standing in for a table with nothing on S3 yet.
 
-    `run_id` goes last, matching where hive partitioning puts it in real views.
-    `table=None` (untyped prototype step) yields a run_id-only empty view.
+    `run_id` goes last, matching its position in the catalog views.
     """
-    cols = [] if table is None else [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
+    cols = [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
-def _scan_parts(client, config, layout):
-    """(step names with parts, any metrics present) from one LIST of runs/."""
-    steps, has_metrics = set(), False
-    ns_prefix = layout.root.removesuffix(layout.flow)  # 'mf/' or 'mf/_proto/'
-    for key in list_keys(client, config.bucket, layout.root + "/runs/"):
-        parsed = parse_key(ns_prefix, key)
-        if parsed and parsed[1]:
-            steps.add(parsed[1])
-        has_metrics = has_metrics or is_metrics_key(key)
-    return steps, has_metrics
+def _view_or_empty(con, name, body, empty_table):
+    """CREATE VIEW over S3 objects, falling back to a typed empty view.
+
+    DuckDB binds read_parquet at CREATE time, so an absent glob/object raises
+    here — that IS the "nothing on S3 yet" signal, no LIST needed.
+    """
+    try:
+        con.execute(f"CREATE VIEW {name} AS {body}")
+    except duckdb.IOException:
+        empty = _EMPTY_LEDGER_SQL if empty_table is None else _empty_view_sql(empty_table)
+        con.execute(f"CREATE VIEW {name} AS {empty}")
 
 
 def step_rows(con, step, run_id, limit=100):
@@ -89,7 +95,14 @@ def ledger_with_liveness(flow_cls, config, con=None):
     A SIGKILL'd run stays `running` in the ledger forever; this derives the
     honest display state at read time (one HEAD per running run).
     """
-    con = con or duck(flow_cls, config)
+    if con is None:  # ledger-only callers (ls) skip the catalog attach entirely
+        con = connect(config)
+        _view_or_empty(
+            con,
+            "ledger",
+            f"SELECT * FROM read_parquet('{uri(config, Layout.for_flow(config, flow_cls).ledger)}')",
+            None,
+        )
     layout = Layout.for_flow(config, flow_cls)
     stale = _stale_running(con, s3_client(config), config, layout)
     if not stale:
@@ -103,22 +116,28 @@ def ledger_with_liveness(flow_cls, config, con=None):
 def duck(flow_cls, config):
     """DuckDB connection with a view per step table + a `ledger` view.
 
-    Views glob every run, so `SELECT ... WHERE run_id = ...` time-travels and
-    new runs appear with nothing to sync.
+    Views sit over the flow's DuckLake catalog, attached read-only (a
+    consistent snapshot), so `SELECT ... WHERE run_id = ...` time-travels. A
+    flow that never ran gets typed empty views; runs without a catalog mean
+    the register was lost — refused with a pointer at `catalog-backfill`.
+    `ledger` and `metrics` keep their own plumbing: run bookkeeping and
+    telemetry are not lake data.
     """
     con = connect(config)
     layout = Layout.for_flow(config, flow_cls)
-    present, has_metrics = _scan_parts(s3_client(config), config, layout)
-    for name, step in flow_cls._dag.steps.items():
-        if name in present:
-            body = read_parquet_sql(uri(config, layout.table_glob(name)))
-        else:
-            body = _empty_view_sql(step.output_table)
-        con.execute(f"CREATE VIEW {name} AS {body}")
-    if has_metrics:
-        metrics_body = read_parquet_sql(uri(config, layout.metrics_glob))
-    else:
-        metrics_body = _empty_view_sql(metrics.Sample)
-    con.execute(f"CREATE VIEW metrics AS {metrics_body}")
-    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{uri(config, layout.ledger)}')")
+    if catalog.Catalog(config, flow_cls).attach_readonly(con):
+        for name in flow_cls._dag.steps:
+            # run_id last: keeps one column order between real and empty views
+            con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
+    elif object_age(s3_client(config), config.bucket, layout.ledger) is not None:
+        # runs happened (genesis precedes the first run object) but the register is gone
+        raise RuntimeError(
+            f"{flow_cls.flow_id()}: runs exist but no catalog does; "
+            f"run `ionflow catalog-backfill` to rebuild it from the run folders"
+        )
+    else:  # never ran
+        for name, step in flow_cls._dag.steps.items():
+            con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
+    _view_or_empty(con, "metrics", read_parquet_sql(uri(config, layout.metrics_glob)), metrics.Sample)
+    _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{uri(config, layout.ledger)}')", None)
     return con

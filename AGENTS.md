@@ -16,7 +16,7 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 
 - Tests run **parallel by default** (`-n 5 --dist worksteal`, set in pyproject).
 - The heaviest integration tests are marked `slow` and **skipped by default**:
-  CLI end-to-end, process-pool run, and every multi-run resume test (classic and
+  CLI end-to-end, process-pool run, and every multi-run resume test (plain and
   keyed/incremental). `-m ""` includes them.
   Anything touching `runner.py`, `cli.py`, or resume semantics MUST pass `-m ""`.
 - Doctests live in modules and run automatically (`--doctest-modules` in addopts).
@@ -38,7 +38,7 @@ uv run ionflow run examples.embed:EmbedDocs            # sizing: --max-workers/-
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
 uv run ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
 uv run ionflow stats examples.embed:EmbedDocs          # per-step resources, latest run
-uv run ionflow publish myproj:Annotate <run_id> <step> s3://bucket/stable/x.parquet
+uv run ionflow publish myproj:Annotate <run_id> <step> blessed_table  # --to s3://bucket/prefix
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -86,12 +86,11 @@ ionflow query myproj.flows:Training \
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
   (written from run start); resume reuses the origin's params from `_meta.json`.
-  `Prototype` mixin (sets `prototype = True`; the mixin is the only documented
-  spelling): scratch namespace (`_proto/`), dirty git
-  allowed, untyped steps allowed, drift check skipped, `ionflow clean` wipes it.
+  There is no prototype/scratch mode (0015): every flow carries the full
+  guarantees — clean git, typed steps, a catalog — from its first run.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume (refuses commit drift unless `allow_commit_drift`; prototypes
-  warn), in-worker branch retries (`branch_retries`), git gate,
+  per-branch resume (refuses commit drift unless `allow_commit_drift`),
+  in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
   `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker
@@ -107,16 +106,17 @@ ionflow query myproj.flows:Training \
   keys per fan-out are recorded as `fanout_keys` in `_meta.json`.
   `resume=<run_id>|"latest"` is the single resume spelling (0011), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
-- `publish.py` — copy one step's output from a complete run to a stable S3 key
-  (optional `--where` filter) + `<dest>.meta.json` provenance sidecar; refuses an
-  existing dest unless forced. A copy, never a pointer (0009).
+- `publish.py` — bless one step's output from a complete run into the publish
+  lake (a schrein DuckLake, default `<prefix>/published/`, `--to` for any
+  bucket): atomic replace in one CAS commit, snapshot history instead of
+  --force, `publications` provenance table, optional `--where` filter.
+  Still a copy into the lake's data path, never a pointer (0009).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode branch workers each flush their own
   `_metrics_<step>_<branch>.parquet` (crash-durable branch samples); the `metrics`
   view unions all of them.
-- `storage.py` — S3 `Layout` (key scheme) + `parse_key` (its inverse), boto3 I/O,
-  DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
+- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0013).
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
@@ -129,8 +129,20 @@ ionflow query myproj.flows:Training \
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `ledger.py`  — append-only `ledger.parquet` via S3 conditional-write (If-Match) CAS;
-  per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz in DuckDB).
+- `ledger.py`  — append-only `ledger.parquet`; the CAS loop is `schrein.CasRegister`
+  (0014 — roles stay separate: the ledger is run bookkeeping, never a catalog).
+  Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
+  in DuckDB).
+- `catalog.py` — every flow's DuckLake catalog (0015 — the only
+  read/registration mode; no config flag): at the flow root, one table per
+  step, run_id inferred from the parts' hive paths at registration (parts
+  never rewritten). One CAS commit per completed step by the orchestrator;
+  registration failure fails the run. `duck()` views an attached snapshot
+  (run_id kept last) and refuses a pre-catalog bucket, pointing at
+  `ionflow catalog-backfill` (the corruption-recovery path; there is no
+  other read path). No schema-migration workflow, deliberately: schema
+  change = new flow name, or backfill --replace when old parts conform.
+  Ledger/meta/metrics untouched.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
 - `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
@@ -143,10 +155,9 @@ ionflow query myproj.flows:Training \
 
 - Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
   **no pandas/polars in core** (steps may return anything arrow-convertible).
-- Runs refuse a dirty git tree (no override for stable flows; `Prototype` flows run
-  dirty and record `dirty:<sha>`). Tests always create/commit a repo first.
-- Untyped steps (no return annotation) are a class-definition error except in
-  `Prototype` flows, where the parquet schema is inferred at write time.
+- Runs refuse a dirty git tree, without exception. Tests always create/commit
+  a repo first.
+- Untyped steps (no return annotation) are a class-definition error.
 - Python docs: a one-liner, plus short prose only for non-obvious constraints;
   doctests for examples (they run in the suite).
 - Run folders on S3 are immutable; the ledger is the only mutated object (CAS).
@@ -154,3 +165,22 @@ ionflow query myproj.flows:Training \
 - A run killed by SIGKILL stays `running` in the ledger forever (can't catch it),
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
   has been quiet for 300s; its metrics survive up to the last flush.
+
+## schrein (uv workspace member, `schrein/`)
+
+Sibling library: zero-infrastructure DuckLake catalogs on S3 conditional
+writes (DuckLake only — schrein decision 0004). Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
+M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
+two things — `CasRegister` under the ledger (0014) and `DuckLake` under
+the catalog (0015); schrein must never import ionflow. Its decisions live
+in `schrein/docs/decisions/` (own numbering).
+
+- Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
+  (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't
+  collect it.
+- Its tests launch `schrein.testing`, NOT bare moto: moto's
+  conditional PUTs race under threads and silently lose updates
+  (schrein decision 0003).
+- The ducklake extension loads from the `duckdb-extension-ducklake` PyPI
+  wheel when `INSTALL` can't reach extensions.duckdb.org (decision 0002);
+  the wheel pins its exact duckdb version, so upgrade both together.

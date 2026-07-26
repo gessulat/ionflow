@@ -4,20 +4,6 @@ from .dag import build_dag
 from .publish import publish as _publish
 
 
-class Prototype:
-    """Mixin marking a flow as a prototype: `class MyFlow(Prototype, Flow)`.
-
-    Prototype flows live in a scratch namespace (`<prefix>/_proto/`), may run
-    from a dirty git tree (commit recorded as `dirty:<sha>`), may omit step
-    output schemas (inferred at write, validation skipped), skip the startup
-    schema-drift check, and can be wiped with `ionflow clean`. Remove the
-    mixin to promote: the stable namespace starts clean and every guarantee
-    (clean git, declared+validated schemas, immutable history) applies again.
-    """
-
-    prototype = True
-
-
 class Flow:
     """Base class. Subclass it; each public method is a step.
 
@@ -34,7 +20,6 @@ class Flow:
 
     _registry: dict[str, type] = {}
     config = None  # bound by the runner (orchestrator and branch workers)
-    prototype = False  # flipped by the Prototype mixin (the documented spelling); see Prototype
     Ledger = None  # subclass: `class Ledger(LedgerColumns)` — extra ledger columns
     Params = None  # subclass: `class Params(FlowParams)` — typed run inputs
 
@@ -66,9 +51,9 @@ class Flow:
         return query.duck(cls, config or Config.load())
 
     @classmethod
-    def publish(cls, run_id, step, dest, config=None, where=None, force=False):
-        """Copy `step`'s output from `run_id` to a stable S3 path (plus provenance sidecar)."""
-        return _publish(cls, config or Config.load(), run_id, step, dest, where=where, force=force)
+    def publish(cls, run_id, step, table, config=None, where=None, dest=None):
+        """Bless `step`'s output from `run_id` as `table` in the publish DuckLake."""
+        return _publish(cls, config or Config.load(), run_id, step, table, where=where, dest=dest)
 
     @classmethod
     def ledger_columns(cls):

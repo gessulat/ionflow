@@ -2,6 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
+[manifest]
+members = [
+    "ionflow",
+    "schrein",
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -391,6 +397,21 @@ wheels = [
 ]
 
 [[package]]
+name = "duckdb-extension-ducklake"
+version = "1.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "duckdb" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/5b/35f5a851b557b04b5b2d5b25151e717287ca416d46f8e6501dca1e6ebd69/duckdb_extension_ducklake-1.5.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ffdae06d697ec015d11173e9bbdce7ada8548d9d8e3bd6fc54b8285814f3cfa3", size = 8398457, upload-time = "2026-07-17T19:19:42.343Z" },
+    { url = "https://files.pythonhosted.org/packages/10/09/51b7616626977eb81a40a8306c432f9d1cae5578b3a063fb840fc16f7050/duckdb_extension_ducklake-1.5.4-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:9c7e105c9c584c7fe0a3ca5f99ea27e37fb9f176bffab6e324d8751389bc6e50", size = 9529843, upload-time = "2026-07-17T19:19:44.538Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/ed/dc82998187f63763e9db5b55812a15fc0a926e049755c28590b50b3c0717/duckdb_extension_ducklake-1.5.4-py3-none-manylinux2014_aarch64.whl", hash = "sha256:2e382024b733f6368f897e3b59dcd7a82cbeba0673e9adb95ea84b1971a273a5", size = 11092304, upload-time = "2026-07-17T19:19:46.728Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/69/2a97c31f738e01822f387f6ac26d842e727c547b0eaf67fc754310291479/duckdb_extension_ducklake-1.5.4-py3-none-manylinux2014_x86_64.whl", hash = "sha256:b8ae525e84260a5fb6050fc1dd933f59eb389259b2c84ef718d0a793f7c742e6", size = 12633410, upload-time = "2026-07-17T19:19:48.763Z" },
+    { url = "https://files.pythonhosted.org/packages/09/ec/1659f100dcd9693b1e62b8bb67625c61f96b05cbbd00da4cffbd283c48ac/duckdb_extension_ducklake-1.5.4-py3-none-win_amd64.whl", hash = "sha256:8fe3c27aebc2867e4ca36a1e98f37c80e9c3ecd650344b17022d9caab8dbead7", size = 8529750, upload-time = "2026-07-17T19:19:50.952Z" },
+]
+
+[[package]]
 name = "execnet"
 version = "2.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -465,6 +486,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "psutil" },
     { name = "pyarrow" },
+    { name = "schrein" },
     { name = "textual" },
     { name = "typer" },
 ]
@@ -485,6 +507,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.4" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
+    { name = "schrein", editable = "schrein" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "typer", specifier = ">=0.26.8" },
 ]
@@ -1550,6 +1573,37 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f6/94/dcdaeb1713cab9c84def276cfac7388b17c7d9855bbcfe88d77e4dbafd44/s3transfer-0.19.0.tar.gz", hash = "sha256:ce436931687addc4c1712d52d40b32f53e88315723f107ffa20ba82b05a0f685", size = 165171, upload-time = "2026-06-16T19:44:51.599Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/5f/4c174edad94f82de888ac00a5ddd8d07b35609b6c94f0bdf4d74af57703e/s3transfer-0.19.0-py3-none-any.whl", hash = "sha256:777cc2415536f1debadb5c2ef7779275d0fc0fe0e042411cdd6caebeb2685262", size = 90101, upload-time = "2026-06-16T19:44:50.439Z" },
+]
+
+[[package]]
+name = "schrein"
+version = "0.0.1"
+source = { editable = "schrein" }
+dependencies = [
+    { name = "boto3" },
+    { name = "duckdb" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "duckdb-extension-ducklake" },
+    { name = "moto", extra = ["s3", "server"] },
+    { name = "pytest" },
+    { name = "pytest-xdist" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", specifier = ">=1.35" },
+    { name = "duckdb", specifier = ">=1.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "duckdb-extension-ducklake", specifier = ">=1.5.4" },
+    { name = "moto", extras = ["s3", "server"], specifier = ">=5.2.2" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-xdist", specifier = ">=3" },
 ]
 
 [[package]]

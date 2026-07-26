@@ -291,6 +291,20 @@ class Table:
         return next((n for n, c in cls._columns.items() if c.fanout_key), None)
 
     @classmethod
+    def persisted_ddl(cls):
+        """Column DDL as a reader sees it: persisted types, NOT NULL only.
+
+        What DuckLake tables (catalog and publish lake) are created from —
+        PK/CHECK stay ionflow-side (0003).
+
+        >>> Table.make("T", {"x": int, "s": str | None}).persisted_ddl()
+        'x BIGINT NOT NULL, s VARCHAR'
+        """
+        return ", ".join(
+            f"{n} {c.persisted_type()}{'' if c.nullable else ' NOT NULL'}" for n, c in cls._columns.items()
+        )
+
+    @classmethod
     def ddl(cls, name, temp=False):
         kw = "TEMP TABLE" if temp else "TABLE"
         lines = ",\n".join(f"  {c.ddl(n)}" for n, c in cls._columns.items())

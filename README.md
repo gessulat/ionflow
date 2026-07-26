@@ -232,7 +232,14 @@ the run's meta; `resume` always reuses the origin run's params. Types are limite
 ## Query every run as one database
 
 `duck()` returns a DuckDB connection with a **view per step table** plus a `ledger` view.
-Views glob every run, so a new run shows up with nothing to sync — `run_id` is a column.
+Views read the flow's **DuckLake catalog** (attached read-only as a consistent
+snapshot), so a new run shows up with nothing to sync — `run_id` is a column.
+Anyone with stock DuckDB can attach the catalog directly, no ionflow needed:
+
+```sql
+INSTALL ducklake; LOAD ducklake;
+ATTACH 'ducklake:s3://bucket/prefix/mymodule.EmbedDocs/catalog.ducklake' AS lake (READ_ONLY);
+```
 
 ```python
 con = EmbedDocs.duck()
@@ -337,38 +344,6 @@ arrive with the final write). The flush also doubles as a **heartbeat**: `ls`
 and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 5+ minutes — the honest state for a process that was killed without cleanup.
 
-## Prototyping
-
-Iterating on a flow fights the production guarantees (clean git, declared schemas,
-immutable history). While reshaping `EmbedDocs`, mark it as a prototype to relax
-them — visibly, in code:
-
-```python
-from ionflow import Flow, Prototype
-
-class EmbedDocs(Prototype, Flow):
-    def docs(self):                             # untyped step: schema inferred at write
-        return pa.table({"doc_id": [9], "source": ["scratch"], "text": ["…"]})
-
-    def by_source(self, docs) -> Fanout[Doc]:   # typed steps still validate as usual
-        ...
-```
-
-Prototype flows:
-
-- run in a **scratch namespace** (`<prefix>/_proto/<flow_id>/…`) — stable views, drift
-  checks, and other clients never see the churn, and stable data is never touched;
-- may run from a **dirty git tree** (ledger records `dirty:<sha>`);
-- may **omit step output schemas** (untyped steps can't fan out — `by_source`
-  keeps its `Fanout[...]` annotation);
-- tolerate ledger schema churn (a conflicting old scratch ledger is reset);
-- can be wiped: `ionflow clean mymodule:EmbedDocs` (refused for stable flows —
-  deletion is explicit and scratch-only, never a side effect of running).
-
-Remove the mixin to promote: the flow points back at the stable namespace, and every
-guarantee applies again from the first stable run. Untyped steps in a non-prototype
-flow are a **class-definition error**.
-
 ## Resume
 
 ```bash
@@ -381,8 +356,7 @@ partially-failed fan-out re-runs only its failed branches.
 
 If HEAD differs from the origin run's commit, resume **refuses by default** — reused
 steps would keep their old-code outputs, mixing two commits in one run. Pass
-`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately;
-prototype flows only warn, since they relinquish provenance anyway.
+`--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately.
 
 ## Incremental runs (growing corpora)
 
@@ -420,28 +394,39 @@ it changes the commit (recompute without `--resume`, or force with
 `--allow-commit-drift`); a real flow lists external inputs via `self.config`, and
 growing the corpus doesn't touch the repo.
 
-## Publish (stable paths for consumers)
+## Publish (blessed tables for consumers)
 
-Run outputs live in immutable `run_id=` folders. Consumers that just want "the current
-embeddings at a fixed path" — a vector-index builder, a cron job, another team —
-shouldn't need ionflow or a run_id:
+A flow's catalog holds *every* run — including failed ones — and knows nothing about
+which run you trust. Consumers that just want "the current embeddings" — a
+vector-index builder, a cron job, another team — shouldn't need ionflow, a run_id,
+or access to the pipeline bucket:
 
 ```bash
-ionflow publish mymodule:EmbedDocs <run_id> vectors s3://bucket/stable/embeddings.parquet \
-    --where "source = 'wiki'"
+ionflow publish mymodule:EmbedDocs <run_id> vectors embeddings --where "source = 'wiki'"
+# --to s3://other-bucket/consumers   to publish into a lake consumers can reach
 ```
 
-This copies the step's output (optionally filtered) to one parquet object plus a
-`<dest>.meta.json` sidecar recording flow, run_id, commit, filter, and publish time.
-An existing destination is refused unless you pass `--force` (replacing is a single
-atomic PUT). Note that two related files published one after the other can be observed
-mid-swap — consumers needing cross-file consistency should compare the sidecars' run_id.
+This copies the step's output (optionally filtered) into the **publish lake** — a
+separate DuckLake at `<prefix>/published/` holding only blessed tables — and swaps
+it in as `embeddings` in one atomic commit: readers see the previous version or the
+new one, never a mix, even across several tables published back to back. Previous
+versions stay reachable through DuckLake snapshots (no `--force` needed to
+replace), and a `publications` table records flow, run_id, step, filter, commit,
+and publish time for every blessing. Consumers attach with stock DuckDB:
+
+```sql
+INSTALL ducklake; LOAD ducklake;
+ATTACH 'ducklake:s3://bucket/prefix/published/catalog.ducklake' AS pub (READ_ONLY);
+SELECT * FROM pub.embeddings;
+```
 
 ## Storage layout
 
 ```
 s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
   ledger.parquet                           #   e.g. mymodule.EmbedDocs
+  catalog.ducklake                         # the flow's DuckLake catalog (schrein
+  _lake/                                   #   CAS register); _lake/ = catalog-owned files
   runs/                                    # ledger: append-only, updated via S3 CAS
     run_id=<id>/
       _meta.json                           # live run state (progress, custom columns)
@@ -451,9 +436,12 @@ s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class na
       summary/part_0.parquet
 ```
 
-Run folders are immutable, which is why no catalog database is needed — DuckDB reads the
-Parquet directly and the ledger uses an S3 conditional-write (`If-Match`) for safe
-concurrent appends.
+Run folders are immutable. The catalog registers each completed step's parts
+(metadata only — parts are never rewritten; `run_id` comes from the hive path)
+in one CAS commit per step, and both the catalog and the ledger swap via S3
+conditional writes (`If-Match`), so concurrent runs stay safe with no extra
+infrastructure. If the catalog object is ever lost or corrupted,
+`ionflow catalog-backfill mymodule:EmbedDocs` rebuilds it from the run folders.
 
 A flow's durable identity is its **module-qualified class name** (`flow_id`), so
 same-named classes in different modules never share data. The flip side: renaming a

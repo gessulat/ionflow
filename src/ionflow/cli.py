@@ -156,13 +156,13 @@ def publish(
     flow: str,
     run_id: str,
     step: str,
-    dest: str,
+    table: str,
     where: str = typer.Option(None, "--where", help="SQL predicate selecting the rows to publish"),
-    force: bool = typer.Option(False, "--force", help="Replace the destination object if it exists"),
+    to: str = typer.Option(None, "--to", help="Publish lake location (s3://bucket/prefix); default <prefix>/published"),
 ):
-    """Copy STEP's output from RUN_ID to DEST (a stable S3 path) with a provenance sidecar."""
-    m = _load(flow).publish(run_id, step, dest, config=_config_or_setup(), where=where, force=force)
-    typer.echo(f"published {m['flow']}/{m['step']} from run {m['run_id']} to {dest}")
+    """Bless STEP's output from RUN_ID as TABLE in the publish DuckLake (atomic replace)."""
+    m = _load(flow).publish(run_id, step, table, config=_config_or_setup(), where=where, dest=to)
+    typer.echo(f"published {m['flow']}/{m['step']} from run {m['run_id']} as table '{table}'")
 
 
 @app.command()
@@ -196,23 +196,17 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
     step_stats(con, run_id).show()
 
 
-@app.command()
-def clean(
+@app.command("catalog-backfill")
+def catalog_backfill(
     flow: str,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    replace: bool = typer.Option(False, "--replace", help="Rebuild an existing catalog from the run folders"),
 ):
-    """Delete a PROTOTYPE flow's scratch runs. Refused for stable flows."""
+    """Rebuild a flow's catalog from its run folders (recovery for a lost register)."""
+    from . import catalog
+
     cls = _load(flow)
-    if not cls.prototype:
-        typer.echo(f"{cls.__name__} is not a prototype flow; stable runs are immutable.")
-        raise typer.Exit(1)
-    cfg = _config_or_setup()
-    layout = storage.Layout.for_flow(cfg, cls)
-    target = storage.uri(cfg, layout.root + "/")
-    if not yes and not typer.confirm(f"Delete ALL scratch data under {target}?"):
-        raise typer.Exit(0)
-    n = storage.delete_prefix(storage.s3_client(cfg), cfg.bucket, layout.root + "/")
-    typer.echo(f"deleted {n} objects under {target}")
+    n = catalog.backfill(cls, _config_or_setup(), replace=replace)
+    typer.echo(f"registered {n} complete run(s) into the catalog")
 
 
 def main():
