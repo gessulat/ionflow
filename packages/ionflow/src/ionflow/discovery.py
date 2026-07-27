@@ -24,8 +24,8 @@ def discover_flows(package):
 
 
 def scan_runs(config):
-    """Flow names with a ledger on S3 — one LIST of the bucket prefix."""
-    client = storage.s3_client(config)
+    """Flow names with a ledger in the store — one LIST of the prefix."""
+    client = storage.make_client(config)
     prefix = config.prefix + "/"
     suffix = "/ledger.parquet"
     return {
@@ -65,7 +65,7 @@ def startup_warnings(flows, config, with_data):
     warnings = []
     for name in sorted(with_data - set(flows)):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
-    client = storage.s3_client(config)  # one client serves every flow's check
+    client = storage.make_client(config)  # one client serves every flow's check
     for name, cls in flows.items():
         if name not in with_data:
             continue

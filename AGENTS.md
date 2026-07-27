@@ -1,14 +1,17 @@
 # ionflow — agent notes
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
-persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
+persisted as Parquet on S3. Only infra: one S3-compatible bucket — or none:
+local mode (`Config.local_dir`, `ionflow setup --local`) stores everything in a
+directory via schrein's `LocalClient`, `ionflow sync` pushes a flow's history
+to a bucket later (0016). DuckDB-first.
 See `packages/ionflow/README.md` for user-facing docs. Design decisions (the *why*
 behind non-obvious choices) live in `packages/ionflow/docs/decisions/` — check there
 before changing architecture, add a numbered record when you make such a decision.
 
 ## Repo layout (uv workspace)
 
-The repo root is a **workspace root only** — no package lives there (decision 0016).
+The repo root is a **workspace root only** — no package lives there (decision 0017).
 `ionflow` and `schrein` are siblings under `packages/`, each with its own
 `pyproject.toml`, dev group, test suite, README, `docs/decisions/` and LICENSE:
 
@@ -31,7 +34,7 @@ uv run --directory packages/ionflow pytest -m ""  # FULL suite — run this befo
 uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
 ```
 
-- There is **no root test suite** (decision 0016): always pass `--directory` (or
+- There is **no root test suite** (decision 0017): always pass `--directory` (or
   `cd` into the package). A bare `uv run pytest` at the root is a mistake.
 - Tests run **parallel by default** (`-n 5 --dist worksteal`, set in the member's
   pyproject).
@@ -56,7 +59,8 @@ uv run ruff check             # lint + typecheck are repo-wide, run from the roo
 uv run ty check
 uv build --all-packages       # both wheels into dist/
 uv run ionflow               # bare command opens the TUI
-uv run ionflow setup         # wizard: writes .ionflow/config (TOML)
+uv run ionflow setup         # wizard: writes .ionflow/config (TOML); --local = bucket-free dir store
+uv run ionflow sync myproj:Annotate --to s3://bucket   # push local-store history to a bucket
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
 uv run ionflow publish myproj:Annotate <run_id> <step> blessed_table  # --to s3://bucket/prefix
 
@@ -161,7 +165,9 @@ ionflow query myproj.flows:Training \
   them. Sub-steps running concurrently in one worker share one label
   (`upload_db+search`) and NULL means the worker is between sub-steps; in thread
   mode the group answers to the fan-out's name (one process interleaves items).
-- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
+- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections.
+  `make_client(cfg)` is the one client factory (boto3 or `LocalClient`);
+  `uri()`/`connect()`/`ducklake_at()` are the only spots that know local vs S3. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0010).
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
@@ -194,6 +200,10 @@ ionflow query myproj.flows:Training \
   LIST); schema-drift check (one parquet footer per step).
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
+  Exactly one of `bucket` / `local_dir` (relative `local_dir` anchors at the repo root).
+- `sync.py`    — local -> S3 migration: copy immutable run folders, MERGE ledger rows
+  (CAS, idempotent by run_id), rebuild the target catalog via `catalog.backfill`
+  (a DuckLake catalog holds absolute paths, so it is re-derived, never copied).
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
 
 ## Conventions & gotchas
@@ -217,7 +227,9 @@ ionflow query myproj.flows:Training \
 ## schrein (sibling workspace package, `packages/schrein/`)
 
 Sibling library: zero-infrastructure DuckLake catalogs on S3 conditional
-writes (DuckLake only — schrein decision 0004). Spec:
+writes (DuckLake only — schrein decision 0004), or on a plain directory via
+`LocalClient` — a boto3-shaped client with enforced conditional writes,
+single-host by design (schrein decision 0005). Spec:
 `packages/schrein/docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
 two things — `CasRegister` under the ledger (0011) and `DuckLake` under

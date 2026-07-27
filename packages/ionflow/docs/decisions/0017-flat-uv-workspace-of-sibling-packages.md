@@ -1,4 +1,4 @@
-# 0016 — the repo is a flat uv workspace; ionflow and schrein are siblings
+# 0017 — the repo is a flat uv workspace; ionflow and schrein are siblings
 
 ## Context
 
@@ -78,4 +78,4 @@ uv run --directory packages/schrein pytest
 Rejected: keeping ionflow at the root and moving only schrein deeper. It
 preserves the hierarchy the dependency graph does not have.
 
-See schrein decision 0005 for the same move from schrein's side.
+See schrein decision 0006 for the same move from schrein's side.

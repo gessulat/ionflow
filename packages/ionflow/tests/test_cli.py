@@ -85,6 +85,22 @@ def test_cli_setup_writes_config(clean_repo, monkeypatch):
     assert ".ionflow/" in (path.parent.parent / ".gitignore").read_text()
 
 
+def test_cli_setup_local_writes_config(clean_repo, monkeypatch):
+    monkeypatch.chdir(clean_repo)
+    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: False)  # irrelevant locally
+
+    # local dir (default), flows(blank), gitignore? -> yes
+    r = runner.invoke(cli.app, ["setup", "--local"], input="\n\ny\n")
+    assert r.exit_code == 0, r.output
+    assert "OK" in r.output  # store verified without any AWS credentials
+
+    path = config.find_config(clean_repo)
+    cfg = tomllib.loads(path.read_text())
+    assert cfg == {"local_dir": ".ionflow/data", "prefix": "ionflow"}
+    loaded = config.Config.load(str(path.parent.parent))
+    assert loaded.bucket is None and loaded.local_dir.endswith(".ionflow/data")
+
+
 def test_cli_run_without_config_errors(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: must contain no .ionflow/config
     monkeypatch.delenv("IONFLOW_BUCKET", raising=False)

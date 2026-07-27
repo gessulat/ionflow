@@ -1,4 +1,4 @@
-# Workspace root only: no package lives here (ionflow decision 0016).
+# Workspace root only: no package lives here (ionflow decision 0017).
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -16,7 +16,7 @@ dev = [
 # lazy relation) — a nominal checker rejects that by design.
 include = ["packages/ionflow/src"]
 
-# No `[tool.pytest.ini_options]` here: tests run per member (decision 0016),
+# No `[tool.pytest.ini_options]` here: tests run per member (decision 0017),
 # with `uv run --directory packages/<name> pytest`.
 
 # Rules span both members and live here; source roots do not — each member

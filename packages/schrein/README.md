@@ -75,7 +75,7 @@ at commits-per-minute. Backblaze B2 is unsupported (no `If-Match`).
 ## Development
 
 A sibling package in the ionflow repo's uv workspace, under
-`packages/schrein/` (see `docs/decisions/0005`). From the repo root:
+`packages/schrein/` (see `docs/decisions/0006`). From the repo root:
 
 ```bash
 uv sync                                          # one env for the whole workspace

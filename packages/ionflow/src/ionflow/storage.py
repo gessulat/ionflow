@@ -13,7 +13,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
-from schrein.ducklake import load_extension
+from schrein import CasRegister, DuckLake, LocalClient
+from schrein.ducklake import CATALOG_KEY, load_extension
 
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
@@ -106,6 +107,12 @@ def s3_client(cfg):
     )
 
 
+def make_client(cfg):
+    """The store client for this config: boto3 on S3, schrein's LocalClient in
+    local mode. Same call surface either way — callers never branch."""
+    return LocalClient(cfg.local_dir) if cfg.local_dir else s3_client(cfg)
+
+
 def aws_credentials_available():
     """True if the standard AWS chain resolves credentials (offline check)."""
     return boto3.Session().get_credentials() is not None
@@ -113,6 +120,12 @@ def aws_credentials_available():
 
 def verify_access(cfg):
     """Best-effort reachability check; returns (ok, message)."""
+    if cfg.local_dir:
+        try:
+            LocalClient(cfg.local_dir)  # creates the root; raises if it can't
+            return True, f"local store '{cfg.local_dir}' is writable"
+        except Exception as e:  # noqa: BLE001 — surface any failure to the user
+            return False, f"cannot use local store '{cfg.local_dir}': {e}"
     try:
         s3_client(cfg).head_bucket(Bucket=cfg.bucket)
         return True, f"bucket '{cfg.bucket}' is reachable"
@@ -121,7 +134,34 @@ def verify_access(cfg):
 
 
 def uri(cfg, key):
-    return f"s3://{cfg.bucket}/{key}"
+    """The DuckDB-readable location of `key`: an s3:// URI, or a plain path in
+    local mode (local_dir is absolute once Config.load resolves it)."""
+    return f"{cfg.local_dir}/{key}" if cfg.local_dir else f"s3://{cfg.bucket}/{key}"
+
+
+def parse_dest(dest, require_prefix=False):
+    """'s3://bucket[/prefix]' -> (bucket, prefix | None) — the one parser of --to.
+
+    >>> parse_dest("s3://b/pre/fix/")
+    ('b', 'pre/fix')
+    """
+    bucket, _, prefix = dest.removeprefix("s3://").partition("/")
+    if not (dest.startswith("s3://") and bucket and (prefix or not require_prefix)):
+        want = "s3://bucket/prefix" if require_prefix else "s3://bucket[/prefix]"
+        raise ValueError(f"destination must be {want}, got: {dest}")
+    return bucket, prefix.rstrip("/") or None
+
+
+def ducklake_at(cfg, prefix, data_subdir="data", client=None):
+    """A schrein DuckLake under this config's store at `prefix` — the one place
+    catalog/publish learn about local vs S3 (data_path and secret differ)."""
+    client = client if client is not None else make_client(cfg)
+    if cfg.local_dir:
+        # "local" is a display label only (LocalClient ignores Bucket); it keeps
+        # CAS error messages readable where cfg.bucket would print None
+        register = CasRegister(client, "local", f"{prefix}/{CATALOG_KEY}")
+        return DuckLake(register, data_path=uri(cfg, f"{prefix}/{data_subdir}/"))
+    return DuckLake.at(client, cfg.bucket, prefix, secret_sql=secret_sql(cfg), data_subdir=data_subdir)
 
 
 def _local_connection(threads=None, memory_mb=None):
@@ -163,10 +203,15 @@ def secret_sql(cfg):
 
 
 def connect(cfg, threads=None, memory_mb=None):
-    """Return a DuckDB connection wired to the configured S3 endpoint (httpfs)."""
+    """Return a DuckDB connection wired to the configured store.
+
+    S3 mode loads httpfs + a secret; local mode needs neither — DuckDB reads
+    plain paths natively.
+    """
     con = _local_connection(threads, memory_mb)
-    load_extension(con, "httpfs")  # schrein's loader: cache, then wheel, then INSTALL
-    con.execute(secret_sql(cfg))
+    if not cfg.local_dir:
+        load_extension(con, "httpfs")  # schrein's loader: cache, then wheel, then INSTALL
+        con.execute(secret_sql(cfg))
     return con
 
 

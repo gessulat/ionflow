@@ -19,8 +19,8 @@ only the workspace, the shared lint/type-check configuration, and this page.
 
 The dependency runs one way only: ionflow depends on schrein, schrein never
 imports ionflow. See
-[ionflow decision 0016](packages/ionflow/docs/decisions/0016-flat-uv-workspace-of-sibling-packages.md)
-and [schrein decision 0005](packages/schrein/docs/decisions/0005-sibling-workspace-member.md)
+[ionflow decision 0017](packages/ionflow/docs/decisions/0017-flat-uv-workspace-of-sibling-packages.md)
+and [schrein decision 0006](packages/schrein/docs/decisions/0006-sibling-workspace-member.md)
 for why the layout is flat.
 
 ## Working in the repo
@@ -37,7 +37,7 @@ uv build --all-packages                          # both wheels into dist/
 ```
 
 Each package owns its own test suite, dependency group, docs and decision
-records. There is no root test suite, deliberately — see decision 0016.
+records. There is no root test suite, deliberately — see decision 0017.
 
 ## License
 

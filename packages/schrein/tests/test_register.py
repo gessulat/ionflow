@@ -2,7 +2,7 @@
 
 import pytest
 from botocore.exceptions import ClientError
-from helpers import make_client, run_threads
+from helpers import error_code, make_client, run_threads
 
 from schrein import CasRegister, CommitConflict
 from schrein.register import RETRYABLE
@@ -13,10 +13,6 @@ KEY = "reg/state"
 def register_for(s3):
     client, bucket, _ = s3
     return CasRegister(client, bucket, KEY)
-
-
-def _code(excinfo):
-    return excinfo.value.response["Error"]["Code"]
 
 
 def test_read_absent(s3):
@@ -34,7 +30,7 @@ def test_second_genesis_fails(s3):
     reg.write(b"v1", None)
     with pytest.raises(ClientError) as e:
         reg.write(b"v2", None)
-    assert _code(e) in RETRYABLE
+    assert error_code(e) in RETRYABLE
 
 
 def test_stale_ifmatch_is_retryable(s3):
@@ -43,7 +39,7 @@ def test_stale_ifmatch_is_retryable(s3):
     reg.write(b"v2", etag1)
     with pytest.raises(ClientError) as e:
         reg.write(b"stale", etag1)
-    assert _code(e) in RETRYABLE
+    assert error_code(e) in RETRYABLE
 
 
 def test_zombie_writer_rebases(s3):

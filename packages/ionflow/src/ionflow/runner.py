@@ -20,8 +20,8 @@ from .storage import (
     connect,
     empty_relation,
     input_relation,
+    make_client,
     part_keys,
-    s3_client,
     utc_now,
     write_part,
 )
@@ -144,7 +144,7 @@ def _branch_worker(payload):
     # is wrong
     layout = Layout(cfg.prefix, payload["flow_id"])
     con = connect(cfg, threads=threads, memory_mb=memory_mb)
-    client = s3_client(cfg)
+    client = make_client(cfg)
     flow = flow_cls()
     flow.config = cfg
     for k, v in payload["params"].items():
@@ -333,7 +333,7 @@ def run(
     started = utc_now()
     run_id = _new_run_id(started)
     layout = Layout.for_flow(config, flow_cls)
-    client = s3_client(config)
+    client = make_client(config)
     origin_run_id = _latest_complete(client, config, layout) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)

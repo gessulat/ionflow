@@ -572,7 +572,7 @@ the harness is parallel-safe by construction (one server, unique buckets).
 ## 11. Repository skeleton
 
 Realized — see `packages/schrein/` in this repository (a sibling uv
-workspace package, schrein decisions 0001 and 0005): `src/schrein/{register,ducklake,testing}.py`,
+workspace package, schrein decisions 0001 and 0006): `src/schrein/{register,ducklake,testing}.py`,
 `tests/`, `docs/decisions/`. Packaging lives in `packages/schrein/pyproject.toml`.
 
 ## 12. Milestones

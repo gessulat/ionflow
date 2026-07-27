@@ -1,6 +1,6 @@
 # 0001 — schrein starts as a uv workspace member inside the ionflow repo
 
-> Superseded by [0005](0005-sibling-workspace-member.md): schrein now sits at
+> Superseded by [0006](0006-sibling-workspace-member.md): schrein now sits at
 > `packages/schrein/`. Paths below are historical.
 
 The spec (`docs/specs/cas-catalog-library.md` at the repo root) is written

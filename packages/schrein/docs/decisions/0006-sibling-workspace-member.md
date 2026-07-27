@@ -1,4 +1,4 @@
-# 0005 — schrein is a sibling package, not a subdirectory of ionflow
+# 0006 — schrein is a sibling package, not a subdirectory of ionflow
 
 Supersedes [0001](0001-uv-workspace-in-ionflow-repo.md), which is otherwise
 still accurate: schrein is developed inside the ionflow repository as an
@@ -34,5 +34,5 @@ Consequences for schrein:
   (`{ workspace = true }` today, an ordinary package dependency once
   extracted).
 
-The repo-level rationale is ionflow decision 0016
-(`packages/ionflow/docs/decisions/0016-flat-uv-workspace-of-sibling-packages.md`).
+The repo-level rationale is ionflow decision 0017
+(`packages/ionflow/docs/decisions/0017-flat-uv-workspace-of-sibling-packages.md`).
