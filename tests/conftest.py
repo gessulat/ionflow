@@ -100,3 +100,11 @@ def s3cfg(moto_endpoint, request):
     )
     storage.s3_client(cfg).create_bucket(Bucket=cfg.bucket)
     return cfg
+
+
+@pytest.fixture
+def localcfg(tmp_path):
+    """Local-mode config: the whole store is a directory, no S3 involved."""
+    from ionflow.config import Config
+
+    return Config(local_dir=str(tmp_path / "store"), prefix="mf")

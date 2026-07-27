@@ -191,7 +191,9 @@ class SetupScreen(Screen):
             key: self.query_one(f"#{key}", Input).value.strip() or default or "" for key, _, default in SETUP_FIELDS
         }
         if not vals["bucket"]:
-            self.query_one("#setup-msg", Static).update("Bucket is required.")
+            self.query_one("#setup-msg", Static).update(
+                "Bucket is required (for a bucket-free local store, quit and run `ionflow setup --local`)."
+            )
             return
         cfg = config_from_setup(vals)
         root = git.repo_root()

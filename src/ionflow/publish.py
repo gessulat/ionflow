@@ -12,18 +12,18 @@ DuckLake snapshots until expiry.
 
 import re
 import uuid
+from dataclasses import replace
 
-from schrein import DuckLake
-
-from . import ledger
+from . import ledger, storage
 from .storage import (
     Layout,
     connect,
     empty_relation,
     input_relation,
+    make_client,
+    parse_dest,
     part_keys,
-    s3_client,
-    secret_sql,
+    uri,
     utc_now,
     write_part,
 )
@@ -38,18 +38,21 @@ _PROVENANCE_DDL = (
 
 
 def publish_lake(config, dest=None):
-    """The publish DuckLake at `dest` ('s3://bucket/prefix') or the project default.
+    """The publish DuckLake at `dest` ('s3://bucket/prefix') or the project
+    default; returns (lake, target config).
 
     A custom `dest` supports publishing across buckets: consumers need read
-    access to that location only, never to the pipeline bucket.
+    access to that location only, never to the pipeline bucket. The target
+    config is `config` with the bucket swapped, so everything downstream flows
+    through the ordinary make_client/uri seams.
     """
     if dest:
-        bucket, _, prefix = dest.removeprefix("s3://").partition("/")
-        if not (dest.startswith("s3://") and bucket and prefix):
-            raise ValueError(f"destination must be s3://bucket/prefix, got: {dest}")
-    else:
-        bucket, prefix = config.bucket, f"{config.prefix}/{PUBLISH_PREFIX}"
-    return DuckLake.at(s3_client(config), bucket, prefix.rstrip("/"), secret_sql=secret_sql(config)), bucket
+        if config.local_dir:
+            raise ValueError("cannot publish from a local store to s3://…; `ionflow sync` the flow to a bucket first")
+        bucket, prefix = parse_dest(dest, require_prefix=True)
+        target = replace(config, bucket=bucket)
+        return storage.ducklake_at(target, prefix), target
+    return storage.ducklake_at(config, f"{config.prefix}/{PUBLISH_PREFIX}"), config
 
 
 def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
@@ -64,14 +67,14 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or table == PROVENANCE:
         raise ValueError(f"invalid published table name '{table}'")
     layout = Layout.for_flow(config, flow_cls)
-    client = s3_client(config)
+    client = make_client(config)
     meta = ledger.read_meta(client, config.bucket, layout.meta(run_id))
     if meta is None:
         raise RuntimeError(f"run not found: {run_id}")
     if not meta.get("finished"):
         raise RuntimeError(f"run {run_id} did not complete; only complete runs publish")
 
-    lake, dest_bucket = publish_lake(config, dest)
+    lake, target = publish_lake(config, dest)
     out_table = flow_cls._dag.steps[step].output_table
     keys = part_keys(client, config.bucket, layout, run_id, step)
     con = connect(config)
@@ -79,10 +82,12 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     if where:
         rel = rel.filter(where)
     # stage the frozen artifact inside the lake's data path; unique name, so
-    # snapshots referencing an earlier publish keep their (immutable) file
-    data_prefix = lake.data_path.removeprefix(f"s3://{dest_bucket}/")
-    staged = f"{data_prefix}{table}/{run_id}-{uuid.uuid4().hex}.parquet"
-    write_part(client, dest_bucket, staged, rel, out_table)
+    # snapshots referencing an earlier publish keep their (immutable) file.
+    # data_path is built from uri() by ducklake_at, so the store key is just
+    # the path with the target's root stripped — no mode branch needed
+    staged_uri = f"{lake.data_path}{table}/{run_id}-{uuid.uuid4().hex}.parquet"
+    staged = staged_uri.removeprefix(uri(target, ""))
+    write_part(make_client(target), target.bucket, staged, rel, out_table)
 
     ddl_cols = out_table.persisted_ddl()
     row = {
@@ -99,7 +104,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         con.execute("BEGIN")
         con.execute(f"CREATE TABLE IF NOT EXISTS lake.{table} ({ddl_cols})")
         con.execute(f"DELETE FROM lake.{table}")
-        con.execute(f"CALL ducklake_add_data_files('lake', '{table}', 's3://{dest_bucket}/{staged}')")
+        con.execute(f"CALL ducklake_add_data_files('lake', '{table}', '{staged_uri}')")
         con.execute(_PROVENANCE_DDL)
         con.execute(f"INSERT INTO lake.{PROVENANCE} VALUES (?, ?, ?, ?, ?, ?, ?)", list(row.values()))
         con.execute("COMMIT")

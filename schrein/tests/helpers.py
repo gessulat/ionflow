@@ -11,6 +11,11 @@ from schrein import DuckLake
 PREFIX = "lake"  # every test lake lives at s3://<bucket>/lake/
 
 
+def error_code(excinfo):
+    """AWS error code from a pytest.raises(ClientError) excinfo."""
+    return excinfo.value.response["Error"]["Code"]
+
+
 def make_client(endpoint):
     """A fresh boto3 client against moto (one per thread in hammer tests)."""
     import boto3

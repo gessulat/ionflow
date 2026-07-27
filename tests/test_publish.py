@@ -14,12 +14,12 @@ from ionflow.storage import s3_client, secret_sql
 
 def _vanilla(cfg, dest=None):
     """A stock-DuckDB reader attached to the publish lake — no ionflow."""
-    lake, bucket = publish_lake(cfg, dest)
+    lake, target = publish_lake(cfg, dest)
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs")
     con.execute(secret_sql(cfg))
     load_ducklake(con)
-    con.execute(f"ATTACH 'ducklake:s3://{bucket}/{lake.register.key}' AS lake (READ_ONLY)")
+    con.execute(f"ATTACH 'ducklake:s3://{target.bucket}/{lake.register.key}' AS lake (READ_ONLY)")
     return con
 
 

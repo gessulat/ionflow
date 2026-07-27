@@ -13,11 +13,12 @@ from .config import (
     ConfigMissing,
     config_from_setup,
     read_config,
+    resolve_local_dir,
     write_config,
 )
 from .query import ledger_with_liveness, step_stats
 
-app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3")
+app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3 (or a local directory)")
 
 
 @app.callback(invoke_without_command=True)
@@ -47,7 +48,7 @@ def _config_or_setup():
             raise typer.Exit(0) from None
         typer.echo("No ionflow config found. Run `ionflow setup`.")
         raise typer.Exit(1) from None
-    if not storage.aws_credentials_available():
+    if not cfg.local_dir and not storage.aws_credentials_available():
         typer.echo(
             "No AWS credentials found. Provide them via environment variables, ~/.aws/credentials, or an IAM role."
         )
@@ -64,8 +65,15 @@ def _add_to_gitignore(root):
 
 
 @app.command()
-def setup():
-    """Configure the S3 bucket for this repo (writes .ionflow/config)."""
+def setup(
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Local mode: store everything in a directory instead of an S3 bucket (no credentials needed); "
+        "move to a bucket later with `ionflow sync`",
+    ),
+):
+    """Configure the store for this repo (writes .ionflow/config)."""
     root = git.repo_root()
     if root is None:
         typer.echo("Warning: not inside a git repository; ionflow runs require one.")
@@ -74,17 +82,27 @@ def setup():
         root = Path(root)
 
     cur = read_config(str(root))
-    vals = {}
-    for key, label, default in SETUP_FIELDS:
-        preset = cur.get(key, default)  # None (required) prompts until non-empty
-        vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
-    cfg = config_from_setup(vals)
-
-    if not storage.aws_credentials_available():
-        typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
-    else:
-        ok, msg = storage.verify_access(cfg)
+    if local:
+        local_dir = typer.prompt("Local store directory", default=cur.get("local_dir", f"{CONFIG_DIR}/data"))
+        flows = typer.prompt(
+            "Flows package for the TUI (e.g. myproject.flows, blank to skip)", default=cur.get("flows", "")
+        )
+        cfg = Config(local_dir=local_dir, prefix=cur.get("prefix", "ionflow"), flows=flows or None)
+        # resolve exactly like Config.load will, so what we verify is what runs use
+        ok, msg = storage.verify_access(Config(local_dir=resolve_local_dir(root, local_dir)))
         typer.echo(("OK: " if ok else "Warning: ") + msg)
+    else:
+        vals = {}
+        for key, label, default in SETUP_FIELDS:
+            preset = cur.get(key, default)  # None (required) prompts until non-empty
+            vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
+        cfg = config_from_setup(vals)
+
+        if not storage.aws_credentials_available():
+            typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
+        else:
+            ok, msg = storage.verify_access(cfg)
+            typer.echo(("OK: " if ok else "Warning: ") + msg)
 
     typer.echo(f"\nWrote {write_config(root, cfg)}")
 
@@ -196,6 +214,33 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
         run_id = latest[0]
     typer.echo(f"run {run_id}")
     step_stats(con, run_id).show()
+
+
+@app.command()
+def sync(
+    flow: str,
+    to: str = typer.Option(..., "--to", help="Target bucket as s3://bucket[/prefix] (prefix defaults to the config's)"),
+    endpoint: str = typer.Option(None, "--endpoint", help="S3 endpoint URL (blank for AWS)"),
+    region: str = typer.Option("us-east-1", "--region"),
+):
+    """Push FLOW's local-store history (runs + ledger) to an S3 bucket and rebuild its catalog there.
+
+    Idempotent: re-run it as more local runs accumulate. The local store stays
+    untouched; switch the config to the bucket (`ionflow setup`) when ready.
+    """
+    from .sync import sync_flow
+
+    cfg = _config_or_setup()
+    if not cfg.local_dir:
+        typer.echo("sync pushes a LOCAL store to S3, but this config already uses a bucket.")
+        raise typer.Exit(1)
+    if not storage.aws_credentials_available():
+        typer.echo("No AWS credentials found for the target bucket (env / ~/.aws / IAM).")
+        raise typer.Exit(1)
+    bucket, prefix = storage.parse_dest(to)
+    target = Config(bucket=bucket, prefix=prefix or cfg.prefix, endpoint_url=endpoint, region=region)
+    n = sync_flow(_load(flow), cfg, target)
+    typer.echo(f"synced {n['copied']} objects, {n['runs']} ledger run(s) to s3://{bucket}/{target.prefix}")
 
 
 @app.command("catalog-backfill")
