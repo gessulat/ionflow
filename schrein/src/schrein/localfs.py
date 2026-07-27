@@ -16,8 +16,10 @@ backend is prototyping without infrastructure, not multi-host coordination.
 
 import datetime as dt
 import hashlib
+import io
 import os
 import pathlib
+import shutil
 import tempfile
 from contextlib import contextmanager
 from email.utils import format_datetime
@@ -37,12 +39,16 @@ def _err(code, op, msg=""):
     return ClientError({"Error": {"Code": code, "Message": msg}}, op)
 
 
+def _quote(digest):
+    return f'"{digest.hexdigest()}"'
+
+
 def _etag(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
-    return f'"{h.hexdigest()}"'
+    return _quote(h)
 
 
 def _mtime(path):
@@ -54,8 +60,17 @@ class _Paginator:
         self.root = root
 
     def paginate(self, Bucket=None, Prefix=""):  # noqa: N803 — boto3 casing
+        # walk only the prefix's directory subtree, not the whole store: keys
+        # are posix paths, so every key starting with Prefix lives under the
+        # directory named by Prefix's last '/' (S3 prefix semantics preserved
+        # by the startswith filter below)
+        start = (self.root / Prefix.rpartition("/")[0]).resolve()
+        if not start.is_relative_to(self.root):  # a prefix must stay inside the store
+            start = self.root
         contents = []
-        for path in sorted(p for p in self.root.rglob("*") if p.is_file()):
+        for path in sorted(start.rglob("*")) if start.is_dir() else []:
+            if not path.is_file():
+                continue
             key = path.relative_to(self.root).as_posix()
             # lock file and in-flight atomic-write temps are not objects
             if key == LOCK_FILE or path.name.startswith(".schrein-") or not key.startswith(Prefix):
@@ -98,13 +113,25 @@ class LocalClient:
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             os.close(fd)
 
-    def _atomic_write(self, path, body):
-        """Write body to path via a same-directory temp + rename; return its ETag."""
+    def _atomic_write(self, path, write_fn):
+        """Same-directory temp + rename; `write_fn(tmp_path)` produces the bytes."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        h = hashlib.md5()
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".schrein-put-")
+        os.close(fd)
         try:
-            with os.fdopen(fd, "wb") as f:
+            result = write_fn(tmp)
+            os.replace(tmp, path)
+        except BaseException:
+            pathlib.Path(tmp).unlink(missing_ok=True)
+            raise
+        return result
+
+    def _put_bytes(self, path, body):
+        """Atomic write of bytes or a file-like; returns the content ETag."""
+
+        def write(tmp):
+            h = hashlib.md5()
+            with open(tmp, "wb") as f:
                 if hasattr(body, "read"):
                     while chunk := body.read(1 << 20):
                         h.update(chunk)
@@ -112,11 +139,9 @@ class LocalClient:
                 else:
                     h.update(body)
                     f.write(body)
-            os.replace(tmp, path)
-        except BaseException:
-            pathlib.Path(tmp).unlink(missing_ok=True)
-            raise
-        return f'"{h.hexdigest()}"'
+            return _quote(h)
+
+        return self._atomic_write(path, write)
 
     # --- object operations (boto3 signatures, keyword casing included) ---
 
@@ -126,13 +151,13 @@ class LocalClient:
             blob = path.read_bytes()
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
             raise _err("NoSuchKey", "GetObject", Key) from None
-        etag = f'"{hashlib.md5(blob).hexdigest()}"'
-        return {"Body": _Body(blob), "ETag": etag, "ContentLength": len(blob), "LastModified": _mtime(path)}
+        etag = _quote(hashlib.md5(blob))
+        return {"Body": io.BytesIO(blob), "ETag": etag, "ContentLength": len(blob), "LastModified": _mtime(path)}
 
     def put_object(self, Bucket=None, Key=None, Body=b"", IfMatch=None, IfNoneMatch=None):  # noqa: N803
         path = self._path(Key)
         if IfMatch is None and IfNoneMatch is None:
-            return {"ETag": self._atomic_write(path, Body)}
+            return {"ETag": self._put_bytes(path, Body)}
         with self._lock():  # compare and swap must be one critical section
             if IfNoneMatch is not None and path.exists():
                 raise _err("PreconditionFailed", "PutObject", Key)
@@ -141,20 +166,23 @@ class LocalClient:
                     raise _err("NoSuchKey", "PutObject", Key)
                 if _etag(path) != IfMatch:
                     raise _err("PreconditionFailed", "PutObject", Key)
-            return {"ETag": self._atomic_write(path, Body)}
+            return {"ETag": self._put_bytes(path, Body)}
 
     def upload_file(self, Filename, Bucket=None, Key=None):  # noqa: N803
-        with open(Filename, "rb") as f:
-            self.put_object(Bucket=Bucket, Key=Key, Body=f)
+        # no md5 pass: nothing consumes an upload's ETag, and this is the
+        # hottest write path (every step/branch part in ionflow's local mode)
+        self._atomic_write(self._path(Key), lambda tmp: shutil.copyfile(Filename, tmp))
 
     def head_object(self, Bucket=None, Key=None):  # noqa: N803
-        path = self._path(Key)
-        if not path.is_file():
-            raise _err("404", "HeadObject", Key)
+        # only the fields callers read (LastModified + the server date for
+        # object_age); notably no ETag — that would mean hashing the whole file
+        try:
+            stat = self._path(Key).stat()
+        except (FileNotFoundError, NotADirectoryError):
+            raise _err("404", "HeadObject", Key) from None
         return {
-            "LastModified": _mtime(path),
-            "ContentLength": path.stat().st_size,
-            "ETag": _etag(path),
+            "LastModified": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.UTC),
+            "ContentLength": stat.st_size,
             "ResponseMetadata": {"HTTPHeaders": {"date": format_datetime(dt.datetime.now(dt.UTC), usegmt=True)}},
         }
 
@@ -167,8 +195,7 @@ class LocalClient:
         src = self._path(CopySource["Key"])
         if not src.is_file():
             raise _err("NoSuchKey", "CopyObject", CopySource["Key"])
-        with open(src, "rb") as f:
-            self.put_object(Key=Key, Body=f)
+        self.upload_file(str(src), Bucket, Key)
 
     def delete_object(self, Bucket=None, Key=None):  # noqa: N803
         self._path(Key).unlink(missing_ok=True)  # S3 delete is idempotent
@@ -183,11 +210,3 @@ class LocalClient:
         if name != "list_objects_v2":
             raise NotImplementedError(name)
         return _Paginator(self.root)
-
-
-class _Body:
-    def __init__(self, blob):
-        self._blob = blob
-
-    def read(self):
-        return self._blob

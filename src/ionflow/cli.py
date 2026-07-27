@@ -13,6 +13,7 @@ from .config import (
     ConfigMissing,
     config_from_setup,
     read_config,
+    resolve_local_dir,
     write_config,
 )
 from .query import ledger_with_liveness, step_stats
@@ -87,7 +88,8 @@ def setup(
             "Flows package for the TUI (e.g. myproject.flows, blank to skip)", default=cur.get("flows", "")
         )
         cfg = Config(local_dir=local_dir, prefix=cur.get("prefix", "ionflow"), flows=flows or None)
-        ok, msg = storage.verify_access(Config(local_dir=str(root / local_dir), prefix=cfg.prefix))
+        # resolve exactly like Config.load will, so what we verify is what runs use
+        ok, msg = storage.verify_access(Config(local_dir=resolve_local_dir(root, local_dir)))
         typer.echo(("OK: " if ok else "Warning: ") + msg)
     else:
         vals = {}
@@ -224,7 +226,7 @@ def sync(
     Idempotent: re-run it as more local runs accumulate. The local store stays
     untouched; switch the config to the bucket (`ionflow setup`) when ready.
     """
-    from .sync import parse_dest, sync_flow
+    from .sync import sync_flow
 
     cfg = _config_or_setup()
     if not cfg.local_dir:
@@ -233,7 +235,7 @@ def sync(
     if not storage.aws_credentials_available():
         typer.echo("No AWS credentials found for the target bucket (env / ~/.aws / IAM).")
         raise typer.Exit(1)
-    bucket, prefix = parse_dest(to)
+    bucket, prefix = storage.parse_dest(to)
     target = Config(bucket=bucket, prefix=prefix or cfg.prefix, endpoint_url=endpoint, region=region)
     n = sync_flow(_load(flow), cfg, target)
     typer.echo(f"synced {n['copied']} objects, {n['runs']} ledger run(s) to s3://{bucket}/{target.prefix}")

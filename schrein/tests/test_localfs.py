@@ -4,7 +4,7 @@ import datetime as dt
 
 import pytest
 from botocore.exceptions import ClientError
-from helpers import run_threads
+from helpers import error_code, run_threads, upload_rows
 from schrein.register import RETRYABLE
 
 from schrein import CasRegister, DuckLake, LocalClient
@@ -17,10 +17,6 @@ def local(tmp_path):
     return LocalClient(tmp_path / "store")
 
 
-def _code(excinfo):
-    return excinfo.value.response["Error"]["Code"]
-
-
 def test_put_get_roundtrip_and_etag(local):
     etag = local.put_object(Key="a/b.txt", Body=b"hello")["ETag"]
     r = local.get_object(Key="a/b.txt")
@@ -31,7 +27,7 @@ def test_put_get_roundtrip_and_etag(local):
 def test_get_missing_raises_nosuchkey(local):
     with pytest.raises(ClientError) as e:
         local.get_object(Key="nope")
-    assert _code(e) == "NoSuchKey"
+    assert error_code(e) == "NoSuchKey"
 
 
 def test_key_cannot_escape_root(local):
@@ -44,11 +40,11 @@ def test_conditional_genesis_and_stale_ifmatch(local):
     etag1 = reg.write(b"v1", None)
     with pytest.raises(ClientError) as e:  # second genesis
         reg.write(b"v2", None)
-    assert _code(e) in RETRYABLE
+    assert error_code(e) in RETRYABLE
     reg.write(b"v2", etag1)
     with pytest.raises(ClientError) as e:  # stale If-Match
         reg.write(b"v3", etag1)
-    assert _code(e) in RETRYABLE
+    assert error_code(e) in RETRYABLE
     assert reg.read()[0] == b"v2"
 
 
@@ -109,17 +105,13 @@ def test_ducklake_on_local_store(local, tmp_path):
     """The full DuckLake cycle against a plain directory: commit an INSERT
     (rows may inline into the catalog) and register a staged parquet by path —
     the pattern ionflow's catalog uses."""
-    import duckdb
-
     lake = DuckLake.at(local, "ignored", "lake")
     lake.data_path = str(local.root / "lake" / "data") + "/"  # local, not s3://
 
     lake.commit(lambda con: con.execute("CREATE TABLE lake.events (id INTEGER, name VARCHAR)"))
     lake.commit(lambda con: con.execute("INSERT INTO lake.events VALUES (1, 'a'), (2, 'b')"))
 
-    staged = tmp_path / "staged.parquet"
-    duckdb.connect().execute(f"COPY (SELECT 3 AS id, 'c' AS name) TO '{staged}' (FORMAT parquet)")
-    local.upload_file(str(staged), "ignored", "lake/staging/part.parquet")
+    upload_rows(local, "ignored", "lake/staging/part.parquet", [(3, "c")], tmp_path)
     part = local.root / "lake" / "staging" / "part.parquet"
     lake.commit(lambda con: con.execute(f"CALL ducklake_add_data_files('lake', 'events', '{part}')"))
 

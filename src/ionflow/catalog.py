@@ -19,6 +19,8 @@ from schrein.ducklake import CATALOG_KEY
 from . import ledger, storage
 from .storage import Layout
 
+LAKE_SUBDIR = "_lake"  # catalog-written data files at the flow root; sync skips it
+
 
 class Catalog:
     """schrein DuckLake at the flow root; its data_path is catalog-written files
@@ -27,8 +29,7 @@ class Catalog:
     def __init__(self, config, flow_cls, client=None):
         root = Layout.for_flow(config, flow_cls).root
         self.config = config
-        self.bucket = config.bucket
-        self.lake = storage.ducklake_at(config, root, data_subdir="_lake", client=client)
+        self.lake = storage.ducklake_at(config, root, data_subdir=LAKE_SUBDIR, client=client)
         self.key = self.lake.register.key
 
     def tables(self):
@@ -81,7 +82,7 @@ class Catalog:
 
     def discard(self):
         """Delete the register object (the --replace path; run folders untouched)."""
-        self.lake.register.client.delete_object(Bucket=self.bucket, Key=self.key)
+        self.lake.register.client.delete_object(Bucket=self.config.bucket, Key=self.key)
 
 
 def _table_ddl(step_name, table):

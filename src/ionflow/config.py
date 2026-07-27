@@ -49,6 +49,11 @@ def read_config(start="."):
     return tomllib.loads(path.read_text()) if path else {}
 
 
+def resolve_local_dir(base, value):
+    """Absolute store root from a config value (relative paths anchor at `base`)."""
+    return str((Path(base) / Path(value).expanduser()).resolve())
+
+
 def write_config(root, cfg):
     """Serialize `cfg` to `<root>/.ionflow/config` (TOML); return the path written."""
     d = Path(root) / CONFIG_DIR
@@ -104,24 +109,19 @@ class Config:
         Credentials are never stored here; they come from the standard AWS chain.
         """
         path = find_config(start)
-        data = tomllib.loads(path.read_text()) if path else {}
-        env_bucket, env_local = os.environ.get("IONFLOW_BUCKET"), os.environ.get("IONFLOW_LOCAL_DIR")
-        bucket = env_bucket or data.get("bucket")
-        local_dir = env_local or data.get("local_dir")
+        data = read_config(start)
+        # the store mode is picked per layer: any IONFLOW_BUCKET/LOCAL_DIR env
+        # var replaces the file's choice wholesale, never mixes with it
+        if os.environ.get("IONFLOW_BUCKET") or os.environ.get("IONFLOW_LOCAL_DIR"):
+            bucket, local_dir = os.environ.get("IONFLOW_BUCKET"), os.environ.get("IONFLOW_LOCAL_DIR")
+        else:
+            bucket, local_dir = data.get("bucket"), data.get("local_dir")
         if not bucket and not local_dir:
             raise ConfigMissing("no ionflow config found; run `ionflow setup`")
         if bucket and local_dir:
-            # an env var switches mode over the file; a conflict within one
-            # source is a real misconfiguration
-            if env_bucket and not env_local:
-                local_dir = None
-            elif env_local and not env_bucket:
-                bucket = None
-            else:
-                raise ValueError("config sets both `bucket` and `local_dir`; keep exactly one (see `ionflow sync`)")
+            raise ValueError("config sets both `bucket` and `local_dir`; keep exactly one (see `ionflow sync`)")
         if local_dir:
-            base = path.parent.parent if path else Path.cwd()
-            local_dir = str((base / Path(local_dir).expanduser()).resolve())
+            local_dir = resolve_local_dir(path.parent.parent if path else Path.cwd(), local_dir)
         return cls(
             bucket=bucket,
             prefix=os.environ.get("IONFLOW_PREFIX") or data.get("prefix", "ionflow"),

@@ -1,28 +1,23 @@
 """Sync: push a flow's local-store history into an S3 bucket (decision 0014).
 
 The migration path out of local prototyping mode: run folders are copied
-byte-for-byte (they are immutable, so re-running sync is idempotent), ledger
-rows are MERGED through the target's CAS ledger (never overwritten — runs
-recorded on the bucket by others survive), and the target's catalog is
-rebuilt from its run folders + ledger via `catalog.backfill` — a DuckLake
-catalog stores absolute data-file locations, so the local catalog object
-itself can never be copied, only re-derived. The local store is left
-untouched; after syncing, point the config at the bucket (`ionflow setup`)
-to continue there.
+byte-for-byte (they are immutable, so already-present target keys are
+skipped and re-running sync is cheap), ledger rows are MERGED through the
+target's CAS ledger in one commit (never overwritten — runs recorded on the
+bucket by others survive), and the target's catalog is rebuilt from its run
+folders + ledger via `catalog.backfill` — a DuckLake catalog stores absolute
+data-file locations, so the local catalog object itself can never be copied,
+only re-derived. The local store is left untouched; after syncing, point the
+config at the bucket (`ionflow setup`) to continue there.
 """
 
 import pathlib
+from concurrent.futures import ThreadPoolExecutor
+
+from schrein.ducklake import CATALOG_KEY
 
 from . import catalog, ledger, storage
 from .storage import Layout
-
-
-def parse_dest(dest):
-    """'s3://bucket[/prefix]' -> (bucket, prefix or None)."""
-    bucket, _, prefix = dest.removeprefix("s3://").partition("/")
-    if not (dest.startswith("s3://") and bucket):
-        raise ValueError(f"destination must be s3://bucket[/prefix], got: {dest}")
-    return bucket, prefix.rstrip("/") or None
 
 
 def sync_flow(flow_cls, local_cfg, target_cfg):
@@ -36,26 +31,28 @@ def sync_flow(flow_cls, local_cfg, target_cfg):
     local = storage.make_client(local_cfg)
     s3 = storage.s3_client(target_cfg)
     root = pathlib.Path(local_cfg.local_dir)
+    # the catalog and its data files are re-derived on the target (they encode
+    # local absolute paths); the ledger merges below instead of copying
+    internal = (f"/{CATALOG_KEY}", f"/{catalog.LAKE_SUBDIR}/")
 
-    copied = 0
-    for key in storage.list_keys(local, "", src_layout.root + "/"):
+    existing = set(storage.list_keys(s3, target_cfg.bucket, dst_layout.root + "/"))
+    todo = []
+    for key in storage.list_keys(local, local_cfg.bucket, src_layout.root + "/"):
         tail = key.removeprefix(src_layout.root)
-        # the ledger merges below; catalog + its data files are re-derived on
-        # the target (they encode local absolute paths)
-        if key == src_layout.ledger or tail.startswith(("/catalog.ducklake", "/_lake/")):
-            continue
-        s3.upload_file(str(root / key), target_cfg.bucket, dst_layout.root + tail)
-        copied += 1
+        if key == src_layout.ledger or tail.startswith(internal) or dst_layout.root + tail in existing:
+            continue  # run folders are immutable: a key already on the target is done
+        todo.append((str(root / key), dst_layout.root + tail))
+    with ThreadPoolExecutor(max_workers=16) as ex:  # many small objects, latency-bound
+        list(ex.map(lambda t: s3.upload_file(t[0], target_cfg.bucket, t[1]), todo))
 
     runs = 0
-    blob = storage.get_bytes_or_none(local, "", src_layout.ledger)
+    blob = storage.get_bytes_or_none(local, local_cfg.bucket, src_layout.ledger)
     if blob is not None:
         table = storage.table_from_bytes(blob)
         custom = [table.schema.field(n) for n in table.schema.names if n not in ledger.BASE_COLS]
-        for row in table.to_pylist():
-            ledger.upsert_run(s3, target_cfg.bucket, dst_layout.ledger, row, custom)
-            runs += 1
+        ledger.upsert_runs(s3, target_cfg.bucket, dst_layout.ledger, table.to_pylist(), custom)
+        runs = table.num_rows
 
     if runs:
         catalog.backfill(flow_cls, target_cfg, replace=True)
-    return {"copied": copied, "runs": runs}
+    return {"copied": len(todo), "runs": runs}

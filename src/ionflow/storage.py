@@ -139,11 +139,26 @@ def uri(cfg, key):
     return f"{cfg.local_dir}/{key}" if cfg.local_dir else f"s3://{cfg.bucket}/{key}"
 
 
+def parse_dest(dest, require_prefix=False):
+    """'s3://bucket[/prefix]' -> (bucket, prefix | None) — the one parser of --to.
+
+    >>> parse_dest("s3://b/pre/fix/")
+    ('b', 'pre/fix')
+    """
+    bucket, _, prefix = dest.removeprefix("s3://").partition("/")
+    if not (dest.startswith("s3://") and bucket and (prefix or not require_prefix)):
+        want = "s3://bucket/prefix" if require_prefix else "s3://bucket[/prefix]"
+        raise ValueError(f"destination must be {want}, got: {dest}")
+    return bucket, prefix.rstrip("/") or None
+
+
 def ducklake_at(cfg, prefix, data_subdir="data", client=None):
     """A schrein DuckLake under this config's store at `prefix` — the one place
     catalog/publish learn about local vs S3 (data_path and secret differ)."""
     client = client if client is not None else make_client(cfg)
     if cfg.local_dir:
+        # "local" is a display label only (LocalClient ignores Bucket); it keeps
+        # CAS error messages readable where cfg.bucket would print None
         register = CasRegister(client, "local", f"{prefix}/{CATALOG_KEY}")
         return DuckLake(register, data_path=uri(cfg, f"{prefix}/{data_subdir}/"))
     return DuckLake.at(client, cfg.bucket, prefix, secret_sql=secret_sql(cfg), data_subdir=data_subdir)

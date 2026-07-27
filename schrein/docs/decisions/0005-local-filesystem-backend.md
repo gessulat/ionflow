@@ -43,8 +43,10 @@ server subprocess into production code paths and contradicts
   local-mode branches around the safety check.
 - The lock file (`.schrein.lock`) and in-flight temp files are filtered out
   of listings; keys never see them.
-- ETag-by-content means `head_object`/`get_object` hash the file; register
-  objects are small, so this is fine — don't use `LocalClient` where ETags
-  of multi-GB objects are read in hot loops.
+- ETag-by-content means `get_object` and conditional `put_object` hash the
+  object; register objects are small, so this is fine. The hot paths skip
+  hashing entirely: `upload_file`/`copy_object` are plain atomic file copies
+  (nothing consumes their ETags), and `head_object` answers from one `stat`
+  and returns no ETag at all.
 - Windows falls back to `msvcrt` locking (untested in CI; POSIX is the
   supported platform).
