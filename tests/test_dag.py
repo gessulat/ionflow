@@ -47,6 +47,92 @@ def test_output_tables():
     assert dag.steps["result"].output_table is Final
 
 
+class Chained:
+    """Two branch steps in a row: `polished` branches over `scored`, not the fan-out."""
+
+    def raw(self) -> Raw: ...
+    def chunks(self, raw: Raw) -> Fanout[Chunk]: ...
+    def scored(self, chunks: Branch[Chunk]) -> Score: ...
+    def polished(self, chunks: Branch[Chunk], scored: Branch[Score]) -> Score: ...
+    def result(self, polished: Collect[Score]) -> Final: ...
+
+
+def test_chained_branch_shape():
+    dag = build_dag(Chained)
+    assert dag.order == ["raw", "chunks", "scored", "polished", "result"]
+    # a branch step's output is a plain table, so branching over it is just BRANCH again
+    assert not dag.steps["scored"].is_fanout
+    assert dag.steps["polished"].param_kinds == {"chunks": "BRANCH", "scored": "BRANCH"}
+    assert dag.steps["polished"].deps == ["chunks", "scored"]
+    assert dag.steps["result"].param_kinds == {"polished": "COLLECT"}
+
+
+class SubDag:
+    """A fan-out branch that is itself a DAG: two independent steps after one."""
+
+    def raw(self) -> Raw: ...
+    def chunks(self, raw: Raw) -> Fanout[Chunk]: ...
+    def scored(self, chunks: Branch[Chunk]) -> Score: ...
+    def stored(self, scored: Branch[Score]) -> Score: ...
+    def polished(self, scored: Branch[Score]) -> Score: ...
+    def result(self, polished: Collect[Score]) -> Final: ...
+
+
+def test_group_collects_a_fan_outs_per_item_steps():
+    dag = build_dag(SubDag)
+    group = dag.groups["chunks"]
+    assert group.order == ["scored", "polished", "stored"]  # topological within one item
+    assert group.deps == {"scored": [], "polished": ["scored"], "stored": ["scored"]}
+    # the fan-out node stands for its whole group: members never execute on their own
+    assert dag.plan == ["raw", "chunks", "result"]
+    assert list(dag.groups) == ["chunks"]
+
+
+def test_plain_steps_have_no_group():
+    dag = build_dag(ETL)
+    assert dag.groups["chunks"].order == ["scored"]
+    assert dag.plan == ["raw", "chunks", "result"]
+
+
+def test_branch_over_a_plain_step_rejected():
+    class Bad:
+        def raw(self) -> Raw: ...
+        def scored(self, raw: Branch[Raw]) -> Score: ...
+
+    with pytest.raises(ValueError, match="neither a fan-out nor a branch step"):
+        build_dag(Bad)
+
+
+def test_nested_fan_out_rejected():
+    class Bad:
+        def chunks(self) -> Fanout[Chunk]: ...
+        def deeper(self, chunks: Branch[Chunk]) -> Fanout[Chunk]: ...
+
+    with pytest.raises(ValueError, match="fan-out is one level"):
+        build_dag(Bad)
+
+
+def test_collecting_a_sibling_per_item_step_rejected():
+    class Bad:
+        def chunks(self) -> Fanout[Chunk]: ...
+        def scored(self, chunks: Branch[Chunk]) -> Score: ...
+        def polished(self, chunks: Branch[Chunk], scored: Collect[Score]) -> Score: ...
+
+    with pytest.raises(ValueError, match="per item of fan-out 'chunks'"):
+        build_dag(Bad)
+
+
+def test_fan_in_feeding_back_into_its_own_fan_out_rejected():
+    class Bad:
+        def chunks(self) -> Fanout[Chunk]: ...
+        def scored(self, chunks: Branch[Chunk]) -> Score: ...
+        def stats(self, scored: Collect[Score]) -> Final: ...
+        def polished(self, scored: Branch[Score], stats: Final) -> Score: ...
+
+    with pytest.raises(ValueError, match="cycle detected once fan-outs run per item"):
+        build_dag(Bad)
+
+
 def test_unknown_param_rejected():
     class Bad:
         def a(self) -> Raw: ...

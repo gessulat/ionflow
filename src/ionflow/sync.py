@@ -1,4 +1,4 @@
-"""Sync: push a flow's local-store history into an S3 bucket (decision 0014).
+"""Sync: push a flow's local-store history into an S3 bucket (decision 0016).
 
 The migration path out of local prototyping mode: run folders are copied
 byte-for-byte (they are immutable, so already-present target keys are

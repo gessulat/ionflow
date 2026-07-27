@@ -31,22 +31,40 @@ class Step:
 
 
 @dataclass
+class Group:
+    """A fan-out's per-item sub-DAG: the branch steps that run inside one branch.
+
+    Every member of one item runs in a single worker, in dependency order, with
+    independent members concurrent — so an item can reach a late member while
+    another item is still on the first one.
+    """
+
+    fanout: str
+    order: list[str]  # members, topological order within a single item
+    deps: dict[str, list[str]]  # member -> the members it waits for, same item
+
+
+@dataclass
 class Dag:
     steps: dict[str, Step]
     order: list[str]
+    groups: dict[str, Group]  # fan-out name -> its per-item sub-DAG (absent if it has none)
+    plan: list[str]  # execution order; a fan-out node stands for its whole group
+
+
+def branch_dep(step):
+    """The step whose branches this one runs over — its branch index space, or None."""
+    return next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
 
 
 def _is_step(name, obj):
     return inspect.isfunction(obj) and not name.startswith("_")
 
 
-def _toposort(steps):
-    """Topological order, lexicographically smallest ready step first (deterministic)."""
-    ts = graphlib.TopologicalSorter({n: s.deps for n, s in steps.items()})
-    try:
-        ts.prepare()
-    except graphlib.CycleError as e:
-        raise ValueError(f"cycle detected among steps: {' -> '.join(e.args[1])}") from None
+def _toposort(graph):
+    """Topological order, lexicographically smallest ready node first (deterministic)."""
+    ts = graphlib.TopologicalSorter(graph)
+    ts.prepare()  # raises graphlib.CycleError
     order, ready = [], []
     while ts.is_active():
         for n in ts.get_ready():
@@ -55,6 +73,76 @@ def _toposort(steps):
         order.append(n)
         ts.done(n)
     return order
+
+
+def _roots(steps, order):
+    """Branch step -> the fan-out at the root of its branch chain.
+
+    A chained branch step inherits its upstream's item: branch i is the fan-out's
+    i-th item however deep the chain runs, which is what makes the chain runnable
+    (and resumable) per item rather than per stage.
+    """
+    roots = {}
+    for name in order:  # topo: a branch dep is classified before its dependents
+        dep = branch_dep(steps[name])
+        if dep is None:
+            continue
+        if steps[dep].is_fanout:
+            roots[name] = dep
+        elif dep in roots:
+            roots[name] = roots[dep]
+        else:
+            raise ValueError(
+                f"step '{name}' branches over '{dep}', which is neither a fan-out nor a "
+                f"branch step; drop the Branch[...] marker to read it whole"
+            )
+        if steps[name].is_fanout:
+            raise ValueError(f"step '{name}' fans out inside a branch of '{roots[name]}'; fan-out is one level")
+    return roots
+
+
+def _check_item_inputs(steps, roots):
+    """A per-item step may only read a sibling per-item step one item at a time."""
+    for name, root in roots.items():
+        for dep, kind in steps[name].param_kinds.items():
+            if kind == "BRANCH" or roots.get(dep) != root:
+                continue
+            raise ValueError(
+                f"step '{name}' {'collects' if kind == 'COLLECT' else 'takes'} '{dep}', but both run "
+                f"per item of fan-out '{root}'; a per-item step reads its own item only (Branch[...])"
+            )
+
+
+def _groups(steps, order, roots):
+    """Fan-out name -> its per-item sub-DAG (members in intra-item topological order)."""
+    groups = {}
+    for name in order:
+        if (root := roots.get(name)) is None:
+            continue
+        group = groups.setdefault(root, Group(root, [], {}))
+        group.order.append(name)  # global topo order, restricted: still a valid item order
+        group.deps[name] = [d for d in steps[name].deps if roots.get(d) == root]
+    return groups
+
+
+def _plan(steps, roots):
+    """Execution order with every group contracted into its fan-out node.
+
+    Contracting is what makes the per-item model checkable: an edge out of a
+    group and back into it is a cycle here, and would be a deadlock at run time.
+    """
+    graph = {}
+    for name, step in steps.items():
+        node = roots.get(name, name)
+        graph.setdefault(node, set()).update(roots.get(d, d) for d in step.deps if roots.get(d, d) != node)
+    try:
+        return _toposort(graph)
+    except graphlib.CycleError as e:
+        cycle = " -> ".join(e.args[1])
+        raise ValueError(
+            f"cycle detected once fan-outs run per item: {cycle}; a step that reads a whole "
+            f"fan-out cannot also feed that fan-out's per-item steps"
+        ) from None
 
 
 RESERVED_STEP_NAMES = {"ledger", "metrics"}  # taken by duck()'s system views
@@ -87,4 +175,10 @@ def build_dag(cls) -> Dag:
         for d in s.deps:
             if d not in steps:
                 raise ValueError(f"step '{s.name}' depends on unknown step '{d}'")
-    return Dag(steps=steps, order=_toposort(steps))
+    try:
+        order = _toposort({n: s.deps for n, s in steps.items()})
+    except graphlib.CycleError as e:
+        raise ValueError(f"cycle detected among steps: {' -> '.join(e.args[1])}") from None
+    roots = _roots(steps, order)
+    _check_item_inputs(steps, roots)
+    return Dag(steps=steps, order=order, groups=_groups(steps, order, roots), plan=_plan(steps, roots))

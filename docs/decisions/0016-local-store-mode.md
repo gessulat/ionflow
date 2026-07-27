@@ -1,4 +1,4 @@
-# 0014 — Local mode is a client swap, and migration is a rebuild, not a copy
+# 0016 — Local mode is a client swap, and migration is a rebuild, not a copy
 
 ## Status
 
