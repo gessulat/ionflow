@@ -2,7 +2,7 @@
 
 import pyarrow as pa
 import pytest
-from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow
+from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, exec_counts
 
 from ionflow import ConstraintViolation, ledger
 from ionflow.storage import Layout, s3_client, write_part
@@ -129,15 +129,6 @@ def _chain(con, run_id):
     return {item: (wt, rt, up) for item, wt, rt, up in rows}
 
 
-def _refine_runs(d):
-    """item -> how many times `refine` actually executed for it (marker files)."""
-    counts = {}
-    for f in d.iterdir():
-        _, item, _ = f.name.split("_")
-        counts[item] = counts.get(item, 0) + 1
-    return counts
-
-
 def _assert_aligned(con, run_id, items):
     """Every item has exactly one work/refine pair, and refine read its own item's work."""
     chain = _chain(con, run_id)
@@ -185,7 +176,7 @@ def test_keyed_resume_chained_branch_survives_reordered_worklist(s3cfg, repo, tm
     assert {item: t for item, (t, _, _) in new.items()} == old_work  # work matched by key
     # file-0's refine completed in the origin and was copied despite moving branch;
     # only file-1, which had failed, ran again
-    assert _refine_runs(tmp_path) == {"file-0": 1, "file-1": 2}
+    assert exec_counts(tmp_path, "refine") == {"file-0": 1, "file-1": 2}
 
 
 def test_duplicate_fanout_keys_refused(s3cfg, repo):

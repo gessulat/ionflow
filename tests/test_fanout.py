@@ -1,5 +1,5 @@
 import pytest
-from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow
+from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow, exec_counts
 
 
 def _exec_counts(d):
@@ -10,12 +10,7 @@ def _exec_counts(d):
 
 
 def _chain_counts(d, step):
-    counts = {0: 0, 1: 0, 2: 0}
-    for f in d.iterdir():
-        name, g, _ = f.name.split("_")
-        if name == step:
-            counts[int(g)] += 1
-    return counts
+    return {g: exec_counts(d, step).get(str(g), 0) for g in (0, 1, 2)}
 
 
 @pytest.mark.slow
@@ -66,8 +61,9 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
 
     layout = storage.Layout.for_flow(s3cfg, FlakyFlow)
     keys = storage.list_keys(storage.s3_client(s3cfg), s3cfg.bucket, layout.root + "/runs/")
-    # branch 1 raised, yet its worker's final (finally) write landed
-    assert layout.metrics_branch(run_id, "work", 1) in keys
+    # branch 1 raised, yet its worker's final (finally) write landed; one object
+    # per item, named for the fan-out — a worker covers the item's whole sub-DAG
+    assert layout.metrics_branch(run_id, "parts", 1) in keys
     branches = {
         r[0]
         for r in con.sql(
@@ -127,7 +123,8 @@ def test_chained_branch_in_process_mode(s3cfg, repo, tmp_path, monkeypatch):
             f"SELECT DISTINCT step, branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
         ).fetchall()
     }
-    assert measured == {(s, b) for s in ("work", "refine") for b in (0, 1, 2)}
+    # every sub-step of every item is measured; NULL labels are the worker between them
+    assert measured >= {(s, b) for s in ("work", "refine") for b in (0, 1, 2)}
 
 
 @pytest.mark.slow
@@ -157,7 +154,7 @@ def test_chained_branch_resume_reruns_only_the_failed_branch(s3cfg, repo, tmp_pa
 
 @pytest.mark.slow
 def test_chained_branch_resume_after_upstream_branch_failure(s3cfg, repo, tmp_path, monkeypatch):
-    """`work` fails mid-fan-out: the resume re-runs that branch, then every `refine`."""
+    """One item's failure costs that item only: the others ran their chain to the end."""
     monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
     monkeypatch.setenv("CHAIN_FAIL", "work:2")
 
@@ -166,14 +163,14 @@ def test_chained_branch_resume_after_upstream_branch_failure(s3cfg, repo, tmp_pa
 
     con = ChainFlow.duck(s3cfg)
     origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
-    assert _chain_counts(tmp_path, "refine") == {0: 0, 1: 0, 2: 0}  # never reached
+    # no stage barrier: items 0 and 1 reached `refine` although item 2 never got past `work`
+    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 0}
 
     monkeypatch.delenv("CHAIN_FAIL")
     resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 2}
-    # the chained step sizes its fan-out from `work`'s parts, reused and fresh alike
-    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}
+    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}  # only item 2 resumed
     con = ChainFlow.duck(s3cfg)
     assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{resumed}'").fetchone() == (3, 12)
 

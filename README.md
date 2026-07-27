@@ -20,11 +20,12 @@ configure is one S3-compatible bucket.
 - **Runs are logged in an append-only ledger** in the bucket: `run_id`, `status`
   (`running` / `complete` / `failed`), `started`, `finished`, git `commit`,
   `steps_complete`, plus any flow-specific columns.
-- **Fan-out / fan-in** over N inputs, in parallel, on one machine. Transient branch
+- **Fan-out / fan-in** over N inputs, in parallel, on one machine — and a branch can
+  be a sub-DAG, run per item, with independent sub-steps concurrent. Transient branch
   failures (flaky S3) retry in place: `run(branch_retries=1)`.
 - **Resumable**: `run --resume <run_id>` re-runs a failed run, reusing every step
-  that already completed — including individual branches of a partially-failed
-  fan-out; `run --resume latest` makes growing-corpus runs incremental.
+  that already completed — down to a single sub-step of a single item of a
+  partially-failed fan-out; `run --resume latest` makes growing-corpus runs incremental.
 - **Clean git required.** ionflow refuses to start with a dirty working tree, so every
   run is pinned to a commit.
 
@@ -183,6 +184,48 @@ either direction:
 numpy is optional, not a ionflow dependency — these paths light up when your
 project has it installed.
 
+### A branch can be a sub-DAG
+
+A branch does not have to be one method. `Branch[T]` names the upstream *step*, so
+branch steps chain, and steps that branch over the same output are independent —
+which makes one fan-out item a small DAG of its own:
+
+```python
+class Search(Flow):
+    def by_job(self, manifest: Job) -> Fanout[Job]: ...
+    def convert(self, by_job: Branch[Job]) -> Converted: ...          # .raw -> .db
+    def upload_db(self, convert: Branch[Converted]) -> Uploaded: ...  # ┐ concurrent,
+    def search(self, convert: Branch[Converted]) -> Psm: ...          # ┘ same item
+    def report(self, search: Collect[Psm]) -> Report: ...             # fan-in, as usual
+```
+
+That sub-DAG runs **per item, not per stage**: one worker takes an item from
+`convert` all the way to `search` while another worker is still converting its own,
+and `upload_db` and `search` run at the same time within an item. Two consequences
+worth designing around:
+
+- **Intermediates scale with `--max-workers`, not with the work-list.** A stage
+  barrier would convert every raw file before searching any, and put N `.db` files on
+  disk at once.
+- **An item's sub-steps share one process**, so they can hand each other large local
+  artifacts by path — `convert` writes the `.db`, `upload_db` and `search` read it —
+  instead of round-tripping through S3.
+
+Retry and resume are as granular as the DAG: `--branch-retries` re-runs the sub-step
+that failed, and `--resume` restarts an item at its first incomplete sub-step. A flaky
+upload costs one upload, not the 40-minute search beside it.
+
+A side-effecting sub-step still returns a table — that is the point. `upload_db`
+produces no rows of its own, so it returns one row saying what it wrote (uri, etag),
+turning an invisible side effect into queryable provenance.
+
+Three shapes are refused when the class is defined, rather than quietly reinterpreted:
+a `Fanout` inside a branch (nesting stays one level), a per-item step reading a
+sibling per-item step whole (`Collect[...]` or a plain parameter — it can only see its
+own item), and a fan-in of a fan-out feeding that same fan-out's per-item steps. The
+last one is the real trade: a corpus-wide barrier *inside* a fan-out is not
+expressible, because that is what per-stage execution costs.
+
 ## Run it
 
 ```python
@@ -196,9 +239,9 @@ ionflow run mymodule:EmbedDocs
 ```
 
 Sizing knobs (mirroring the Python API): `--max-workers N`
-caps parallel branch workers — peak memory is roughly workers × one branch's working
-set — `--threads` runs branches in threads instead of processes, and
-`--branch-retries N` retries a failed branch in its worker before giving up.
+caps parallel item workers — peak memory is roughly workers × one item's working
+set — `--threads` runs items in threads instead of processes, and
+`--branch-retries N` retries a failed sub-step in its worker before giving up.
 
 ## Parameters
 
@@ -453,9 +496,9 @@ the old id.
 ## Notes & limits
 
 - **DuckDB-first**, DataFrame-optional. polars/pandas are conveniences, not dependencies.
-- **One level of fan-out** (kept deliberately small). Per-branch work can still be
-  split across steps — `Branch[T]` names the upstream *step*, so a branch step's
-  output feeds another branch step — but a fan-out inside a branch is not supported.
+- **One level of fan-out** (kept deliberately small). A branch may be a whole sub-DAG
+  of steps, run per item ("A branch can be a sub-DAG" above), but a fan-out inside a
+  branch is not supported.
 - Reading from S3 uses DuckDB's `httpfs` extension, downloaded automatically on
   first use (one-time, per DuckDB version) — the very first run needs network
   access to the DuckDB extension repo.

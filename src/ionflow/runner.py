@@ -1,9 +1,11 @@
+import graphlib
 import importlib.util
 import inspect
 import os
+import threading
 import uuid
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import asdict
 from multiprocessing import get_context
 
@@ -51,27 +53,15 @@ def _keyed_fanouts(dag):
     return out
 
 
-def _branch_dep(step):
-    """The step whose branches this one runs over — its branch index space, or None."""
-    return next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
-
-
 def _key_roots(dag, keyed):
-    """Branch step -> the keyed fan-out whose item keys name its branches.
+    """Per-item step -> the keyed fan-out whose item keys name its branches.
 
     Branch identity travels down a chain of branch steps: branch i of a step
     branching over a branch step is still the fan-out's i-th item, so a chained
     step's parts are reusable by item key exactly like the first one's. Steps
-    branching over an unkeyed fan-out have no such name and stay out.
+    of an unkeyed fan-out's group have no such name and stay out.
     """
-    roots = {}
-    for name in dag.order:  # topo order: a branch dep is resolved before its dependents
-        dep = _branch_dep(dag.steps[name])
-        if dep in keyed:
-            roots[name] = dep
-        elif dep in roots:
-            roots[name] = roots[dep]
-    return roots
+    return {m: g.fanout for g in dag.groups.values() if g.fanout in keyed for m in g.order}
 
 
 def _downstream(dag, root):
@@ -159,51 +149,116 @@ def _branch_worker(payload):
     flow.config = cfg
     for k, v in payload["params"].items():
         setattr(flow, k, v)
-    step = flow_cls._dag.steps[payload["step"]]
-    run_id, branch = payload["run_id"], payload["branch"]
+    group = flow_cls._dag.groups[payload["group"]]
+    run_id, branch, pending = payload["run_id"], payload["branch"], payload["steps"]
     # own sampler only in a separate process; in thread mode the orchestrator's
     # sampler already covers this process (a second one would double-count CPU).
     # Each worker flushes to its OWN metrics key (one writer per object, no CAS),
     # so branch samples survive a run killed mid-branch up to the last flush.
-    sampler = None
+    sampler, active, label_lock = None, set(), threading.Lock()
+
+    def relabel():
+        # concurrent members share one process, so they share one sample label
+        if sampler:
+            sampler.mark("+".join(sorted(active)) or None, branch)
+
     if payload["sample"]:
-        metrics_key = layout.metrics_branch(run_id, step.name, branch)
+        metrics_key = layout.metrics_branch(run_id, group.fanout, branch)
 
         def flush_metrics(rows):
             metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
 
         sampler = metrics.Sampler(flush=flush_metrics).start()
-        sampler.mark(step.name, branch)
     retries = payload["retries"]
+
+    def run_member(name):
+        """One sub-step for this item, retried on its own — a flaky upload is not a re-search."""
+        step = flow_cls._dag.steps[name]
+        cur = con.cursor()  # own cursor: members of one item may run concurrently
+        with label_lock:
+            active.add(name)
+            relabel()
+        try:
+            for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
+                # transient step errors count too, and boto3 already retries at the HTTP layer
+                try:
+                    result = _call(cur, client, cfg, layout, flow, step, run_id, branch)
+                    write_part(
+                        client,
+                        cfg.bucket,
+                        layout.part(run_id, name, branch),
+                        result,
+                        step.output_table,
+                        threads=threads,
+                        memory_mb=memory_mb,
+                    )
+                    return
+                except Exception:
+                    if attempt == retries:
+                        raise
+        finally:
+            with label_lock:
+                active.discard(name)
+                relabel()
+            cur.close()
+
+    done, error = [], None
     try:
-        for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
-            # transient step errors count too, and boto3 already retries at the HTTP layer
+        if len(pending) == 1:  # the common single-step branch: no pool, no extra thread
             try:
-                result = _call(con, client, cfg, layout, flow, step, run_id, branch)
-                write_part(
-                    client,
-                    cfg.bucket,
-                    layout.part(run_id, step.name, branch),
-                    result,
-                    step.output_table,
-                    threads=threads,
-                    memory_mb=memory_mb,
-                )
-                break
-            except Exception:
-                if attempt == retries:
-                    raise
+                run_member(pending[0])
+                done.append(pending[0])
+            except Exception as e:  # noqa: BLE001 — reported to the orchestrator with the progress
+                error = e
+        else:
+            done, error = _run_sub_dag(group, pending, run_member)
     finally:
         if sampler:  # final superset write, on failure too — that's where perf data matters most
             try:
                 flush_metrics(sampler.stop())
             except Exception:  # noqa: BLE001 — metrics must never mask the branch's outcome
                 pass
-    return branch
+    # progress travels with the failure: resume restarts this item at its first
+    # incomplete sub-step, not at the top
+    return {"branch": branch, "done": done, "error": error}
 
 
-def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes, retries, params):
-    """Run branches in parallel; return (succeeded indices, first error).
+def _run_sub_dag(group, pending, run_member):
+    """Run one item's sub-steps, independent ones concurrently; return (done, first error).
+
+    Members already complete for this item are absent from `pending` — their
+    parts are on S3 and dependents read them from there.
+    """
+    ts = graphlib.TopologicalSorter({m: [d for d in group.deps[m] if d in pending] for m in pending})
+    ts.prepare()
+    done, error, running = [], None, {}
+    with ThreadPoolExecutor(max_workers=len(pending)) as ex:
+        while ts.is_active() and error is None:
+            for m in ts.get_ready():
+                running[ex.submit(run_member, m)] = m
+            if not running:
+                break
+            finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                m = running.pop(fut)
+                try:
+                    fut.result()
+                except Exception as e:  # noqa: BLE001 — its dependents are unreachable, siblings aren't
+                    error = error if error is not None else e
+                    continue
+                done.append(m)
+                ts.done(m)
+        for fut, m in running.items():  # siblings already in flight still count when they land
+            try:
+                fut.result()
+                done.append(m)
+            except Exception as e:  # noqa: BLE001
+                error = error if error is not None else e
+    return done, error
+
+
+def _run_items(flow_cls, cfg, run_id, group, items, max_workers, use_processes, retries, params):
+    """Run each item's sub-DAG in its own worker; return ({item: sub-steps done}, first error).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
     branches' parts durably on S3 for a later resume to reuse. Process-mode
@@ -211,13 +266,13 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
     unions them with the orchestrator's.
     """
     cores = os.cpu_count() or 1
-    workers = min(max_workers or cores, len(todo))
+    workers = min(max_workers or cores, len(items))
     payload = {
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
         "flow": flow_cls.__name__,  # for getattr after the file import
         "flow_id": flow_cls.flow_id(),  # for the Layout; see _branch_worker
-        "step": step.name,
+        "group": group.fanout,
         "run_id": run_id,
         "sample": use_processes,
         "retries": retries,
@@ -233,14 +288,18 @@ def _run_branches(flow_cls, cfg, run_id, step, todo, max_workers, use_processes,
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
     else:
         pool = ThreadPoolExecutor(max_workers=workers)
-    done, error = [], None
+    done, error = {}, None
     with pool as ex:
-        futures = [ex.submit(_branch_worker, {**payload, "branch": i}) for i in todo]
+        futures = [ex.submit(_branch_worker, {**payload, "branch": i, "steps": ms}) for i, ms in items.items()]
         for fut in as_completed(futures):
             try:
-                done.append(fut.result())
-            except Exception as e:  # noqa: BLE001 — surface the first, keep the rest
-                error = error or e
+                result = fut.result()
+            except Exception as e:  # noqa: BLE001 — a worker that died without reporting
+                error = error if error is not None else e
+                continue
+            done[result["branch"]] = result["done"]
+            if error is None:  # surface the first, keep the rest
+                error = result["error"]
     return done, error
 
 
@@ -428,39 +487,60 @@ def run(
         except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
             pass
 
+    def register(name):
+        cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
+
+    def run_group(group):
+        """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.
+
+        No barrier between sub-steps: item A can be in the last one while item B
+        is still in the first, so only `workers` items are ever in flight.
+        """
+        n = _count_of(completed, group.fanout)
+        for member in group.order:  # key-matched copies first: they shrink every item's work
+            left = [i for i in range(n) if _key(member, i) not in completed]
+            # key-matched reuse also needs the step's OTHER inputs identical
+            # to the origin's — any other keyed ancestor's change taints them
+            root = key_roots.get(member)
+            if left and root in fanout_keys and work_lists_unchanged(member, excluding=root):
+                reuse_matching_branches(member, root, left)
+        items = {}
+        for i in range(n):
+            if pending := [m for m in group.order if _key(m, i) not in completed]:
+                items[i] = pending
+        error = None
+        if items:
+            # process mode: workers measure the sub-steps; the orchestrator's pool-wait
+            # must not be attributed to them (step stays NULL). In thread mode one
+            # process runs interleaved items, so the whole group answers to one label.
+            label = group.order[0] if len(group.order) == 1 else group.fanout
+            sampler.mark(None if use_processes else label)
+            done, error = _run_items(
+                flow_cls,
+                config,
+                run_id,
+                group,
+                items,
+                max_workers,
+                use_processes,
+                branch_retries,
+                params,
+            )
+            for i, members in done.items():  # only the sub-steps that succeeded
+                completed.update(_key(m, i) for m in members)
+        for member in group.order:
+            if _count_of(completed, member) == n:  # sub-steps done for every item stay
+                register(member)  # queryable even when a later one killed the run
+        if error:
+            raise error
+
     try:
-        for name in dag.order:
+        for name in dag.plan:  # a fan-out node covers its group; members never stand alone
             step = dag.steps[name]
             if name in lazy_reuse and work_lists_unchanged(name):
                 reuse_step(name)
-            branch_dep = _branch_dep(step)
-            if branch_dep:
-                n = _count_of(completed, branch_dep)
-                todo = [i for i in range(n) if _key(name, i) not in completed]
-                # key-matched reuse also needs the step's OTHER inputs identical
-                # to the origin's — any other keyed ancestor's change taints them
-                root = key_roots.get(name)
-                if todo and root in fanout_keys and work_lists_unchanged(name, excluding=root):
-                    todo = reuse_matching_branches(name, root, todo)
-                if todo:
-                    # process mode: workers measure the step; the orchestrator's
-                    # pool-wait must not be attributed to it (step stays NULL)
-                    sampler.mark(None if use_processes else name)
-                    done, error = _run_branches(
-                        flow_cls,
-                        config,
-                        run_id,
-                        step,
-                        todo,
-                        max_workers,
-                        use_processes,
-                        branch_retries,
-                        params,
-                    )
-                    completed.update(_key(name, i) for i in done)  # only branches that succeeded
-                    if error:
-                        raise error
-            elif step.is_fanout:
+            group = dag.groups.get(name)
+            if step.is_fanout:
                 if not _count_of(completed, name):  # skip if a prior run already produced it
                     sampler.mark(name)
                     key_col = keyed.get(name)
@@ -488,12 +568,16 @@ def run(
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
                     completed.update(keys)
-            elif _key(name, 0) not in completed:
-                sampler.mark(name)
-                result = _call(con, client, config, layout, flow, step, run_id, None)
-                write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
-                completed.add(_key(name, 0))
-            cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
+                register(name)  # before its items run: a failing item leaves the fan-out queryable
+                if group:
+                    run_group(group)  # registers its own members, complete ones even on failure
+            else:
+                if _key(name, 0) not in completed:
+                    sampler.mark(name)
+                    result = _call(con, client, config, layout, flow, step, run_id, None)
+                    write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
+                    completed.add(_key(name, 0))
+                register(name)
             flush()
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]

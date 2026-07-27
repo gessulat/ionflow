@@ -2,7 +2,7 @@
 
 Status: accepted (2026-07-27)
 
-Refines 0008 (keyed incremental resume).
+Refines 0008 (keyed incremental resume); built on by 0015 (per-item sub-DAGs).
 
 ## Context
 

@@ -129,11 +129,13 @@ def run(
         "--allow-commit-drift",
         help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
     ),
-    max_workers: int = typer.Option(None, "--max-workers", help="Parallel branch workers (default: CPU count)"),
-    use_processes: bool = typer.Option(
-        True, "--processes/--threads", help="Run fan-out branches in worker processes or threads"
+    max_workers: int = typer.Option(
+        None, "--max-workers", help="Parallel item workers, one per fan-out item (default: CPU count)"
     ),
-    branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch"),
+    use_processes: bool = typer.Option(
+        True, "--processes/--threads", help="Run fan-out items in worker processes or threads"
+    ),
+    branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch sub-step"),
 ):
     """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     cls = _load(flow)
