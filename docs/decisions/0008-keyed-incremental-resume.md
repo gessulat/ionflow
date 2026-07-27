@@ -1,6 +1,6 @@
 # 0008 — Keyed incremental resume: items matched by `fanout_key`, one origin, one spelling
 
-Status: accepted (2026-07-26)
+Status: accepted (2026-07-26); refined by 0014 (branch identity travels down a chain)
 
 ## Context
 

@@ -100,10 +100,15 @@ ionflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
+  A step may branch over another branch step (`Branch[T]` names the upstream
+  *step*), giving chains of per-branch work; the chained step is sized from its
+  branch dep's parts and reads part `i` of every branch input.
   Keyed resume (0008): if the fan-out's Table declares a `fanout_key`, resume
   re-runs the fan-out, copies origin branch parts by item key (positions may
   shift), and reuses downstream steps only when the key set is unchanged; item
-  keys per fan-out are recorded as `fanout_keys` in `_meta.json`.
+  keys per fan-out are recorded as `fanout_keys` in `_meta.json`. Item keys name
+  every branch step down a chain, not just the first (0014) — chained steps are
+  key-matched too, never positionally reused.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
 - `publish.py` — bless one step's output from a complete run into the publish

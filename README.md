@@ -381,8 +381,10 @@ ionflow run mymodule:EmbedDocs --resume latest
 `--resume latest` resumes from the latest complete run (a first run is a normal full run).
 The fan-out re-runs to pick up the current work-list; branches whose source already
 exists in the origin are **server-side copied**, only new sources are embedded, and
-removed sources drop out. Downstream steps (the fan-in and beyond) recompute whenever
-the key set changed. The result is still one complete, immutable run folder — adding
+removed sources drop out. Every per-branch step is matched this way — including one
+that branches over another branch step's output — so the fan-out is free to list its
+items in any order. Steps that aren't per-branch (the fan-in and beyond) recompute
+whenever the key set changed. The result is still one complete, immutable run folder — adding
 one source to five hundred costs one source's compute, and
 `SELECT ... WHERE run_id = <new>` is always the full corpus.
 
@@ -451,7 +453,9 @@ the old id.
 ## Notes & limits
 
 - **DuckDB-first**, DataFrame-optional. polars/pandas are conveniences, not dependencies.
-- **One level of fan-out** (kept deliberately small).
+- **One level of fan-out** (kept deliberately small). Per-branch work can still be
+  split across steps — `Branch[T]` names the upstream *step*, so a branch step's
+  output feeds another branch step — but a fan-out inside a branch is not supported.
 - Reading from S3 uses DuckDB's `httpfs` extension, downloaded automatically on
   first use (one-time, per DuckDB version) — the very first run needs network
   access to the DuckDB extension repo.

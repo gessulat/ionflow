@@ -2,7 +2,7 @@
 
 import pyarrow as pa
 import pytest
-from flows import DupKeyFlow, KeyedFlow, KeyedItem, TwoKeyFlow
+from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow
 
 from ionflow import ConstraintViolation, ledger
 from ionflow.storage import Layout, s3_client, write_part
@@ -10,6 +10,10 @@ from ionflow.storage import Layout, s3_client, write_part
 
 def _put_n(cfg, n):
     s3_client(cfg).put_object(Bucket=cfg.bucket, Key="side/n", Body=str(n).encode())
+
+
+def _put_order(cfg, order):
+    s3_client(cfg).put_object(Bucket=cfg.bucket, Key="side/order", Body=order.encode())
 
 
 def _tokens(con, run_id):
@@ -114,6 +118,74 @@ def test_branch_reuse_tainted_by_other_keyed_ancestor(s3cfg, repo):
     con = TwoKeyFlow.duck(s3cfg)
     items = {r[0] for r in con.sql(f"SELECT item FROM work WHERE run_id = '{resumed}'").fetchall()}
     assert items == {"fixed-0@2", "fixed-1@2"}  # recomputed against the new collect input
+
+
+def _chain(con, run_id):
+    """item -> (work token, refine token, the work token refine actually read)."""
+    rows = con.sql(
+        "SELECT w.item, w.token, r.token, r.upstream FROM work w JOIN refine r USING (item, run_id) "
+        f"WHERE run_id = '{run_id}'"
+    ).fetchall()
+    return {item: (wt, rt, up) for item, wt, rt, up in rows}
+
+
+def _refine_runs(d):
+    """item -> how many times `refine` actually executed for it (marker files)."""
+    counts = {}
+    for f in d.iterdir():
+        _, item, _ = f.name.split("_")
+        counts[item] = counts.get(item, 0) + 1
+    return counts
+
+
+def _assert_aligned(con, run_id, items):
+    """Every item has exactly one work/refine pair, and refine read its own item's work."""
+    chain = _chain(con, run_id)
+    assert set(chain) == items
+    n = con.sql(f"SELECT count(*) FROM refine WHERE run_id = '{run_id}'").fetchone()[0]
+    assert n == len(items)  # no item computed twice, none dropped
+    for item, (work_token, _, upstream) in chain.items():
+        assert upstream == work_token, f"{item}: refine read another branch's work output"
+    return chain
+
+
+@pytest.mark.slow
+def test_keyed_resume_chained_branch_matches_new_items(s3cfg, repo):
+    """A grown work-list reuses matched branches through the whole chain."""
+    _put_n(s3cfg, 2)
+    origin = KeyedChainFlow.run(s3cfg, repo=repo, use_processes=False)
+    _put_n(s3cfg, 3)
+    resumed = KeyedChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
+
+    con = KeyedChainFlow.duck(s3cfg)
+    old = _assert_aligned(con, origin, {"file-0", "file-1"})
+    new = _assert_aligned(con, resumed, {"file-0", "file-1", "file-2"})
+    for item in old:  # matched items copied through both branch steps, not recomputed
+        assert new[item] == old[item]
+
+
+@pytest.mark.slow
+def test_keyed_resume_chained_branch_survives_reordered_worklist(s3cfg, repo, tmp_path, monkeypatch):
+    """Item keys, not branch positions, decide reuse — even for a partial chained step."""
+    _put_n(s3cfg, 2)
+    monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
+    monkeypatch.setenv("KEYED_CHAIN_FAIL", "file-1")
+    with pytest.raises(RuntimeError, match="file-1"):
+        KeyedChainFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    con = KeyedChainFlow.duck(s3cfg)
+    origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
+    old_work = dict(con.sql(f"SELECT item, token FROM work WHERE run_id = '{origin}'").fetchall())
+    monkeypatch.delenv("KEYED_CHAIN_FAIL")
+    _put_order(s3cfg, "rev")  # same keys, branch positions swapped
+    resumed = KeyedChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
+
+    con = KeyedChainFlow.duck(s3cfg)
+    new = _assert_aligned(con, resumed, {"file-0", "file-1"})
+    assert {item: t for item, (t, _, _) in new.items()} == old_work  # work matched by key
+    # file-0's refine completed in the origin and was copied despite moving branch;
+    # only file-1, which had failed, ran again
+    assert _refine_runs(tmp_path) == {"file-0": 1, "file-1": 2}
 
 
 def test_duplicate_fanout_keys_refused(s3cfg, repo):

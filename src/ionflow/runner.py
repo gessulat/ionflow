@@ -51,6 +51,29 @@ def _keyed_fanouts(dag):
     return out
 
 
+def _branch_dep(step):
+    """The step whose branches this one runs over — its branch index space, or None."""
+    return next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
+
+
+def _key_roots(dag, keyed):
+    """Branch step -> the keyed fan-out whose item keys name its branches.
+
+    Branch identity travels down a chain of branch steps: branch i of a step
+    branching over a branch step is still the fan-out's i-th item, so a chained
+    step's parts are reusable by item key exactly like the first one's. Steps
+    branching over an unkeyed fan-out have no such name and stay out.
+    """
+    roots = {}
+    for name in dag.order:  # topo order: a branch dep is resolved before its dependents
+        dep = _branch_dep(dag.steps[name])
+        if dep in keyed:
+            roots[name] = dep
+        elif dep in roots:
+            roots[name] = roots[dep]
+    return roots
+
+
 def _downstream(dag, root):
     """`root` plus every step reachable from it through dependency edges."""
     out = {root}
@@ -273,11 +296,11 @@ def run(
     # the key set is unchanged.
     keyed_downstream = {f: _downstream(dag, f) for f in keyed} if origin_run_id else {}
     deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
-    lazy_reuse = {
-        s
-        for s in deferred
-        if s not in keyed and not any(k == "BRANCH" and d in keyed for d, k in dag.steps[s].param_kinds.items())
-    }
+    key_roots = _key_roots(dag, keyed) if origin_run_id else {}
+    # Positional reuse is only safe where branch position carries no meaning:
+    # everything the fan-out's item keys name is matched by key instead, however
+    # deep in a branch chain it sits (positions shift when the work-list does).
+    lazy_reuse = {s for s in deferred if s not in keyed and s not in key_roots}
 
     def copy_part(name, src_branch, dst_branch):
         client.copy_object(
@@ -305,16 +328,20 @@ def run(
             with ThreadPoolExecutor(max_workers=16) as ex:
                 completed.update(ex.map(copy_same, parts))
 
-    def reuse_matching_branches(name, dep, todo):
-        """Copy origin branch parts whose item key matches; return what's left to compute."""
-        src = {k: j for j, k in enumerate(origin_fanout_keys.get(dep) or [])}
+    def reuse_matching_branches(name, root, todo):
+        """Copy origin branch parts whose item key matches; return what's left to compute.
+
+        `root` is the keyed fan-out naming the branches — the step itself for a
+        direct branch step, an ancestor for a chained one (0014).
+        """
+        src = {k: j for j, k in enumerate(origin_fanout_keys.get(root) or [])}
         if not src:
             warnings.warn(
-                f"origin run has no fanout keys for '{dep}' (predates fanout_key?); recomputing every '{name}' branch",
+                f"origin run has no fanout keys for '{root}' (predates fanout_key?); recomputing every '{name}' branch",
                 stacklevel=3,
             )
         hits = [
-            (i, src[k]) for i in todo if (k := fanout_keys[dep][i]) in src and _key(name, src[k]) in origin_completed
+            (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and _key(name, src[k]) in origin_completed
         ]
         if hits:
             with ThreadPoolExecutor(max_workers=16) as ex:
@@ -406,19 +433,15 @@ def run(
             step = dag.steps[name]
             if name in lazy_reuse and work_lists_unchanged(name):
                 reuse_step(name)
-            branch_dep = next((d for d, k in step.param_kinds.items() if k == "BRANCH"), None)
+            branch_dep = _branch_dep(step)
             if branch_dep:
                 n = _count_of(completed, branch_dep)
                 todo = [i for i in range(n) if _key(name, i) not in completed]
                 # key-matched reuse also needs the step's OTHER inputs identical
                 # to the origin's — any other keyed ancestor's change taints them
-                if (
-                    todo
-                    and origin_run_id
-                    and branch_dep in fanout_keys
-                    and work_lists_unchanged(name, excluding=branch_dep)
-                ):
-                    todo = reuse_matching_branches(name, branch_dep, todo)
+                root = key_roots.get(name)
+                if todo and root in fanout_keys and work_lists_unchanged(name, excluding=root):
+                    todo = reuse_matching_branches(name, root, todo)
                 if todo:
                     # process mode: workers measure the step; the orchestrator's
                     # pool-wait must not be attributed to it (step stays NULL)

@@ -11,7 +11,7 @@ import uuid
 import pyarrow as pa
 
 from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, fanout_key
-from ionflow.storage import s3_client
+from ionflow.storage import get_bytes_or_none, s3_client
 
 
 class Src(Table):
@@ -97,6 +97,12 @@ def _side_n(config):
     return int(s3_client(config).get_object(Bucket=config.bucket, Key="side/n")["Body"].read())
 
 
+def _side_order(config):
+    """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
+    blob = get_bytes_or_none(s3_client(config), config.bucket, "side/order")
+    return blob.decode() if blob else "fwd"
+
+
 class SideInputFlow(Flow):
     """Reads a side object via self.config — in a root step and inside a branch."""
 
@@ -164,6 +170,82 @@ class TwoKeyFlow(Flow):
         item = fixed.project("item").fetchone()[0]
         n = others.aggregate("count(*) AS n").fetchone()[0]  # output depends on the collect
         return pa.table({"item": [f"{item}@{n}"], "token": [uuid.uuid4().hex]})
+
+
+class Refined(Table):
+    g: int  # the fan-out item's g, read from the fan-out part
+    seen: int  # the same g as it arrives through the upstream branch's output
+    quadrupled: int
+
+
+def _mark(step, g):
+    """Record one execution of `step` on branch `g` (only when CHAIN_DIR is set)."""
+    if d := os.environ.get("CHAIN_DIR"):
+        pathlib.Path(d, f"{step}_{g}_{uuid.uuid4().hex}").touch()
+
+
+class ChainFlow(Flow):
+    """Chained branches: `refine` branches over `work`, itself a branch of `parts`.
+
+    CHAIN_FAIL="<step>:<g>" fails one branch of one step; CHAIN_DIR collects a
+    marker per branch execution, so a resume's reuse is visible.
+    """
+
+    def source(self) -> Src:
+        return pa.table({"g": [0, 1, 2]})
+
+    def parts(self, source: Src) -> Fanout[Part]:
+        return [source.filter(f"g = {g}") for g in (0, 1, 2)]
+
+    def work(self, parts: Branch[Part]) -> Out:
+        g = parts.project("g").fetchone()[0]
+        _mark("work", g)
+        if os.environ.get("CHAIN_FAIL") == f"work:{g}":
+            raise RuntimeError(f"boom on work g={g}")
+        return parts.project("g, g * 2 AS doubled")
+
+    def refine(self, parts: Branch[Part], work: Branch[Out]) -> Refined:
+        """Two branch inputs at the same index: the fan-out item and `work`'s output."""
+        g = parts.project("g").fetchone()[0]
+        _mark("refine", g)
+        if os.environ.get("CHAIN_FAIL") == f"refine:{g}":
+            raise RuntimeError(f"boom on refine g={g}")
+        return work.project(f"{g} AS g, g AS seen, doubled * 2 AS quadrupled")
+
+    def total(self, refine: Collect[Refined]) -> Agg:
+        return refine.aggregate("count(*) AS n, sum(quadrupled) AS total")
+
+
+class KeyedRefined(Table):
+    item: str
+    token: str
+    upstream: str  # the token of the `work` output this branch was computed from
+
+
+class KeyedChainFlow(Flow):
+    """Keyed fan-out feeding a chained branch step, for incremental resume.
+
+    Fan-out size comes from `side/n` and its order from `side/order`, so a resume
+    can grow, shrink or merely reorder the work-list; KEYED_CHAIN_FAIL="<item>"
+    fails `refine` for one item, which marks its executions in CHAIN_DIR.
+    """
+
+    def items(self) -> Fanout[KeyedItem]:
+        gs = list(range(_side_n(self.config)))
+        if _side_order(self.config) == "rev":
+            gs.reverse()
+        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in gs]
+
+    def work(self, items: Branch[KeyedItem]) -> KeyedOut:
+        item = items.project("item").fetchone()[0]
+        return pa.table({"item": [item], "token": [uuid.uuid4().hex]})
+
+    def refine(self, work: Branch[KeyedOut]) -> KeyedRefined:
+        item, token = work.project("item, token").fetchone()
+        _mark("refine", item)
+        if item == os.environ.get("KEYED_CHAIN_FAIL"):
+            raise RuntimeError(f"boom on {item}")
+        return pa.table({"item": [item], "token": [uuid.uuid4().hex], "upstream": [token]})
 
 
 class EmptyFanFlow(Flow):

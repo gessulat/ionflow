@@ -47,6 +47,26 @@ def test_output_tables():
     assert dag.steps["result"].output_table is Final
 
 
+class Chained:
+    """Two branch steps in a row: `polished` branches over `scored`, not the fan-out."""
+
+    def raw(self) -> Raw: ...
+    def chunks(self, raw: Raw) -> Fanout[Chunk]: ...
+    def scored(self, chunks: Branch[Chunk]) -> Score: ...
+    def polished(self, chunks: Branch[Chunk], scored: Branch[Score]) -> Score: ...
+    def result(self, polished: Collect[Score]) -> Final: ...
+
+
+def test_chained_branch_shape():
+    dag = build_dag(Chained)
+    assert dag.order == ["raw", "chunks", "scored", "polished", "result"]
+    # a branch step's output is a plain table, so branching over it is just BRANCH again
+    assert not dag.steps["scored"].is_fanout
+    assert dag.steps["polished"].param_kinds == {"chunks": "BRANCH", "scored": "BRANCH"}
+    assert dag.steps["polished"].deps == ["chunks", "scored"]
+    assert dag.steps["result"].param_kinds == {"polished": "COLLECT"}
+
+
 def test_unknown_param_rejected():
     class Bad:
         def a(self) -> Raw: ...

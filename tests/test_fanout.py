@@ -1,11 +1,20 @@
 import pytest
-from flows import EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow
+from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow
 
 
 def _exec_counts(d):
     counts = {0: 0, 1: 0, 2: 0}
     for f in d.iterdir():
         counts[int(f.name.split("_")[1])] += 1
+    return counts
+
+
+def _chain_counts(d, step):
+    counts = {0: 0, 1: 0, 2: 0}
+    for f in d.iterdir():
+        name, g, _ = f.name.split("_")
+        if name == step:
+            counts[int(g)] += 1
     return counts
 
 
@@ -86,6 +95,87 @@ def test_steps_read_side_inputs_via_config(s3cfg, repo):
     con = SideInputFlow.duck(s3cfg)
     # 3 branches (fan-out sized by the side read), each doubled by n=3 (branch-side read)
     assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (3, 9)
+
+
+def test_chained_branch_steps_stay_aligned(s3cfg, repo):
+    """`refine` branches over `work` (itself a branch): one call per branch, same index."""
+    run_id = ChainFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    con = ChainFlow.duck(s3cfg)
+    rows = con.sql(f"SELECT g, seen, quadrupled FROM refine WHERE run_id = '{run_id}' ORDER BY g").fetchall()
+    # one row per branch: the chained step saw only its own branch's `work` part,
+    # and `seen` (from work) matches `g` (from the fan-out part) — inputs are aligned
+    assert rows == [(0, 0, 0), (1, 1, 4), (2, 2, 8)]
+    assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{run_id}'").fetchone() == (3, 12)
+    assert con.sql(f"SELECT status FROM ledger WHERE run_id = '{run_id}'").fetchone()[0] == "complete"
+
+
+@pytest.mark.slow
+def test_chained_branch_in_process_mode(s3cfg, repo, tmp_path, monkeypatch):
+    """The chained step fans out across worker processes too, and each is measured."""
+    monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
+    run_id = ChainFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=3)
+
+    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
+    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}
+
+    con = ChainFlow.duck(s3cfg)
+    assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{run_id}'").fetchone() == (3, 12)
+    measured = {
+        r
+        for r in con.sql(
+            f"SELECT DISTINCT step, branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
+        ).fetchall()
+    }
+    assert measured == {(s, b) for s in ("work", "refine") for b in (0, 1, 2)}
+
+
+@pytest.mark.slow
+def test_chained_branch_resume_reruns_only_the_failed_branch(s3cfg, repo, tmp_path, monkeypatch):
+    """A failure in the second branch step reuses the first one's parts wholesale."""
+    monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
+    monkeypatch.setenv("CHAIN_FAIL", "refine:1")
+
+    with pytest.raises(RuntimeError, match="refine g=1"):
+        ChainFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    con = ChainFlow.duck(s3cfg)
+    origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
+    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
+
+    monkeypatch.delenv("CHAIN_FAIL")
+    resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
+
+    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}  # copied, never re-run
+    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 2, 2: 1}  # only branch 1 re-ran
+
+    con = ChainFlow.duck(s3cfg)
+    rows = con.sql(f"SELECT g, seen, quadrupled FROM refine WHERE run_id = '{resumed}' ORDER BY g").fetchall()
+    assert rows == [(0, 0, 0), (1, 1, 4), (2, 2, 8)]  # reused and recomputed branches agree
+    assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{resumed}'").fetchone() == (3, 12)
+
+
+@pytest.mark.slow
+def test_chained_branch_resume_after_upstream_branch_failure(s3cfg, repo, tmp_path, monkeypatch):
+    """`work` fails mid-fan-out: the resume re-runs that branch, then every `refine`."""
+    monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
+    monkeypatch.setenv("CHAIN_FAIL", "work:2")
+
+    with pytest.raises(RuntimeError, match="work g=2"):
+        ChainFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    con = ChainFlow.duck(s3cfg)
+    origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
+    assert _chain_counts(tmp_path, "refine") == {0: 0, 1: 0, 2: 0}  # never reached
+
+    monkeypatch.delenv("CHAIN_FAIL")
+    resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
+
+    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 2}
+    # the chained step sizes its fan-out from `work`'s parts, reused and fresh alike
+    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}
+    con = ChainFlow.duck(s3cfg)
+    assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{resumed}'").fetchone() == (3, 12)
 
 
 def test_empty_fanout_completes(s3cfg, repo):
