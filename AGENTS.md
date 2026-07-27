@@ -80,7 +80,12 @@ ionflow query myproj.flows:Training \
   `Table.fanout_key_column()` reads it back.
   `FlowParams`: typed run inputs (inner `class Params`), int/float/str/bool only.
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
-  `Collect` markers; validated at class definition.
+  `Collect` markers; validated at class definition. Every branch step belongs to the
+  `Group` of the fan-out rooting its chain (0015); `dag.plan` is the step order with
+  each group contracted into its fan-out node, and `group.deps` the intra-item edges.
+  Refused here: a fan-out inside a branch, a per-item step reading a sibling per-item
+  step whole (`Collect`/plain instead of `Branch`), a `Branch[...]` over a step that is
+  neither, and a fan-in feeding back into its own fan-out (a cycle once contracted).
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`, keyed by
   `flow_id()` = module-qualified class name — also the S3 namespace (rename/move a
   class = new flow); the runner
@@ -100,10 +105,22 @@ ionflow query myproj.flows:Training \
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
   never races across cold workers. Missing/unreadable parts now surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
+  A step may branch over another branch step (`Branch[T]` names the upstream
+  *step*), so a branch is a whole sub-DAG. It runs **per item, not per stage**
+  (0015): one worker owns one item end to end (`_run_items` -> `_branch_worker`
+  -> `_run_sub_dag`), independent sub-steps run concurrently in threads (own
+  DuckDB cursor each), and item A can be in the last sub-step while item B is on
+  the first — so intermediates scale with `max_workers`, not the work-list.
+  Members of one item are same-process by construction and may hand over local
+  artifacts by path. Completion is per (item, sub-step): `branch_retries` retries
+  one sub-step, resume restarts an item at its first incomplete one, and
+  sub-steps complete for every item are registered even when a later one fails.
   Keyed resume (0008): if the fan-out's Table declares a `fanout_key`, resume
   re-runs the fan-out, copies origin branch parts by item key (positions may
   shift), and reuses downstream steps only when the key set is unchanged; item
-  keys per fan-out are recorded as `fanout_keys` in `_meta.json`.
+  keys per fan-out are recorded as `fanout_keys` in `_meta.json`. Item keys name
+  every branch step down a chain, not just the first (0014) — chained steps are
+  key-matched too, never positionally reused.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
 - `publish.py` — bless one step's output from a complete run into the publish
@@ -113,9 +130,12 @@ ionflow query myproj.flows:Training \
   Still a copy into the lake's data path, never a pointer (0009).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
-  run heartbeat); process-mode branch workers each flush their own
-  `_metrics_<step>_<branch>.parquet` (crash-durable branch samples); the `metrics`
-  view unions all of them.
+  run heartbeat); process-mode item workers each flush their own
+  `_metrics_<fanout>_<branch>.parquet` (crash-durable per-item samples — one object
+  per item, the worker covers its whole sub-DAG); the `metrics` view unions all of
+  them. Sub-steps running concurrently in one worker share one label
+  (`upload_db+search`) and NULL means the worker is between sub-steps; in thread
+  mode the group answers to the fan-out's name (one process interleaves items).
 - `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
   (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0010).
   `write_part` streams: cast-projection COPY
