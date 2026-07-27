@@ -1,5 +1,8 @@
 # 0001 — schrein starts as a uv workspace member inside the ionflow repo
 
+> Superseded by [0006](0006-sibling-workspace-member.md): schrein now sits at
+> `packages/schrein/`. Paths below are historical.
+
 The spec (`docs/specs/cas-catalog-library.md` at the repo root) is written
 for a fresh repository. The first stages (M0 CAS core, M1 DuckLake adapter)
 are instead developed here, as an independent uv workspace member under

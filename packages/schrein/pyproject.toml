@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["ducklake", "lakehouse", "catalog", "duckdb", "s3", "cas"]
 dependencies = [
     "boto3>=1.35",
@@ -17,6 +18,10 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.ruff]
+extend = "../../pyproject.toml"  # rules are repo-wide; inside schrein, schrein is first-party
+src = ["src"]
 
 [dependency-groups]
 dev = [

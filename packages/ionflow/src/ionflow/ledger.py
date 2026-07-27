@@ -1,7 +1,6 @@
 import json
 
 import pyarrow as pa
-
 from schrein import CasRegister
 
 from . import storage

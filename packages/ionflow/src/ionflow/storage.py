@@ -13,9 +13,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
-from schrein.ducklake import CATALOG_KEY, load_extension
-
 from schrein import CasRegister, DuckLake, LocalClient
+from schrein.ducklake import CATALOG_KEY, load_extension
 
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np

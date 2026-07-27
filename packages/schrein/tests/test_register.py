@@ -3,9 +3,9 @@
 import pytest
 from botocore.exceptions import ClientError
 from helpers import error_code, make_client, run_threads
-from schrein.register import RETRYABLE
 
 from schrein import CasRegister, CommitConflict
+from schrein.register import RETRYABLE
 
 KEY = "reg/state"
 

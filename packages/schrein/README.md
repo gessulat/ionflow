@@ -9,7 +9,7 @@ infrastructure other than one S3-compatible bucket** — no Postgres, no
 catalog server, no lock service. DuckLake only, deliberately
 (decision 0004).
 
-Full spec: [docs/specs/cas-catalog-library.md](https://github.com/gessulat/ionflow/blob/main/docs/specs/cas-catalog-library.md)
+Full spec: [docs/specs/cas-catalog-library.md](https://github.com/gessulat/ionflow/blob/main/packages/schrein/docs/specs/cas-catalog-library.md)
 (an absolute link so it survives packaging and extraction).
 Status: M0 (CAS core), M1 (DuckLake adapter), and M2 (maintenance:
 expire/gc/probe) implemented — the full DuckLake-only scope.
@@ -74,11 +74,11 @@ at commits-per-minute. Backblaze B2 is unsupported (no `If-Match`).
 
 ## Development
 
-Part of the ionflow repo as a uv workspace member (see
-`docs/decisions/0001`):
+A sibling package in the ionflow repo's uv workspace, under
+`packages/schrein/` (see `docs/decisions/0006`). From the repo root:
 
 ```bash
-cd schrein
-uv run pytest          # fast set (parallel, moto subprocess)
-uv run pytest -m ""    # full suite incl. the slow CAS-contention hammer
+uv sync                                          # one env for the whole workspace
+uv run --directory packages/schrein pytest       # fast set (parallel, moto subprocess)
+uv run --directory packages/schrein pytest -m "" # full suite incl. the slow CAS-contention hammer
 ```

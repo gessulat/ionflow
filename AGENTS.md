@@ -5,19 +5,39 @@ persisted as Parquet on S3. Only infra: one S3-compatible bucket — or none:
 local mode (`Config.local_dir`, `ionflow setup --local`) stores everything in a
 directory via schrein's `LocalClient`, `ionflow sync` pushes a flow's history
 to a bucket later (0016). DuckDB-first.
-See README.md for user-facing docs. Design decisions (the *why* behind
-non-obvious choices) live in `docs/decisions/` — check there before changing
-architecture, add a numbered record when you make such a decision.
+See `packages/ionflow/README.md` for user-facing docs. Design decisions (the *why*
+behind non-obvious choices) live in `packages/ionflow/docs/decisions/` — check there
+before changing architecture, add a numbered record when you make such a decision.
+
+## Repo layout (uv workspace)
+
+The repo root is a **workspace root only** — no package lives there (decision 0017).
+`ionflow` and `schrein` are siblings under `packages/`, each with its own
+`pyproject.toml`, dev group, test suite, README, `docs/decisions/` and LICENSE:
+
+```
+pyproject.toml            # [tool.uv.workspace] + repo-wide ruff/ty config, no [project]
+packages/ionflow/         # src/, tests/, examples/, docs/{decisions,specs,screenshots}/
+packages/schrein/         # src/, tests/, docs/{decisions,specs}/
+```
+
+`uv sync` at the root builds **one** environment holding both members and every
+dev group, so `uv run` works from anywhere in the repo; `--directory` picks which
+member's config (pytest, in particular) applies. Paths below are relative to the
+repo root unless stated otherwise.
 
 ## Testing (important)
 
 ```bash
-uv run pytest              # default: fast set (incl. doctests)
-uv run pytest -m ""        # FULL suite — run this before committing
-uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
+uv run --directory packages/ionflow pytest        # default: fast set (incl. doctests)
+uv run --directory packages/ionflow pytest -m ""  # FULL suite — run this before committing
+uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
 ```
 
-- Tests run **parallel by default** (`-n 5 --dist worksteal`, set in pyproject).
+- There is **no root test suite** (decision 0017): always pass `--directory` (or
+  `cd` into the package). A bare `uv run pytest` at the root is a mistake.
+- Tests run **parallel by default** (`-n 5 --dist worksteal`, set in the member's
+  pyproject).
 - The heaviest integration tests are marked `slow` and **skipped by default**:
   CLI end-to-end, process-pool run, and every multi-run resume test (plain and
   keyed/incremental). `-m ""` includes them.
@@ -34,15 +54,20 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 ## Commands
 
 ```bash
-uv sync                       # install (uv-managed, Python >=3.12)
+uv sync                       # install the whole workspace (uv-managed, Python >=3.12)
+uv run ruff check             # lint + typecheck are repo-wide, run from the root
+uv run ty check
+uv build --all-packages       # both wheels into dist/
 uv run ionflow               # bare command opens the TUI
 uv run ionflow setup         # wizard: writes .ionflow/config (TOML); --local = bucket-free dir store
 uv run ionflow sync myproj:Annotate --to s3://bucket   # push local-store history to a bucket
-uv run ionflow run examples.embed:EmbedDocs            # sizing: --max-workers/--threads/--branch-retries
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
-uv run ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
-uv run ionflow stats examples.embed:EmbedDocs          # per-step resources, latest run
 uv run ionflow publish myproj:Annotate <run_id> <step> blessed_table  # --to s3://bucket/prefix
+
+# the bundled example flow lives in the ionflow package, so run it from there
+uv run --directory packages/ionflow ionflow run examples.embed:EmbedDocs   # sizing: --max-workers/--threads/--branch-retries
+uv run --directory packages/ionflow ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
+uv run --directory packages/ionflow ionflow stats examples.embed:EmbedDocs # per-step resources, latest run
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -68,7 +93,7 @@ ionflow query myproj.flows:Training \
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
 
-## Architecture (one line per module, src/ionflow/)
+## Architecture (one line per module, packages/ionflow/src/ionflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` /
@@ -183,8 +208,11 @@ ionflow query myproj.flows:Training \
 
 ## Conventions & gotchas
 
-- Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
-  **no pandas/polars in core** (steps may return anything arrow-convertible).
+- Deps via `uv add` only, and name the member it belongs to:
+  `uv add --package ionflow <dep>` (`--dev` for the dev group). Core deps:
+  duckdb, boto3, pyarrow, typer, textual — **no pandas/polars in core**
+  (steps may return anything arrow-convertible). ruff and ty are the exception:
+  repo-wide tooling, so they live in the root's dev group.
 - Runs refuse a dirty git tree, without exception. Tests always create/commit
   a repo first.
 - Untyped steps (no return annotation) are a class-definition error.
@@ -196,20 +224,21 @@ ionflow query myproj.flows:Training \
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
   has been quiet for 300s; its metrics survive up to the last flush.
 
-## schrein (uv workspace member, `schrein/`)
+## schrein (sibling workspace package, `packages/schrein/`)
 
 Sibling library: zero-infrastructure DuckLake catalogs on S3 conditional
 writes (DuckLake only — schrein decision 0004), or on a plain directory via
 `LocalClient` — a boto3-shaped client with enforced conditional writes,
-single-host by design (schrein decision 0005). Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
+single-host by design (schrein decision 0005). Spec:
+`packages/schrein/docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
 two things — `CasRegister` under the ledger (0011) and `DuckLake` under
 the catalog (0012); schrein must never import ionflow. Its decisions live
-in `schrein/docs/decisions/` (own numbering).
+in `packages/schrein/docs/decisions/` (own numbering).
 
-- Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
-  (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't
-  collect it.
+- Test it with `uv run --directory packages/schrein pytest` (fast set) or `-m ""`
+  (full, incl. the CAS-contention hammer). Nothing collects it alongside
+  ionflow's suite.
 - Its tests launch `schrein.testing`, NOT bare moto: moto's
   conditional PUTs race under threads and silently lose updates
   (schrein decision 0003).

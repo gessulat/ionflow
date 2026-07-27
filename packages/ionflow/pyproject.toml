@@ -1,0 +1,68 @@
+[project]
+name = "ionflow"
+version = "0.1.0"
+description = "A barebones Metaflow alternative: typed table flows on S3, no scheduler."
+readme = "README.md"
+authors = [
+    { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
+]
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["pipeline", "workflow", "dataflow", "duckdb", "parquet", "s3", "metaflow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "boto3>=1.43.43",
+    "duckdb>=1.5.4",
+    "psutil>=7.2.2",
+    "pyarrow>=24.0.0",
+    "schrein",
+    "textual>=8.2.8",
+    "typer>=0.26.8",
+]
+
+[project.urls]
+Repository = "https://github.com/gessulat/ionflow"
+Issues = "https://github.com/gessulat/ionflow/issues"
+
+[project.scripts]
+ionflow = "ionflow.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+schrein = { workspace = true }
+
+[tool.ruff]
+extend = "../../pyproject.toml"  # rules are repo-wide; these roots are ionflow's
+src = ["src", "."]  # `.` for `examples`, imported by the tests
+
+[tool.ruff.lint.per-file-ignores]
+"src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom
+
+[dependency-groups]
+dev = [
+    "moto[s3,server]>=5.2.2",
+    "numpy>=2.5.1",
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# Fast by default: parallel, and the 4 heaviest integration tests are excluded.
+# Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
+addopts = "-n 5 --dist worksteal --doctest-modules -m 'not slow'"
+testpaths = ["tests", "src/ionflow"]
+markers = ["slow: heavy integration tests (CLI e2e, process pool, resume); run with -m ''"]

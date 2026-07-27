@@ -5,7 +5,7 @@ Status: accepted (2026-07-26)
 The ledger's one mutation — append a run row, conditionally, retrying on
 412 — needs a read → modify → conditional-PUT → retry loop plus its
 helpers (get-or-absent, precondition codes, an If-Match-forwarding
-parquet PUT). schrein's `CasRegister` (`schrein/src/schrein/register.py`)
+parquet PUT). schrein's `CasRegister` (`packages/schrein/src/schrein/register.py`)
 is exactly that kernel, generalized and hammer-tested: its suite proves
 N×M concurrent commits lose nothing. Carrying a private copy of the same
 loop in `ledger.py` was rejected — a duplicate of a kernel the workspace

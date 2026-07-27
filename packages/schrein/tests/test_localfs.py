@@ -5,9 +5,9 @@ import datetime as dt
 import pytest
 from botocore.exceptions import ClientError
 from helpers import error_code, run_threads, upload_rows
-from schrein.register import RETRYABLE
 
 from schrein import CasRegister, DuckLake, LocalClient
+from schrein.register import RETRYABLE
 
 KEY = "pre/fix/reg/state"
 
