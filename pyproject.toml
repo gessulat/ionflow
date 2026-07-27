@@ -1,58 +1,13 @@
-[project]
-name = "ionflow"
-version = "0.1.0"
-description = "A barebones Metaflow alternative: typed table flows on S3, no scheduler."
-readme = "README.md"
-authors = [
-    { name = "Siegfried Gessulat", email = "s.gessulat@gmail.com" }
-]
-requires-python = ">=3.12"
-license = "MIT"
-license-files = ["LICENSE"]
-keywords = ["pipeline", "workflow", "dataflow", "duckdb", "parquet", "s3", "metaflow"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Typing :: Typed",
-]
-dependencies = [
-    "boto3>=1.43.43",
-    "duckdb>=1.5.4",
-    "psutil>=7.2.2",
-    "pyarrow>=24.0.0",
-    "schrein",
-    "textual>=8.2.8",
-    "typer>=0.26.8",
-]
-
-[project.urls]
-Repository = "https://github.com/gessulat/ionflow"
-Issues = "https://github.com/gessulat/ionflow/issues"
-
-[project.scripts]
-ionflow = "ionflow.cli:main"
-
-[build-system]
-requires = ["uv_build>=0.11.2,<0.12.0"]
-build-backend = "uv_build"
+# Workspace root only — no package lives here. `ionflow` and `schrein` are
+# siblings under `packages/` (ionflow decision 0016, schrein decision 0005).
+# `uv sync` here builds one environment holding both members and every dev
+# group; lint and type-check configuration is repo-wide and stays here.
 
 [tool.uv.workspace]
-members = ["schrein"]
-
-[tool.uv.sources]
-schrein = { workspace = true }
+members = ["packages/*"]
 
 [dependency-groups]
 dev = [
-    "moto[s3,server]>=5.2.2",
-    "numpy>=2.5.1",
-    "pytest>=9.1.1",
-    "pytest-xdist>=3.8.0",
     "ruff>=0.15.21",
     "ty>=0.0.63",
 ]
@@ -62,21 +17,26 @@ dev = [
 # annotations deliberately mean "output schema", not runtime type (a step
 # annotated `-> Summary` returns an arrow table; a `Branch[Part]` param is a
 # lazy relation) — a nominal checker rejects that by design.
-include = ["src"]
+# schrein's src has never been in scope; adding it is its own change, not a
+# side effect of the layout.
+include = ["packages/ionflow/src"]
+
+# No `[tool.pytest.ini_options]` here, deliberately: each member owns its suite
+# (its own conftest, markers and moto harness — the two collide if collected
+# together). Run them with `uv run --directory packages/<name> pytest`.
 
 [tool.ruff]
 line-length = 120
+# Stated, not inferred: the root has no `[project]` to read `requires-python`
+# from, and the default would demote `tomllib` to a third-party import.
+target-version = "py312"
+# ionflow's package roots, so isort keeps classifying `ionflow` and `examples`
+# as first-party now that they no longer sit at the repo root. `schrein` stays
+# third-party — it is a dependency of ionflow, not part of it.
+src = ["packages/ionflow", "packages/ionflow/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "BLE"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-# Fast by default: parallel, and the 4 heaviest integration tests are excluded.
-# Run everything with `uv run pytest -m ""`; use `-n 0` when debugging one test.
-addopts = "-n 5 --dist worksteal --doctest-modules -m 'not slow'"
-testpaths = ["tests", "src/ionflow"]
-markers = ["slow: heavy integration tests (CLI e2e, process pool, resume); run with -m ''"]
+"packages/ionflow/src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom

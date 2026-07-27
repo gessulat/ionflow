@@ -88,7 +88,7 @@ schemas and data-file registrations.
 | Project | What it proves | Link |
 |---|---|---|
 | **Frozen DuckLake** (DuckDB team, Oct 2025) | The *read* side is official: a DuckLake catalog written as a single DuckDB-format file, copied to object storage, attached read-only by any vanilla DuckDB client. Our library is "frozen, plus a safe multi-writer commit protocol." | [blog post](https://ducklake.select/2025/10/24/frozen-ducklake/), [guide](https://ducklake.select/docs/stable/duckdb/guides/public_ducklake_on_object_storage), [PyPI helper](https://pypi.org/project/frozen-ducklake/) |
-| **ionflow `ledger.py`** | The exact CAS loop (read → modify → `If-Match` PUT → retry on 412) running in production against S3/moto/MinIO. Code reproduced in §7. | `src/ionflow/ledger.py` in the ionflow repo |
+| **ionflow `ledger.py`** | The exact CAS loop (read → modify → `If-Match` PUT → retry on 412) running in production against S3/moto/MinIO. Code reproduced in §7. | `packages/ionflow/src/ionflow/ledger.py` in the ionflow repo |
 | **Delta Lake S3 commit protocol** | Optimistic commits over object storage at scale. Historically needed DynamoDB for put-if-absent; delta-rs now uses native S3 conditional writes. This is the log-structured "second gear" of our design (§9). | [Delta storage docs](https://docs.delta.io/latest/delta-storage.html), [delta-rs](https://delta-io.github.io/delta-rs/) |
 | **Boring Catalog** | An Iceberg catalog as a *single JSON file on S3* using conditional writes, implemented as a PyIceberg custom catalog. Validates the catalog-file-plus-conditional-writes shape — but **dormant**: 12 commits by a single author, 2025-04→2025-05, nothing since (§2.1). A design reference to read, not a dependency to adopt. | [GitHub](https://github.com/boringdata/boring-catalog), [design writeup](https://juhache.substack.com/p/boring-iceberg-catalog) |
 | **Quack** (DuckDB team, May 2026) | The server-shaped alternative: a protocol/extension making a DuckDB-file catalog safely shared via a server process. Proves demand; still requires running a process, which is what we avoid. | [overview](https://www.definite.app/blog/duckdb-quack-ducklake-catalog) |
@@ -492,7 +492,7 @@ This section originally reproduced ~250 lines of code verbatim (the CAS
 loop condensed from `ledger.py`, a complete `register.py`, the DuckLake
 adapter sketch, and the moto conftest) so the library could be built in a
 blank repository. The library exists now — the code of record is
-`schrein/src/schrein/` and `schrein/tests/`, and the listings had already
+`packages/schrein/src/schrein/` and `packages/schrein/tests/`, and the listings had already
 begun to drift from it. What carried over, and where it lives:
 
 - **The CAS loop** (`upsert_run`'s read → modify → conditional-PUT →
@@ -571,9 +571,9 @@ the harness is parallel-safe by construction (one server, unique buckets).
 
 ## 11. Repository skeleton
 
-Realized — see `schrein/` in this repository (a uv workspace member,
-schrein decision 0001): `src/schrein/{register,ducklake,testing}.py`,
-`tests/`, `docs/decisions/`. Packaging lives in `schrein/pyproject.toml`.
+Realized — see `packages/schrein/` in this repository (a sibling uv
+workspace package, schrein decisions 0001 and 0005): `src/schrein/{register,ducklake,testing}.py`,
+`tests/`, `docs/decisions/`. Packaging lives in `packages/schrein/pyproject.toml`.
 
 ## 12. Milestones
 
@@ -663,7 +663,7 @@ Commit-protocol prior art & contrast:
 [Cloud-Backed SQLite](https://sqlite.org/cloudsqlite/doc/trunk/www/index.wiki)
 
 ionflow (origin repo; code reproduced in §7 so this doc stands alone):
-`src/ionflow/ledger.py` (CAS loop) ·
-`src/ionflow/storage.py` (`error_code`, `MISSING_KEY_CODES`, conditional `put_parquet`) ·
-`tests/conftest.py` (moto subprocess harness) ·
-`docs/decisions/` (ADR practice worth copying)
+`packages/ionflow/src/ionflow/ledger.py` (CAS loop) ·
+`packages/ionflow/src/ionflow/storage.py` (`error_code`, `MISSING_KEY_CODES`, conditional `put_parquet`) ·
+`packages/ionflow/tests/conftest.py` (moto subprocess harness) ·
+`packages/ionflow/docs/decisions/` (ADR practice worth copying)

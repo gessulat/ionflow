@@ -14,9 +14,8 @@ import pathlib
 import shutil
 import tempfile
 
-from schrein.ducklake import CATALOG_KEY
-
 from schrein import DuckLake
+from schrein.ducklake import CATALOG_KEY
 
 from . import ledger, storage
 from .storage import Layout

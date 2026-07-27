@@ -8,6 +8,12 @@ members = [
     "schrein",
 ]
 
+[manifest.dependency-groups]
+dev = [
+    { name = "ruff", specifier = ">=0.15.21" },
+    { name = "ty", specifier = ">=0.0.63" },
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -480,7 +486,7 @@ wheels = [
 [[package]]
 name = "ionflow"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "packages/ionflow" }
 dependencies = [
     { name = "boto3" },
     { name = "duckdb" },
@@ -497,8 +503,6 @@ dev = [
     { name = "numpy" },
     { name = "pytest" },
     { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
 ]
 
 [package.metadata]
@@ -507,7 +511,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.4" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "schrein", editable = "schrein" },
+    { name = "schrein", editable = "packages/schrein" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "typer", specifier = ">=0.26.8" },
 ]
@@ -518,8 +522,6 @@ dev = [
     { name = "numpy", specifier = ">=2.5.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.15.21" },
-    { name = "ty", specifier = ">=0.0.63" },
 ]
 
 [[package]]
@@ -1578,7 +1580,7 @@ wheels = [
 [[package]]
 name = "schrein"
 version = "0.0.1"
-source = { editable = "schrein" }
+source = { editable = "packages/schrein" }
 dependencies = [
     { name = "boto3" },
     { name = "duckdb" },
