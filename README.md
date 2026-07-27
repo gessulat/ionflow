@@ -60,6 +60,37 @@ endpoint = "https://…"   # omit for AWS S3; set for MinIO / R2
 region   = "us-east-1"
 ```
 
+### No bucket yet? Start local
+
+```bash
+ionflow setup --local
+```
+
+Local mode stores **everything** — runs, ledger, catalog, metrics, the publish
+lake — in a plain directory (default `.ionflow/data/`, gitignored) instead of a
+bucket. No credentials, no endpoint, no infrastructure at all; every other
+command (`run`, `query`, `stats`, `publish`, resume, the TUI) works identically:
+
+```
+# .ionflow/config
+local_dir = ".ionflow/data"   # relative paths anchor at the repo root
+prefix    = "ionflow"
+```
+
+When you later have a bucket, push each flow's accumulated history into it and
+switch over:
+
+```bash
+ionflow sync mymodule:EmbedDocs --to s3://my-bucket        # repeatable; add --endpoint for MinIO/R2
+ionflow setup                                              # point the config at the bucket
+```
+
+`sync` copies the immutable run folders, merges ledger rows through the same
+CAS path a live run uses, and rebuilds the flow's catalog on the bucket — so
+re-running it after more local runs is safe. The local store is left untouched.
+Local mode is single-machine by design: CAS commits serialize on a file lock,
+which coordinates processes on one host, not a team on a shared drive.
+
 ## A complete flow
 
 A miniature embedding pipeline — a job every data or ML team has run in some

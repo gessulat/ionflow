@@ -30,7 +30,7 @@ def config_from_setup(vals):
 
 
 class ConfigMissing(RuntimeError):
-    """Raised when no `.ionflow/config` (with a bucket) can be found."""
+    """Raised when no `.ionflow/config` (with a bucket or local_dir) can be found."""
 
 
 def find_config(start="."):
@@ -56,10 +56,16 @@ def write_config(root, cfg):
     # json.dumps writes each value: the stdlib has a TOML reader but no writer,
     # and JSON's string escapes are a subset of TOML basic-string escapes, so
     # quotes/backslashes/control chars in a value can't corrupt the file
-    lines = [f"bucket = {json.dumps(cfg.bucket)}", f"prefix = {json.dumps(cfg.prefix)}"]
+    lines = []
+    if cfg.local_dir:
+        lines.append(f"local_dir = {json.dumps(cfg.local_dir)}")
+    else:
+        lines.append(f"bucket = {json.dumps(cfg.bucket)}")
+    lines.append(f"prefix = {json.dumps(cfg.prefix)}")
     if cfg.endpoint_url:
         lines.append(f"endpoint = {json.dumps(cfg.endpoint_url)}")
-    lines.append(f"region = {json.dumps(cfg.region)}")
+    if not cfg.local_dir:
+        lines.append(f"region = {json.dumps(cfg.region)}")
     if cfg.flows:
         lines.append(f"flows = {json.dumps(cfg.flows)}")
     path = d / CONFIG_FILE
@@ -69,34 +75,58 @@ def write_config(root, cfg):
 
 @dataclass
 class Config:
-    """S3 connection + layout config. The only thing ionflow needs to set up.
+    """Store connection + layout config. The only thing ionflow needs to set up.
+
+    Exactly one of `bucket` (S3 mode) and `local_dir` (local mode — the whole
+    store is a plain directory, no bucket, no credentials) is set.
 
     >>> Config(bucket="b").prefix
     'ionflow'
+    >>> Config(local_dir="/tmp/store").bucket is None
+    True
     """
 
-    bucket: str
+    bucket: str | None = None
     prefix: str = "ionflow"
     endpoint_url: str | None = None
     region: str = "us-east-1"
     flows: str | None = None  # package the TUI imports to discover Flow classes
     access_key: str | None = None
     secret_key: str | None = None
+    local_dir: str | None = None  # local mode: absolute store root once loaded
 
     @classmethod
     def load(cls, start="."):
         """Read `.ionflow/config` (TOML), with IONFLOW_* env vars overriding.
 
+        A relative `local_dir` resolves against the directory holding
+        `.ionflow/` (the repo root), so the store travels with the checkout.
         Credentials are never stored here; they come from the standard AWS chain.
         """
-        data = read_config(start)
-        bucket = os.environ.get("IONFLOW_BUCKET") or data.get("bucket")
-        if not bucket:
+        path = find_config(start)
+        data = tomllib.loads(path.read_text()) if path else {}
+        env_bucket, env_local = os.environ.get("IONFLOW_BUCKET"), os.environ.get("IONFLOW_LOCAL_DIR")
+        bucket = env_bucket or data.get("bucket")
+        local_dir = env_local or data.get("local_dir")
+        if not bucket and not local_dir:
             raise ConfigMissing("no ionflow config found; run `ionflow setup`")
+        if bucket and local_dir:
+            # an env var switches mode over the file; a conflict within one
+            # source is a real misconfiguration
+            if env_bucket and not env_local:
+                local_dir = None
+            elif env_local and not env_bucket:
+                bucket = None
+            else:
+                raise ValueError("config sets both `bucket` and `local_dir`; keep exactly one (see `ionflow sync`)")
+        if local_dir:
+            base = path.parent.parent if path else Path.cwd()
+            local_dir = str((base / Path(local_dir).expanduser()).resolve())
         return cls(
             bucket=bucket,
             prefix=os.environ.get("IONFLOW_PREFIX") or data.get("prefix", "ionflow"),
             endpoint_url=os.environ.get("IONFLOW_ENDPOINT") or data.get("endpoint"),
             region=os.environ.get("AWS_DEFAULT_REGION") or data.get("region", "us-east-1"),
             flows=data.get("flows"),
+            local_dir=local_dir,
         )

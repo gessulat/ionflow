@@ -15,15 +15,17 @@ import uuid
 
 from schrein import DuckLake
 
-from . import ledger
+from . import ledger, storage
 from .storage import (
     Layout,
     connect,
     empty_relation,
     input_relation,
+    make_client,
     part_keys,
     s3_client,
     secret_sql,
+    uri,
     utc_now,
     write_part,
 )
@@ -47,9 +49,11 @@ def publish_lake(config, dest=None):
         bucket, _, prefix = dest.removeprefix("s3://").partition("/")
         if not (dest.startswith("s3://") and bucket and prefix):
             raise ValueError(f"destination must be s3://bucket/prefix, got: {dest}")
-    else:
-        bucket, prefix = config.bucket, f"{config.prefix}/{PUBLISH_PREFIX}"
-    return DuckLake.at(s3_client(config), bucket, prefix.rstrip("/"), secret_sql=secret_sql(config)), bucket
+        if config.local_dir:
+            raise ValueError("cannot publish from a local store to s3://…; `ionflow sync` the flow to a bucket first")
+        return DuckLake.at(s3_client(config), bucket, prefix.rstrip("/"), secret_sql=secret_sql(config)), bucket
+    prefix = f"{config.prefix}/{PUBLISH_PREFIX}"
+    return storage.ducklake_at(config, prefix), config.bucket
 
 
 def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
@@ -64,7 +68,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or table == PROVENANCE:
         raise ValueError(f"invalid published table name '{table}'")
     layout = Layout.for_flow(config, flow_cls)
-    client = s3_client(config)
+    client = make_client(config)
     meta = ledger.read_meta(client, config.bucket, layout.meta(run_id))
     if meta is None:
         raise RuntimeError(f"run not found: {run_id}")
@@ -80,7 +84,8 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         rel = rel.filter(where)
     # stage the frozen artifact inside the lake's data path; unique name, so
     # snapshots referencing an earlier publish keep their (immutable) file
-    data_prefix = lake.data_path.removeprefix(f"s3://{dest_bucket}/")
+    store_root = f"{config.local_dir}/" if config.local_dir else f"s3://{dest_bucket}/"
+    data_prefix = lake.data_path.removeprefix(store_root)
     staged = f"{data_prefix}{table}/{run_id}-{uuid.uuid4().hex}.parquet"
     write_part(client, dest_bucket, staged, rel, out_table)
 
@@ -95,11 +100,13 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         "published_at": utc_now(),
     }
 
+    staged_uri = uri(config, staged) if config.local_dir else f"s3://{dest_bucket}/{staged}"
+
     def fn(con):
         con.execute("BEGIN")
         con.execute(f"CREATE TABLE IF NOT EXISTS lake.{table} ({ddl_cols})")
         con.execute(f"DELETE FROM lake.{table}")
-        con.execute(f"CALL ducklake_add_data_files('lake', '{table}', 's3://{dest_bucket}/{staged}')")
+        con.execute(f"CALL ducklake_add_data_files('lake', '{table}', '{staged_uri}')")
         con.execute(_PROVENANCE_DDL)
         con.execute(f"INSERT INTO lake.{PROVENANCE} VALUES (?, ?, ?, ?, ?, ?, ?)", list(row.values()))
         con.execute("COMMIT")

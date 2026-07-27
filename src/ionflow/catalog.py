@@ -16,8 +16,6 @@ import tempfile
 
 from schrein.ducklake import CATALOG_KEY
 
-from schrein import DuckLake
-
 from . import ledger, storage
 from .storage import Layout
 
@@ -28,14 +26,9 @@ class Catalog:
 
     def __init__(self, config, flow_cls, client=None):
         root = Layout.for_flow(config, flow_cls).root
+        self.config = config
         self.bucket = config.bucket
-        self.lake = DuckLake.at(
-            client or storage.s3_client(config),
-            config.bucket,
-            root,
-            secret_sql=storage.secret_sql(config),
-            data_subdir="_lake",
-        )
+        self.lake = storage.ducklake_at(config, root, data_subdir="_lake", client=client)
         self.key = self.lake.register.key
 
     def tables(self):
@@ -62,7 +55,7 @@ class Catalog:
         each part's run_id comes from its hive path (0012)."""
         if not part_keys:
             return  # empty fan-out: the typed table exists from genesis
-        uris = [f"s3://{self.bucket}/{k}" for k in part_keys]
+        uris = [storage.uri(self.config, k) for k in part_keys]
 
         def fn(con):
             for uri in uris:
@@ -103,7 +96,7 @@ def backfill(flow_cls, config, replace=False):
     Returns the number of complete runs registered.
     """
     layout = Layout.for_flow(config, flow_cls)
-    client = storage.s3_client(config)
+    client = storage.make_client(config)
     cat = Catalog(config, flow_cls, client=client)
     if cat.lake.register.read()[0] is not None:
         if not replace:
@@ -124,7 +117,7 @@ def backfill(flow_cls, config, replace=False):
         for step in sorted(by_step):
             for k in sorted(by_step[step]):
                 con.execute(
-                    f"CALL ducklake_add_data_files('lake', '{step}', 's3://{config.bucket}/{k}', "
+                    f"CALL ducklake_add_data_files('lake', '{step}', '{storage.uri(config, k)}', "
                     "hive_partitioning => true)"
                 )
 

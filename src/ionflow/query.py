@@ -4,9 +4,9 @@ from . import catalog, metrics
 from .storage import (
     Layout,
     connect,
+    make_client,
     object_age,
     read_parquet_sql,
-    s3_client,
     uri,
     utc_now,
 )
@@ -104,7 +104,7 @@ def ledger_with_liveness(flow_cls, config, con=None):
             None,
         )
     layout = Layout.for_flow(config, flow_cls)
-    stale = _stale_running(con, s3_client(config), config, layout)
+    stale = _stale_running(con, make_client(config), config, layout)
     if not stale:
         return con.sql("SELECT * FROM ledger")
     ids = ", ".join(f"'{r}'" for r in stale)
@@ -129,7 +129,7 @@ def duck(flow_cls, config):
         for name in flow_cls._dag.steps:
             # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
-    elif object_age(s3_client(config), config.bucket, layout.ledger) is not None:
+    elif object_age(make_client(config), config.bucket, layout.ledger) is not None:
         # runs happened (genesis precedes the first run object) but the register is gone
         raise RuntimeError(
             f"{flow_cls.flow_id()}: runs exist but no catalog does; "
