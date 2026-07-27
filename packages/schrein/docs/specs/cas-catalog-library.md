@@ -78,7 +78,7 @@ of the ledger's run-tracking semantics carries over.
 ionflow flows do **not** run on schrein; the ledger's CAS loop is
 schrein's `CasRegister` (ionflow decision 0011 — same mechanism, roles
 untouched), and ionflow registers completed step outputs into a per-flow
-schrein lake (`docs/specs/ionflow-on-schrein.md`). The roles stay
+schrein lake (`packages/ionflow/docs/specs/ionflow-on-schrein.md`). The roles stay
 distinct throughout: the ledger remains a separate object and keeps sole
 authority over run bookkeeping; the catalog only ever receives table
 schemas and data-file registrations.

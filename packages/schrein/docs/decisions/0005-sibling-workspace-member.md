@@ -25,6 +25,10 @@ Consequences for schrein:
   one per member. CI still runs schrein's suite as its own job.
 - `license-files = ["LICENSE"]` and a LICENSE copy were added, so the wheel
   ships the license text the metadata already claimed.
+- Inside schrein, `schrein` is first-party again: the package declares its own
+  ruff `src` and `extend`s the root config for the shared rules. Extraction
+  drops that one `extend` line — ruff refuses to run and names the missing
+  file if it is forgotten.
 - The boundary from 0001 is unchanged and is now also the layout: schrein
   must never import ionflow; ionflow depends on schrein
   (`{ workspace = true }` today, an ordinary package dependency once

@@ -8,6 +8,6 @@ Keep each record under a page: **Context** (the forces), **Decision** (what and
 why), **Consequences** (what it costs, what it rules out, rejected alternatives).
 Write it when the decision is made, while the "why not" is still fresh.
 
-AGENTS.md (at the repo root, covering the whole workspace) stays the operational cheat sheet (how things work today); records
+AGENTS.md, at the repo root, stays the operational cheat sheet (how things work today); records
 here hold the *why*, so AGENTS.md should link to a record rather than inline
 its reasoning.

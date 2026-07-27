@@ -37,8 +37,7 @@ uv build --all-packages                          # both wheels into dist/
 ```
 
 Each package owns its own test suite, dependency group, docs and decision
-records; there is no root test suite, deliberately — the two suites have their
-own conftest, markers and moto harness and are never collected together.
+records. There is no root test suite, deliberately — see decision 0016.
 
 ## License
 

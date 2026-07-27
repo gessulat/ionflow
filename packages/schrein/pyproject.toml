@@ -19,6 +19,10 @@ dependencies = [
 requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.ruff]
+extend = "../../pyproject.toml"  # rules are repo-wide; inside schrein, schrein is first-party
+src = ["src"]
+
 [dependency-groups]
 dev = [
     # Extension wheel so tests run without extensions.duckdb.org access;

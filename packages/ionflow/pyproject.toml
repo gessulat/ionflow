@@ -42,7 +42,14 @@ requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-schrein = { workspace = true }  # the sibling package, one directory over
+schrein = { workspace = true }
+
+[tool.ruff]
+extend = "../../pyproject.toml"  # rules are repo-wide; these roots are ionflow's
+src = ["src", "."]  # `.` for `examples`, imported by the tests
+
+[tool.ruff.lint.per-file-ignores]
+"src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom
 
 [dependency-groups]
 dev = [

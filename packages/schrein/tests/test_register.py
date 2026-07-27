@@ -3,6 +3,7 @@
 import pytest
 from botocore.exceptions import ClientError
 from helpers import make_client, run_threads
+
 from schrein import CasRegister, CommitConflict
 from schrein.register import RETRYABLE
 

@@ -5,6 +5,7 @@ import pathlib
 import threading
 
 import duckdb
+
 from schrein import DuckLake
 
 PREFIX = "lake"  # every test lake lives at s3://<bucket>/lake/

@@ -1,7 +1,4 @@
-# Workspace root only — no package lives here. `ionflow` and `schrein` are
-# siblings under `packages/` (ionflow decision 0016, schrein decision 0005).
-# `uv sync` here builds one environment holding both members and every dev
-# group; lint and type-check configuration is repo-wide and stays here.
+# Workspace root only: no package lives here (ionflow decision 0016).
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -17,26 +14,18 @@ dev = [
 # annotations deliberately mean "output schema", not runtime type (a step
 # annotated `-> Summary` returns an arrow table; a `Branch[Part]` param is a
 # lazy relation) — a nominal checker rejects that by design.
-# schrein's src has never been in scope; adding it is its own change, not a
-# side effect of the layout.
 include = ["packages/ionflow/src"]
 
-# No `[tool.pytest.ini_options]` here, deliberately: each member owns its suite
-# (its own conftest, markers and moto harness — the two collide if collected
-# together). Run them with `uv run --directory packages/<name> pytest`.
+# No `[tool.pytest.ini_options]` here: tests run per member (decision 0016),
+# with `uv run --directory packages/<name> pytest`.
 
+# Rules span both members and live here; source roots do not — each member
+# declares its own `src`, so isort resolves first-party from inside that member.
 [tool.ruff]
 line-length = 120
 # Stated, not inferred: the root has no `[project]` to read `requires-python`
 # from, and the default would demote `tomllib` to a third-party import.
 target-version = "py312"
-# ionflow's package roots, so isort keeps classifying `ionflow` and `examples`
-# as first-party now that they no longer sit at the repo root. `schrein` stays
-# third-party — it is a dependency of ionflow, not part of it.
-src = ["packages/ionflow", "packages/ionflow/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "BLE"]
-
-[tool.ruff.lint.per-file-ignores]
-"packages/ionflow/src/ionflow/cli.py" = ["B008"]  # typer's Option-in-default idiom

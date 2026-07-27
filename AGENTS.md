@@ -31,10 +31,8 @@ uv run --directory packages/ionflow pytest -m ""  # FULL suite — run this befo
 uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
 ```
 
-- There is **no root test suite**: the two members' suites have their own
-  conftest, markers and moto harness and collide if collected together, so a bare
-  `uv run pytest` at the root is a mistake — always pass `--directory` (or `cd`
-  into the package).
+- There is **no root test suite** (decision 0016): always pass `--directory` (or
+  `cd` into the package). A bare `uv run pytest` at the root is a mistake.
 - Tests run **parallel by default** (`-n 5 --dist worksteal`, set in the member's
   pyproject).
 - The heaviest integration tests are marked `slow` and **skipped by default**:

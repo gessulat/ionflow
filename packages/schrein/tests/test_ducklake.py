@@ -5,6 +5,7 @@ import time
 
 import pytest
 from helpers import add_files, lake_at, make_client, run_threads, upload_rows
+
 from schrein.ducklake import _assert_clean
 
 TABLE_DDL = "CREATE TABLE lake.events (id INTEGER NOT NULL, name VARCHAR)"

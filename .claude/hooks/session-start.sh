@@ -23,7 +23,10 @@ import duckdb
 ver = duckdb.__version__
 plat = duckdb.execute("PRAGMA platform").fetchone()[0]
 dest = Path.home() / ".duckdb" / "extensions" / f"v{ver}" / plat
-missing = [e for e in ("httpfs", "aws", "ducklake") if not (dest / f"{e}.duckdb_extension").exists()]
+# ducklake is not seeded here: `uv sync` above already installs its wheel via
+# schrein's dev group, and every load goes through schrein's load_extension,
+# which falls back to that wheel. Seeding it would download the same 36 MB twice.
+missing = [e for e in ("httpfs", "aws") if not (dest / f"{e}.duckdb_extension").exists()]
 if not missing:
     print(f"duckdb extensions already cached in {dest}")
     sys.exit(0)
