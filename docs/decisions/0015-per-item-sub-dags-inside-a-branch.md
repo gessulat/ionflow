@@ -55,11 +55,22 @@ threads. Item A can be in `search` while item B is still in `convert`.
   `max_workers` items hold intermediate artifacts at once.
 - Retry and resume are as granular as the DAG is: the unit is a sub-step of an
   item, so a flaky upload costs one upload.
-- A corpus-wide barrier *inside* a fan-out is no longer expressible — a step
-  that needs every item's output must be a fan-in, and anything downstream of it
-  branches from a new fan-out. Keeping both models (per-item where possible,
-  per-stage where not) was rejected: a silent fallback to stage execution would
-  make disk use and failure blast radius depend on a subtlety of the signature.
+- A corpus-wide barrier *inside* a fan-out is no longer expressible. Keeping both
+  models (per-item where possible, per-stage where not) was rejected: a silent
+  fallback to stage execution would make disk use and failure blast radius depend
+  on a subtlety of the signature. The shape stays reachable by spelling the
+  barrier out as a second fan-out, which is the honest cost rather than a hidden
+  one — the two groups are two workers, so an item's local artifacts do not
+  survive the boundary and the second group re-reads from S3:
+
+  ```python
+  def by_job(self) -> Fanout[Job]: ...
+  def convert(self, by_job: Branch[Job]) -> Converted: ...
+  def stats(self, convert: Collect[Converted]) -> Stats: ...            # the barrier
+  def by_db(self, convert: Collect[Converted]) -> Fanout[Converted]: ...  # fan out again
+  def search(self, by_db: Branch[Converted], stats: Stats) -> Psm: ...
+  # plan: by_job -> [convert] -> stats -> by_db -> [search]
+  ```
 - Reused sub-steps come back from S3, not from the local disk: an item resumed
   at a late sub-step gets its upstream's *table* (a path column), not the file
   that path names. Steps handing over local artifacts must tolerate re-deriving
