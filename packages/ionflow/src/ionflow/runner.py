@@ -87,7 +87,7 @@ def _call(ctx, step, branch):
     return step.method(ctx.flow, **kwargs)
 
 
-def emit(ctx, step, branch=None):
+def _emit(ctx, step, branch=None):
     """Call `step` and write what it returned; yield (Slot, part key, item key) per part.
 
     The one call -> write -> report path, shared by the orchestrator and the item
@@ -117,11 +117,21 @@ def _import(file, name):
 
 
 class _Bound(typing.NamedTuple):
-    """What a worker process builds once per run and reuses for every item it gets."""
+    """What a worker process builds once per run and reuses for every item it gets.
+
+    Deliberately NOT the DuckDB connection. Re-executing the flow module per item
+    is pure waste, but an item's *database* is not: cursors of one connection share
+    a catalog, so a step that materializes a named object (CREATE TABLE/VIEW/macro)
+    would collide with the other items this worker handles. One instance per item
+    also keeps `_fair_share`'s caps meaning what they did — a per-worker share of
+    the machine — instead of one capped instance serving every item.
+    """
 
     cfg: Config
     flow_cls: typing.Any
-    ctx: _Ctx  # `flow` still unset: the instance is per item, never shared
+    space: Space
+    threads: int | None
+    memory_mb: int | None
 
 
 _BOUND: dict[str, _Bound] = {}  # run_id -> this process's binding
@@ -131,11 +141,11 @@ _BOUND_LOCK = threading.Lock()  # thread mode submits items concurrently into on
 def _bound(payload):
     """This process's binding for the run, built on first use.
 
-    The pool reuses its processes, so binding per item would re-import the flow
-    module and stand up a DuckDB instance (spill dir, httpfs, secret) per item.
-    Keyed on run_id rather than cached outright: in thread mode this process
-    outlives the run, and a later run must never see the first one's flow class,
-    Space or caps. `_run_items` drops the entry when the pool closes.
+    The pool reuses its processes, so binding per item would re-execute the flow
+    module — the user's own import-time code — once per item. Keyed on run_id
+    rather than cached outright: in thread mode this process outlives the run, and
+    a later run (or a later group of the same run) must never see the first one's
+    flow class, Space or caps. `_run_items` drops the entry when the pool closes.
     """
     with _BOUND_LOCK:
         if (bound := _BOUND.get(payload["run_id"])) is not None:
@@ -149,31 +159,32 @@ def _bound(payload):
                 os.environ.setdefault(var, str(threads))
         cfg = Config(**payload["config"])
         flow_cls = _import(payload["file"], payload["flow"])
-        store = Store.of(cfg)
-        ctx = _Ctx(
-            con=store.connect(threads=threads, memory_mb=memory_mb),
-            # identity travels in the payload, never derived here: the re-imported
-            # class's __module__ is the loader's ("_mf_flow"), so its own flow_id()
-            # is wrong
-            space=store.space(payload["flow_id"]),
-            flow=None,
-            run_id=payload["run_id"],
-            widths=payload["widths"],
-            threads=threads,
-            memory_mb=memory_mb,
-        )
-        _BOUND[payload["run_id"]] = bound = _Bound(cfg, flow_cls, ctx)
+        # identity travels in the payload, never derived here: the re-imported
+        # class's __module__ is the loader's ("_mf_flow"), so its own flow_id() is wrong
+        space = Store.of(cfg).space(payload["flow_id"])
+        _BOUND[payload["run_id"]] = bound = _Bound(cfg, flow_cls, space, threads, memory_mb)
         return bound
 
 
 def _branch_worker(payload):
     bound = _bound(payload)
-    flow_cls, con, space = bound.flow_cls, bound.ctx.con, bound.ctx.space
+    flow_cls, space = bound.flow_cls, bound.space
     flow = flow_cls()  # per item: thread-mode items share this process, not their `self`
     flow.config = bound.cfg
     for k, v in payload["params"].items():
         setattr(flow, k, v)
-    ctx = bound.ctx._replace(flow=flow)
+    # this item's OWN DuckDB instance: private catalog and spill dir, and the
+    # caps are a per-worker share of the machine (see _Bound)
+    con = space.store.connect(threads=bound.threads, memory_mb=bound.memory_mb)
+    ctx = _Ctx(
+        con=con,
+        space=space,
+        flow=flow,
+        run_id=payload["run_id"],
+        widths=payload["widths"],
+        threads=bound.threads,
+        memory_mb=bound.memory_mb,
+    )
     group = flow_cls._dag.groups[payload["group"]]
     run_id, branch, pending = payload["run_id"], payload["branch"], payload["steps"]
     # own sampler only in a separate process; in thread mode the orchestrator's
@@ -207,7 +218,7 @@ def _branch_worker(payload):
             for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
                 # transient step errors count too, and boto3 already retries at the HTTP layer
                 try:
-                    for _ in emit(ctx._replace(con=cur), step, branch):
+                    for _ in _emit(ctx._replace(con=cur), step, branch):
                         pass  # drained, not next()-ed: a suspended generator defers its close
                     return
                 except Exception:
@@ -557,7 +568,7 @@ def run(
                     sampler.mark(name)
                     key_col = keyed.get(name)
                     parts, item_keys, seen = [], [], set()
-                    for slot, key, value in emit(ctx_for(step), step):
+                    for slot, key, value in _emit(ctx_for(step), step):
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
@@ -579,7 +590,7 @@ def run(
             else:
                 if Slot(name, 0) not in progress:
                     sampler.mark(name)
-                    for slot, key, _ in emit(ctx_for(step), step):
+                    for slot, key, _ in _emit(ctx_for(step), step):
                         progress.add(slot, key)
                 register(name)
             space.write_meta(run_id, record.meta(progress.to_list()))
