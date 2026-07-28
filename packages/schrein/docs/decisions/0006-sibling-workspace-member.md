@@ -18,7 +18,7 @@ Consequences for schrein:
 
 - The spec moved from the repo root into the package it specifies:
   `packages/schrein/docs/specs/cas-catalog-library.md`. Everything schrein
-  now lives under one directory — §11's skeleton, verbatim.
+  now lives under one directory — the spec's original skeleton, verbatim.
 - Tests run as `uv run --directory packages/schrein pytest` from the repo
   root. `uv sync` at the root installs schrein's dev group too (the ducklake
   extension wheel, moto), so there is one environment for the repo instead of

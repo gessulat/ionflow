@@ -20,7 +20,8 @@ class CommitConflict(RuntimeError):
     """CAS lost the race more than max_attempts times."""
 
 
-def _error_code(e: ClientError) -> str:
+def error_code(e: ClientError) -> str:
+    """AWS error code from a botocore ClientError."""
     return e.response["Error"]["Code"]
 
 
@@ -33,7 +34,7 @@ class CasRegister:
         try:
             r = self.client.get_object(Bucket=self.bucket, Key=self.key)
         except ClientError as e:
-            if _error_code(e) in MISSING:
+            if error_code(e) in MISSING:
                 return None, None
             raise
         return r["Body"].read(), r["ETag"]
@@ -64,7 +65,7 @@ class CasRegister:
                 try:
                     scratch.write(b"clobber", stale)
                 except ClientError as e:
-                    if _error_code(e) in RETRYABLE:
+                    if error_code(e) in RETRYABLE:
                         continue
                     raise
                 raise RuntimeError(
@@ -85,7 +86,7 @@ class CasRegister:
             try:
                 return self.write(fn(old), etag)
             except ClientError as e:
-                if _error_code(e) not in RETRYABLE:
+                if error_code(e) not in RETRYABLE:
                     raise
                 if attempt + 1 < max_attempts:  # no backoff after the final attempt
                     time.sleep(random.uniform(0, min(cap, base_delay * 2**attempt)))

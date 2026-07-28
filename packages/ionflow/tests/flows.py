@@ -4,7 +4,6 @@ Importable (branch workers load it by file path) and controllable via env vars,
 so a specific branch can be made to fail on one run and succeed on a resume.
 """
 
-import json
 import os
 import pathlib
 import time
@@ -13,9 +12,7 @@ import uuid
 import pyarrow as pa
 
 from ionflow import Branch, Collect, Fanout, Flow, FlowParams, LedgerColumns, Table, fanout_key
-from ionflow.space import Space
-from ionflow.storage import s3_client
-from ionflow.store import Store
+from ionflow.store import Store, s3_client
 
 
 class Src(Table):
@@ -71,9 +68,32 @@ class ParamFlow(Flow):
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
 
 
+class NoteFlow(Flow):
+    """Declares one ledger column, set in the first step. NOTE_SKIP leaves it
+    unset; NOTE_FAIL fails the later step after it was set."""
+
+    class Ledger(LedgerColumns):
+        note: str
+
+    def source(self) -> Src:
+        if not os.environ.get("NOTE_SKIP"):
+            self.note = "set during the run"
+        return pa.table({"g": [1]})
+
+    def doubled(self, source: Src) -> Out:
+        if os.environ.get("NOTE_FAIL"):
+            raise RuntimeError("boom in doubled")
+        return source.project("g, g * 2 AS doubled")
+
+
 def _side_n(config):
     """The side input: an int stored outside any run folder."""
     return int(Store.of(config).get("side/n"))
+
+
+def put_n(config, n):
+    """Set the `side/n` object `_side_n` reads — the tests' fan-out width knob."""
+    Store.of(config).put("side/n", str(n).encode())
 
 
 def _side_order(config):
@@ -403,88 +423,3 @@ class EmptyFanFlow(Flow):
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, coalesce(sum(doubled), 0) AS total")
-
-
-ORDER_ITEMS = 3  # OrderFlow's fan-out width
-
-
-class Timed(Table):
-    g: int
-    finished_at: float
-
-
-class OrderFlow(Flow):
-    """Branches finish in reverse index order: each item waits for its successor.
-
-    Completion order is then the opposite of branch order, which is what makes
-    the order parts are registered in observable. ORDER_DIR holds the markers.
-    """
-
-    def parts(self) -> Fanout[Src]:
-        return [pa.table({"g": [g]}) for g in range(ORDER_ITEMS)]
-
-    def work(self, parts: Branch[Src]) -> Timed:
-        g = parts.project("g").fetchone()[0]
-        d = pathlib.Path(os.environ["ORDER_DIR"])
-        if g + 1 < ORDER_ITEMS:  # the last item goes first, the rest queue behind it
-            deadline = time.monotonic() + 30
-            while not d.joinpath(f"done_{g + 1}").exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            time.sleep(0.2)  # the successor's part must land, not merely its marker
-        d.joinpath(f"done_{g}").touch()
-        return pa.table({"g": [g], "finished_at": [time.time()]})
-
-
-class PartialFanFlow(Flow):
-    """The fan-out itself dies partway: the items it already yielded are on S3."""
-
-    def parts(self) -> Fanout[Src]:
-        for g in range(3):
-            if g == 2:
-                raise RuntimeError("fan-out died on item 2")
-            yield pa.table({"g": [g]})
-
-    def work(self, parts: Branch[Src]) -> Out:
-        return parts.project("g, g * 2 AS doubled")
-
-
-class IntKeyItem(Table):
-    shard: int = fanout_key
-    v: int
-
-
-class IntKeyFlow(Flow):
-    """Integer fanout keys, which the JSON meta must carry back as ints (0008)."""
-
-    def shards(self) -> Fanout[IntKeyItem]:
-        return [pa.table({"shard": [s], "v": [s * 10]}) for s in (2, 7)]
-
-    def work(self, shards: Branch[IntKeyItem]) -> KeyedOut:
-        shard = shards.project("shard").fetchone()[0]
-        return pa.table({"item": [str(shard)], "token": [uuid.uuid4().hex]})
-
-
-class ProbeFlow(Flow):
-    """Copies the ledger as it stands mid-run to LEDGER_PROBE; PROBE_FAIL kills it.
-
-    A `running` ledger row exists only while the run holds the process, so a
-    step is the only place to observe one.
-    """
-
-    class Params(FlowParams):
-        mult: int = 2
-
-    class Ledger(LedgerColumns):
-        note: str
-
-    def source(self) -> Src:
-        if probe := os.environ.get("LEDGER_PROBE"):
-            space = Space.for_flow(Store.of(self.config), self.__class__)
-            pathlib.Path(probe).write_text(json.dumps(space.read_rows(space.ledger), default=str))
-        self.note = "set during the run"
-        return pa.table({"g": [self.mult]})
-
-    def doubled(self, source: Src) -> Out:
-        if os.environ.get("PROBE_FAIL"):
-            raise RuntimeError("boom in doubled")
-        return source.project("g, g * 2 AS doubled")

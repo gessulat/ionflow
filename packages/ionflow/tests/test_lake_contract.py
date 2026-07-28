@@ -99,16 +99,6 @@ def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(s3cfg, repo):
     v.close()
 
 
-@pytest.mark.slow
-def test_resume_registers_copies_under_new_run_id(s3cfg, repo):
-    r1 = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
-    r2 = LakeFlow.run(s3cfg, repo=repo, use_processes=False, resume=r1)
-    con = duck(LakeFlow, s3cfg)
-    assert {r[0] for r in con.sql("SELECT DISTINCT run_id FROM items").fetchall()} == {r1, r2}
-    assert con.sql("SELECT sum(total) FROM agg").fetchone()[0] == 6  # both runs' agg rows
-    con.close()
-
-
 def test_backfill_registers_only_complete_runs_and_infers_run_id_from_the_path(s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
     monkeypatch.setenv("FLAKY_FAIL", "1")

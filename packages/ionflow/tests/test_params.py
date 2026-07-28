@@ -1,8 +1,8 @@
 import pytest
 import typer
-from flows import EmptyFanFlow, ParamFlow, Src
+from flows import EmptyFanFlow, NoteFlow, ParamFlow, Src
 
-from ionflow import Flow, FlowParams, cli
+from ionflow import Flow, FlowParams, LedgerColumns, cli
 from ionflow.space import Space
 from ionflow.store import Store
 
@@ -36,12 +36,53 @@ def test_resume_ignores_dropped_origin_params(cfg, repo):
         EmptyFanFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
 
+def test_ledger_columns_land_on_completion_never_on_failure(cfg, repo, monkeypatch):
+    """A failed run's ledger row keeps its params but never claims custom columns
+    — even when the flow had already set them before the failing step."""
+    monkeypatch.setenv("NOTE_FAIL", "1")
+    with pytest.raises(RuntimeError, match="boom in doubled"):
+        NoteFlow.run(cfg, repo=repo, use_processes=False)
+    monkeypatch.delenv("NOTE_FAIL")
+    done = NoteFlow.run(cfg, repo=repo, use_processes=False)
+
+    con = NoteFlow.duck(cfg)
+    rows = dict(con.sql("SELECT run_id, note FROM ledger").fetchall())
+    assert rows.pop(done) == "set during the run"
+    assert list(rows.values()) == [None]  # the failed run's row
+
+
+def test_unset_ledger_column_fails_the_run(cfg, repo, monkeypatch):
+    monkeypatch.setenv("NOTE_SKIP", "1")
+    with pytest.raises(RuntimeError, match="not populated.*note"):
+        NoteFlow.run(cfg, repo=repo, use_processes=False)
+
+
+def test_resume_reuses_origin_ledger_columns(cfg, repo):
+    """A fully-reused resume never runs the step that sets the column; the value
+    must come forward from the origin's meta."""
+    origin = NoteFlow.run(cfg, repo=repo, use_processes=False)
+    resumed = NoteFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
+    con = NoteFlow.duck(cfg)
+    assert con.sql(f"SELECT note FROM ledger WHERE run_id = '{resumed}'").fetchone()[0] == "set during the run"
+
+
 def test_param_name_collision_rejected():
     with pytest.raises(TypeError, match="collide"):
 
         class Bad(Flow):
             class Params(FlowParams):
                 data: int = 1
+
+            def data(self) -> Src: ...
+
+    with pytest.raises(TypeError, match="collide"):
+
+        class BadLedger(Flow):
+            class Params(FlowParams):
+                note: int = 1
+
+            class Ledger(LedgerColumns):
+                note: str
 
             def data(self) -> Src: ...
 

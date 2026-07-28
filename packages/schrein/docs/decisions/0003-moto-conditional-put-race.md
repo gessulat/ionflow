@@ -1,6 +1,7 @@
 # 0003 — tests serialize moto's conditional PUTs (upstream check is not atomic)
 
-The §10 CAS hammer intermittently lost exactly one update: tracing every
+The CAS lost-update hammer (`tests/test_register.py`) intermittently lost
+exactly one update: tracing every
 read/write showed two concurrent `If-Match` PUTs against the **same** etag
 both being accepted (~16ms apart), the second silently clobbering the
 first. Real S3's conditional write is an atomic check-and-swap; moto (as of

@@ -1,55 +1,18 @@
-import atexit
-import socket
-import subprocess
-import sys
-import threading
-import time
-
 import pytest
 from helpers import make_client
 
-# Start + warm the moto server in a background thread at import time, so the
-# heavy imports (boto3) overlap with collection. The server runs as a
-# subprocess, never in-process: DuckDB httpfs holds relations open while
-# reading and starves an in-process werkzeug server (lesson from ionflow).
-# It is schrein.testing, not bare moto: upstream moto's conditional PUTs
-# race under threads and lose updates (schrein decision 0003).
-_moto = {}
+from schrein.testing import background_server
 
-
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _warm():
-    port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "schrein.testing", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    atexit.register(proc.kill)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.05)
-    _moto["endpoint"] = f"http://127.0.0.1:{port}"
-    make_client(_moto["endpoint"]).list_buckets()
-
-
-_warmup = threading.Thread(target=_warm, daemon=True)
-_warmup.start()
+# schrein.testing, not bare moto — upstream moto's conditional PUTs race under
+# threads and lose updates (decision 0003). A subprocess, never in-process:
+# DuckDB httpfs holds relations open while reading and starves an in-process
+# werkzeug server. Spawned + warmed at import to overlap with collection.
+_endpoint = background_server()
 
 
 @pytest.fixture(scope="session")
 def moto_endpoint():
-    _warmup.join()
-    return _moto["endpoint"]  # subprocess; killed via atexit
+    return _endpoint()
 
 
 @pytest.fixture

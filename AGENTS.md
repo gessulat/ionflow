@@ -189,8 +189,7 @@ ionflow query myproj.flows:Training \
   builds CAS registers (`cas`) and DuckLakes (`lake`). `uri()`/`key_for_uri()`
   are the key<->URI pair; `copy_many` is a **generator** (a failed copy leaves
   the already-yielded prefix as real resume progress). `s3_client` stays
-  module-level — the documented side-input hatch, re-exported by the
-  `storage.py` shim, which is all that module still is.
+  module-level — the documented side-input hatch.
 - `space.py`   — `Space`: one flow's region of a store — the key scheme both ways
   (`part`/`meta`/`metrics`/`ledger` <-> `parse_part`) and the verbs over those keys.
   Identity is the **`flow_id` string, never a class** (branch workers re-import the

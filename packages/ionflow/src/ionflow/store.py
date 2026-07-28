@@ -10,16 +10,11 @@ import boto3
 import duckdb
 from botocore.exceptions import ClientError
 from schrein import MISSING as MISSING_KEY_CODES
-from schrein import CasRegister, DuckLake, LocalClient
+from schrein import CasRegister, DuckLake, LocalClient, error_code
 from schrein.ducklake import CATALOG_KEY, load_extension
 
 MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
 COPY_WORKERS = 16  # server-side copies and sync uploads are latency-bound, not CPU-bound
-
-
-def _error_code(err):
-    """AWS error code from a botocore ClientError."""
-    return err.response["Error"]["Code"]
 
 
 def s3_client(cfg):
@@ -111,7 +106,7 @@ class Store:
         try:
             return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
         except ClientError as e:
-            if _error_code(e) in MISSING_KEY_CODES:
+            if error_code(e) in MISSING_KEY_CODES:
                 return None
             raise
 
@@ -144,7 +139,7 @@ class Store:
         try:
             r = self.client.head_object(Bucket=self.bucket, Key=key)
         except ClientError as e:
-            if _error_code(e) in MISSING_KEY_CODES:
+            if error_code(e) in MISSING_KEY_CODES:
                 return None
             raise
         server_now = parsedate_to_datetime(r["ResponseMetadata"]["HTTPHeaders"]["date"])
