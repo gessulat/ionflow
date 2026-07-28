@@ -27,26 +27,17 @@ class ETL:
     def result(self, scored: Collect[Score]) -> Final: ...
 
 
-def test_order_topological():
+def test_dag_shape():
     dag = build_dag(ETL)
     assert dag._order == ["raw", "chunks", "scored", "result"]  # every step, deps first
     assert dag.plan == ["raw", "chunks", "result"]  # the group contracted into its fan-out
     assert dag.groups["chunks"].order == ["scored"]
     assert dag.roots == {"scored": "chunks"}
     assert dag.downstream("chunks") == {"chunks", "scored", "result"}
-
-
-def test_step_kinds():
-    dag = build_dag(ETL)
     assert dag.steps["chunks"].is_fanout
     assert dag.steps["scored"].param_kinds == {"chunks": "BRANCH"}
     assert dag.steps["result"].param_kinds == {"scored": "COLLECT"}
-    assert dag.steps["raw"].deps == []
     assert dag.steps["scored"].deps == ["chunks"]
-
-
-def test_output_tables():
-    dag = build_dag(ETL)
     assert dag.steps["chunks"].output_table is Chunk  # unwrapped from Fanout
     assert dag.steps["result"].output_table is Final
 

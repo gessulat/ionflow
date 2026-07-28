@@ -45,18 +45,14 @@ def _data():
     )
 
 
-def test_check_constraint_rejects_bad_row(s3cfg):
+@pytest.mark.parametrize("bad", ["check", "not_null"])
+def test_write_part_enforces_declared_constraints(s3cfg, bad):
     space = Store.of(s3cfg).space("ETL")
-    bad = pa.table({"id": [1], "ts": [dt.datetime(2026, 1, 1)], "score": [-1.0]})
+    rows = _data().to_pylist()
+    rows[0]["score"] = -1.0 if bad == "check" else rows[0]["score"]
+    rows[0]["ts"] = None if bad == "not_null" else rows[0]["ts"]
     with pytest.raises(ConstraintViolation):
-        space.write_part(space.part("r2", "features"), bad, Features)
-
-
-def test_not_null_rejects(s3cfg):
-    space = Store.of(s3cfg).space("ETL")
-    bad = pa.table({"id": [1], "ts": [None], "score": [0.1]})
-    with pytest.raises(ConstraintViolation):
-        space.write_part(space.part("r3", "features"), bad, Features)
+        space.write_part(space.part("r", "features"), pa.Table.from_pylist(rows, Features.arrow_schema()), Features)
 
 
 def test_key_for_uri_inverts_uri(anycfg):

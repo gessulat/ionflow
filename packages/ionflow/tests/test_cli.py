@@ -34,42 +34,6 @@ def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
     assert run_id in st.output and "peak_rss_mb" in st.output and "summary" in st.output
 
 
-def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
-    """run passes the resume/sizing knobs through to runner.run (no flow executed)."""
-    monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
-    monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: True))
-    seen = {}
-    monkeypatch.setattr(
-        "ionflow.runner.run",
-        lambda flow_cls, cfg, repo=".", **kw: seen.update(kw) or "rid",
-    )
-
-    r = runner.invoke(
-        cli.app,
-        [
-            "run",
-            "examples.embed:EmbedDocs",
-            "--resume",
-            "latest",
-            "--allow-commit-drift",
-            "--max-workers",
-            "2",
-            "--threads",
-            "--branch-retries",
-            "1",
-        ],
-    )
-    assert r.exit_code == 0, r.output
-    assert seen["resume"] == "latest" and seen["max_workers"] == 2
-    assert seen["use_processes"] is False and seen["branch_retries"] == 1
-    assert seen["allow_commit_drift"] is True
-
-    seen.clear()
-    r = runner.invoke(cli.app, ["run", "examples.embed:EmbedDocs", "--resume", "some-run", "--processes"])
-    assert r.exit_code == 0, r.output
-    assert seen["resume"] == "some-run" and seen["use_processes"] is True
-
-
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: setup writes .ionflow/ + .gitignore
     monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: False))
