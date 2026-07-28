@@ -3,6 +3,7 @@ import importlib.util
 import inspect
 import os
 import threading
+import typing
 import uuid
 import warnings
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
@@ -11,37 +12,17 @@ from multiprocessing import get_context
 
 import psutil
 
-from . import catalog, ledger, metrics
+from . import lake, metrics
+from .arrow import StepInput
 from .config import Config
 from .git import require_clean
-from .storage import (
-    Layout,
-    StepInput,
-    connect,
-    empty_relation,
-    input_relation,
-    make_client,
-    part_keys,
-    utc_now,
-    write_part,
-)
+from .space import Space, utc_now
+from .state import Progress, RunRecord, Slot
+from .store import Store
 
 
 def _new_run_id(now):
     return f"{int(now.timestamp() * 1000):013d}-{uuid.uuid4().hex[:8]}"
-
-
-def _key(step, branch):
-    return f"{step}/{branch}"
-
-
-def _split(key):
-    step, branch = key.rsplit("/", 1)
-    return step, int(branch)
-
-
-def _count_of(completed, step):
-    return sum(1 for k in completed if _split(k)[0] == step)
 
 
 def _keyed_fanouts(dag):
@@ -53,33 +34,13 @@ def _keyed_fanouts(dag):
     return out
 
 
-def _key_roots(dag, keyed):
-    """Per-item step -> the keyed fan-out whose item keys name its branches.
-
-    Branch identity travels down a chain of branch steps: branch i of a step
-    branching over a branch step is still the fan-out's i-th item, so a chained
-    step's parts are reusable by item key exactly like the first one's. Steps
-    of an unkeyed fan-out's group have no such name and stay out.
-    """
-    return {m: g.fanout for g in dag.groups.values() if g.fanout in keyed for m in g.order}
-
-
-def _downstream(dag, root):
-    """`root` plus every step reachable from it through dependency edges."""
-    out = {root}
-    for name in dag.order:  # topo order: a step appears after all its deps
-        if any(d in out for d in dag.steps[name].deps):
-            out.add(name)
-    return out
-
-
-def _latest_complete(client, config, layout):
+def _latest_complete(space):
     """run_id of the newest complete run, or None (ledger rows sort by start time).
 
     Complete only — resuming must never chain onto a failed or running origin.
     `stats`' default "latest" is the looser newest-by-start-time of any status.
     """
-    rows = ledger.read_all(client, config.bucket, layout.ledger)
+    rows = space.read_rows(space.ledger)
     return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
 
 
@@ -90,35 +51,61 @@ def _fair_share(workers):
     return max(1, cores // workers), memory_mb
 
 
-def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
+class _Ctx(typing.NamedTuple):
+    """What calling a step needs, on either side of the process boundary.
+
+    Never pickled — the orchestrator and each worker build their own. `widths`
+    is the part count of every COLLECT dep, so both sides derive the same key
+    list by the same rule and a worker never LISTs the store for it.
+    """
+
+    con: typing.Any
+    space: Space
+    flow: typing.Any
+    run_id: str
+    widths: dict[str, int]
+    threads: int | None = None
+    memory_mb: int | None = None
+
+
+def _step_input(ctx, dep, kind, branch, dep_table):
     if kind == "COLLECT":
-        keys = part_keys(client, cfg.bucket, layout, run_id, dep)
+        keys = [ctx.space.part(ctx.run_id, dep, i) for i in range(ctx.widths[dep])]
         if not keys:  # empty fan-out: hand the reducer a typed empty table
-            return empty_relation(con, dep_table)
+            return dep_table.empty(ctx.con)
     else:
-        keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
-    return input_relation(con, cfg, keys)
+        keys = [ctx.space.part(ctx.run_id, dep, branch if kind == "BRANCH" else 0)]
+    return ctx.space.relation(ctx.con, keys)
 
 
-def _call(con, client, cfg, layout, flow, step, run_id, branch):
-    dag = flow.__class__._dag
+def _call(ctx, step, branch):
+    dag = ctx.flow.__class__._dag
     kwargs = {
-        dep: StepInput(
-            _step_input(
-                con,
-                client,
-                cfg,
-                layout,
-                run_id,
-                dep,
-                kind,
-                branch,
-                dag.steps[dep].output_table,
-            )
-        )
+        dep: StepInput(_step_input(ctx, dep, kind, branch, dag.steps[dep].output_table))
         for dep, kind in step.param_kinds.items()
     }
-    return step.method(flow, **kwargs)
+    return step.method(ctx.flow, **kwargs)
+
+
+def _emit(ctx, step, branch=None):
+    """Call `step` and write what it returned; yield (Slot, part key, item key) per part.
+
+    The one call -> write -> report path, shared by the orchestrator and the item
+    workers. A generator because that is the only difference between the three
+    shapes: a plain step and a branch sub-step yield one part, a fan-out one per
+    item. The item key is the fan-out key column's value, else None. Recording
+    completion stays with the caller — a fan-out is all-or-nothing, a sub-step
+    reports through its worker.
+    """
+    key_col = step.output_table.fanout_key_column() if step.is_fanout else None
+    result = _call(ctx, step, branch)
+    parts = enumerate(result) if step.is_fanout else [(0 if branch is None else branch, result)]
+    for i, item in parts:
+        key = ctx.space.part(ctx.run_id, step.name, i)
+        value = ctx.space.write_part(
+            key, item, step.output_table, threads=ctx.threads, memory_mb=ctx.memory_mb, fanout_key=key_col
+        )
+        yield Slot(step.name, i), key, value
 
 
 def _import(file, name):
@@ -129,26 +116,75 @@ def _import(file, name):
     return getattr(mod, name)
 
 
+class _Bound(typing.NamedTuple):
+    """What a worker process builds once per run and reuses for every item it gets.
+
+    Deliberately NOT the DuckDB connection. Re-executing the flow module per item
+    is pure waste, but an item's *database* is not: cursors of one connection share
+    a catalog, so a step that materializes a named object (CREATE TABLE/VIEW/macro)
+    would collide with the other items this worker handles. One instance per item
+    also keeps `_fair_share`'s caps meaning what they did — a per-worker share of
+    the machine — instead of one capped instance serving every item.
+    """
+
+    cfg: Config
+    flow_cls: typing.Any
+    space: Space
+    threads: int | None
+    memory_mb: int | None
+
+
+_BOUND: dict[str, _Bound] = {}  # run_id -> this process's binding
+_BOUND_LOCK = threading.Lock()  # thread mode submits items concurrently into one process
+
+
+def _bound(payload):
+    """This process's binding for the run, built on first use.
+
+    The pool reuses its processes, so binding per item would re-execute the flow
+    module — the user's own import-time code — once per item. Keyed on run_id
+    rather than cached outright: in thread mode this process outlives the run, and
+    a later run (or a later group of the same run) must never see the first one's
+    flow class, Space or caps. `_run_items` drops the entry when the pool closes.
+    """
+    with _BOUND_LOCK:
+        if (bound := _BOUND.get(payload["run_id"])) is not None:
+            return bound
+        threads, memory_mb = _fair_share(payload["workers"])
+        if payload["sample"]:  # own process: cap BLAS/OpenMP before the flow's imports
+            # spawn imports numpy/torch fresh in this process, so the caps take effect;
+            # setdefault keeps any explicit user setting. Never in thread mode — that
+            # would mutate the orchestrator's environment.
+            for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+                os.environ.setdefault(var, str(threads))
+        cfg = Config(**payload["config"])
+        flow_cls = _import(payload["file"], payload["flow"])
+        # identity travels in the payload, never derived here: the re-imported
+        # class's __module__ is the loader's ("_mf_flow"), so its own flow_id() is wrong
+        space = Store.of(cfg).space(payload["flow_id"])
+        _BOUND[payload["run_id"]] = bound = _Bound(cfg, flow_cls, space, threads, memory_mb)
+        return bound
+
+
 def _branch_worker(payload):
-    threads, memory_mb = _fair_share(payload["workers"])
-    if payload["sample"]:  # own process: cap BLAS/OpenMP before the flow's imports
-        # spawn imports numpy/torch fresh in this process, so the caps take effect;
-        # setdefault keeps any explicit user setting. Never in thread mode — that
-        # would mutate the orchestrator's environment.
-        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-            os.environ.setdefault(var, str(threads))
-    cfg = Config(**payload["config"])
-    flow_cls = _import(payload["file"], payload["flow"])
-    # identity travels in the payload, never derived here: the re-imported
-    # class's __module__ is the loader's ("_mf_flow"), so its own flow_id()
-    # is wrong
-    layout = Layout(cfg.prefix, payload["flow_id"])
-    con = connect(cfg, threads=threads, memory_mb=memory_mb)
-    client = make_client(cfg)
-    flow = flow_cls()
-    flow.config = cfg
+    bound = _bound(payload)
+    flow_cls, space = bound.flow_cls, bound.space
+    flow = flow_cls()  # per item: thread-mode items share this process, not their `self`
+    flow.config = bound.cfg
     for k, v in payload["params"].items():
         setattr(flow, k, v)
+    # this item's OWN DuckDB instance: private catalog and spill dir, and the
+    # caps are a per-worker share of the machine (see _Bound)
+    con = space.store.connect(threads=bound.threads, memory_mb=bound.memory_mb)
+    ctx = _Ctx(
+        con=con,
+        space=space,
+        flow=flow,
+        run_id=payload["run_id"],
+        widths=payload["widths"],
+        threads=bound.threads,
+        memory_mb=bound.memory_mb,
+    )
     group = flow_cls._dag.groups[payload["group"]]
     run_id, branch, pending = payload["run_id"], payload["branch"], payload["steps"]
     # own sampler only in a separate process; in thread mode the orchestrator's
@@ -163,10 +199,10 @@ def _branch_worker(payload):
             sampler.mark("+".join(sorted(active)) or None, branch)
 
     if payload["sample"]:
-        metrics_key = layout.metrics_branch(run_id, group.fanout, branch)
+        metrics_key = space.metrics_branch(run_id, group.fanout, branch)
 
         def flush_metrics(rows):
-            metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+            metrics.write_parquet(space, metrics_key, rows)
 
         sampler = metrics.Sampler(flush=flush_metrics).start()
     retries = payload["retries"]
@@ -182,16 +218,8 @@ def _branch_worker(payload):
             for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
                 # transient step errors count too, and boto3 already retries at the HTTP layer
                 try:
-                    result = _call(cur, client, cfg, layout, flow, step, run_id, branch)
-                    write_part(
-                        client,
-                        cfg.bucket,
-                        layout.part(run_id, name, branch),
-                        result,
-                        step.output_table,
-                        threads=threads,
-                        memory_mb=memory_mb,
-                    )
+                    for _ in _emit(ctx._replace(con=cur), step, branch):
+                        pass  # drained, not next()-ed: a suspended generator defers its close
                     return
                 except Exception:
                     if attempt == retries:
@@ -257,7 +285,7 @@ def _run_sub_dag(group, pending, run_member):
     return done, error
 
 
-def _run_items(flow_cls, cfg, run_id, group, items, max_workers, use_processes, retries, params):
+def _run_items(flow_cls, cfg, run_id, group, items, widths, max_workers, use_processes, retries, params):
     """Run each item's sub-DAG in its own worker; return ({item: sub-steps done}, first error).
 
     Failures don't cancel siblings, so a partial fan-out leaves the completed
@@ -271,12 +299,13 @@ def _run_items(flow_cls, cfg, run_id, group, items, max_workers, use_processes, 
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
         "flow": flow_cls.__name__,  # for getattr after the file import
-        "flow_id": flow_cls.flow_id(),  # for the Layout; see _branch_worker
+        "flow_id": flow_cls.flow_id(),  # for the Space; see _branch_worker
         "group": group.fanout,
         "run_id": run_id,
         "sample": use_processes,
         "retries": retries,
         "params": params,
+        "widths": widths,  # COLLECT dep -> part count, so no worker LISTs to find them
         "workers": workers,  # workers derive their own caps: same machine, one formula
     }
     if use_processes:
@@ -289,17 +318,23 @@ def _run_items(flow_cls, cfg, run_id, group, items, max_workers, use_processes, 
     else:
         pool = ThreadPoolExecutor(max_workers=workers)
     done, error = {}, None
-    with pool as ex:
-        futures = [ex.submit(_branch_worker, {**payload, "branch": i, "steps": ms}) for i, ms in items.items()]
-        for fut in as_completed(futures):
-            try:
-                result = fut.result()
-            except Exception as e:  # noqa: BLE001 — a worker that died without reporting
-                error = error if error is not None else e
-                continue
-            done[result["branch"]] = result["done"]
-            if error is None:  # surface the first, keep the rest
-                error = result["error"]
+    try:
+        with pool as ex:
+            futures = [ex.submit(_branch_worker, {**payload, "branch": i, "steps": ms}) for i, ms in items.items()]
+            for fut in as_completed(futures):
+                try:
+                    result = fut.result()
+                except Exception as e:  # noqa: BLE001 — a worker that died without reporting
+                    error = error if error is not None else e
+                    continue
+                done[result["branch"]] = result["done"]
+                if error is None:  # surface the first, keep the rest
+                    error = result["error"]
+    finally:
+        # the pool has joined, so nothing can still hold the binding: drop it and
+        # its connection's spill dir. A no-op in the parent under process mode,
+        # where only the (now dead) children ever bound anything.
+        _BOUND.pop(run_id, None)
     return done, error
 
 
@@ -332,20 +367,20 @@ def run(
     commit = require_clean(repo)
     started = utc_now()
     run_id = _new_run_id(started)
-    layout = Layout.for_flow(config, flow_cls)
-    client = make_client(config)
-    origin_run_id = _latest_complete(client, config, layout) if resume == "latest" else resume
+    store = Store.of(config)
+    space = Space.for_flow(store, flow_cls)
+    origin_run_id = _latest_complete(space) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
-    con = connect(config)
-    cat = catalog.Catalog(config, flow_cls)
+    con = store.connect()
+    cat = lake.Catalog(space)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
     custom_fields = flow_cls.custom_ledger_fields()
 
-    completed = set()
+    progress = Progress()
     keyed = _keyed_fanouts(dag)
     fanout_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
     origin_completed, origin_fanout_keys = set(), {}
@@ -353,25 +388,30 @@ def run(
     # re-runs first (the work-list may have changed), branch parts are then
     # matched by item key, and everything else downstream is reused only when
     # the key set is unchanged.
-    keyed_downstream = {f: _downstream(dag, f) for f in keyed} if origin_run_id else {}
+    keyed_downstream = {f: dag.downstream(f) for f in keyed} if origin_run_id else {}
     deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
-    key_roots = _key_roots(dag, keyed) if origin_run_id else {}
+    # Branch identity travels down a chain (0014), so every step of a keyed
+    # fan-out's group is named by that fan-out's item keys, not just the first.
+    key_roots = {m: r for m, r in dag.roots.items() if r in keyed} if origin_run_id else {}
     # Positional reuse is only safe where branch position carries no meaning:
     # everything the fan-out's item keys name is matched by key instead, however
     # deep in a branch chain it sits (positions shift when the work-list does).
     lazy_reuse = {s for s in deferred if s not in keyed and s not in key_roots}
 
     def copy_part(name, src_branch, dst_branch):
-        client.copy_object(
-            Bucket=config.bucket,
-            CopySource={"Bucket": config.bucket, "Key": layout.part(origin_run_id, name, src_branch)},
-            Key=layout.part(run_id, name, dst_branch),
+        return (
+            space.part(origin_run_id, name, src_branch),
+            space.part(run_id, name, dst_branch),
+            Slot(name, dst_branch),
         )
-        return _key(name, dst_branch)
 
-    def copy_same(k):
-        name, br = _split(k)
-        return copy_part(name, br, br)
+    def copy_same(slot):
+        return copy_part(slot.step, slot.branch, slot.branch)
+
+    def record_copies(items):
+        """Record each copy as it lands — a failure mid-iteration keeps the prefix."""
+        for slot in space.copy_parts(items):
+            progress.add(slot, space.part(run_id, *slot))
 
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
@@ -383,9 +423,8 @@ def run(
 
     def reuse_step(name):
         """Copy all of the origin's parts for `name` (positional reuse, deferred)."""
-        if parts := [k for k in origin_completed if _split(k)[0] == name]:
-            with ThreadPoolExecutor(max_workers=16) as ex:
-                completed.update(ex.map(copy_same, parts))
+        if parts := [s for s in origin_completed if s.step == name]:
+            record_copies([copy_same(s) for s in parts])
 
     def reuse_matching_branches(name, root, todo):
         """Copy origin branch parts whose item key matches; return what's left to compute.
@@ -400,15 +439,14 @@ def run(
                 stacklevel=3,
             )
         hits = [
-            (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and _key(name, src[k]) in origin_completed
+            (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and Slot(name, src[k]) in origin_completed
         ]
         if hits:
-            with ThreadPoolExecutor(max_workers=16) as ex:
-                completed.update(ex.map(lambda ij: copy_part(name, ij[1], ij[0]), hits))
-        return [i for i in todo if _key(name, i) not in completed]
+            record_copies([copy_part(name, j, i) for i, j in hits])
+        return [i for i in todo if Slot(name, i) not in progress]
 
     if origin_run_id:
-        origin = ledger.read_meta(client, config.bucket, layout.meta(origin_run_id))
+        origin = space.read_meta(origin_run_id)
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
@@ -420,15 +458,10 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        origin_completed = set(origin.get("steps_complete", []))
+        origin_completed = {Slot.parse(k) for k in origin.get("steps_complete", [])}
         origin_fanout_keys = origin.get("fanout_keys") or {}
-        with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
-            completed.update(
-                ex.map(
-                    copy_same,
-                    [k for k in origin_completed if _split(k)[0] not in deferred],
-                )
-            )
+        # server-side copies, IO-bound: one batch, one pool
+        record_copies([copy_same(s) for s in origin_completed if s.step not in deferred])
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin.get("params") or {}
@@ -440,44 +473,24 @@ def run(
     for k, v in params.items():
         setattr(flow, k, v)
 
-    def flush(finished=None, custom=None):
-        meta = {
-            "run_id": run_id,
-            "started": started.isoformat(),
-            "finished": finished.isoformat() if finished else None,
-            "commit": commit,
-            "origin_run_id": origin_run_id,
-            "steps_complete": sorted(completed),
-            "fanout_keys": fanout_keys,
-            "params": params,
-            "custom": custom or {},
-        }
-        ledger.write_meta(client, config.bucket, layout.meta(run_id), meta)
-
-    def upsert(status, finished=None, custom=None):
-        ledger.upsert_run(
-            client,
-            config.bucket,
-            layout.ledger,
-            {
-                "run_id": run_id,
-                "status": status,
-                "started": started,
-                "finished": finished,
-                "commit": commit,
-                "origin_run_id": origin_run_id,
-                **params,
-                **(custom or {}),
-            },
-            custom_fields,
-        )
+    record = RunRecord(
+        run_id=run_id,
+        status="running",
+        started=started,
+        finished=None,
+        commit=commit,
+        origin_run_id=origin_run_id,
+        params=params,
+        custom={},
+        fanout_keys=fanout_keys,  # the same dict the fan-out loop fills
+        custom_fields=custom_fields,
+    )
 
     cat.ensure_tables(flow_cls)  # before any run object exists: a run implies a catalog
-    flush()
-    upsert("running")
+    record.persist(space, progress.to_list(), "running")
 
     def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
-        metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
+        metrics.write_parquet(space, space.metrics(run_id), rows)
 
     sampler = metrics.Sampler(flush=flush_metrics).start()
 
@@ -488,7 +501,15 @@ def run(
             pass
 
     def register(name):
-        cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
+        cat.register_parts({name: progress.keys(name)})
+
+    def collect_widths(steps):
+        """COLLECT dep -> its part count, off the live progress — the widths a worker is sent."""
+        return {d: progress.width(d) for s in steps for d, k in s.param_kinds.items() if k == "COLLECT"}
+
+    def ctx_for(step):
+        """The orchestrator's call context for one step (uncapped: it owns the machine)."""
+        return _Ctx(con, space, flow, run_id, collect_widths([step]))
 
     def run_group(group):
         """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.
@@ -496,9 +517,9 @@ def run(
         No barrier between sub-steps: item A can be in the last one while item B
         is still in the first, so only `workers` items are ever in flight.
         """
-        n = _count_of(completed, group.fanout)
+        n = progress.width(group.fanout)
         for member in group.order:  # key-matched copies first: they shrink every item's work
-            left = [i for i in range(n) if _key(member, i) not in completed]
+            left = [i for i in range(n) if Slot(member, i) not in progress]
             # key-matched reuse also needs the step's OTHER inputs identical
             # to the origin's — any other keyed ancestor's change taints them
             root = key_roots.get(member)
@@ -506,7 +527,7 @@ def run(
                 reuse_matching_branches(member, root, left)
         items = {}
         for i in range(n):
-            if pending := [m for m in group.order if _key(m, i) not in completed]:
+            if pending := [m for m in group.order if Slot(m, i) not in progress]:
                 items[i] = pending
         error = None
         if items:
@@ -521,15 +542,17 @@ def run(
                 run_id,
                 group,
                 items,
+                collect_widths([dag.steps[m] for m in group.order]),
                 max_workers,
                 use_processes,
                 branch_retries,
                 params,
             )
             for i, members in done.items():  # only the sub-steps that succeeded
-                completed.update(_key(m, i) for m in members)
+                for m in members:
+                    progress.add(Slot(m, i), space.part(run_id, m, i))
         for member in group.order:
-            if _count_of(completed, member) == n:  # sub-steps done for every item stay
+            if progress.width(member) == n:  # sub-steps done for every item stay
                 register(member)  # queryable even when a later one killed the run
         if error:
             raise error
@@ -541,19 +564,11 @@ def run(
                 reuse_step(name)
             group = dag.groups.get(name)
             if step.is_fanout:
-                if not _count_of(completed, name):  # skip if a prior run already produced it
+                if not progress.width(name):  # skip if a prior run already produced it
                     sampler.mark(name)
                     key_col = keyed.get(name)
-                    keys, item_keys, seen = [], [], set()
-                    for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
-                        value = write_part(
-                            client,
-                            config.bucket,
-                            layout.part(run_id, name, i),
-                            item,
-                            step.output_table,
-                            fanout_key=key_col,
-                        )
+                    parts, item_keys, seen = [], [], set()
+                    for slot, key, value in _emit(ctx_for(step), step):
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
@@ -562,34 +577,34 @@ def run(
                                 )
                             seen.add(value)
                             item_keys.append(value)
-                        keys.append(_key(name, i))
+                        parts.append((slot, key))
                     if key_col:
                         fanout_keys[name] = item_keys
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
-                    completed.update(keys)
+                    for slot, key in parts:
+                        progress.add(slot, key)
                 register(name)  # before its items run: a failing item leaves the fan-out queryable
                 if group:
                     run_group(group)  # registers its own members, complete ones even on failure
             else:
-                if _key(name, 0) not in completed:
+                if Slot(name, 0) not in progress:
                     sampler.mark(name)
-                    result = _call(con, client, config, layout, flow, step, run_id, None)
-                    write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
-                    completed.add(_key(name, 0))
+                    for slot, key, _ in _emit(ctx_for(step), step):
+                        progress.add(slot, key)
                 register(name)
-            flush()
+            space.write_meta(run_id, record.meta(progress.to_list()))
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]
         if missing:
             raise RuntimeError(f"ledger columns not populated during run: {missing}")
-        custom = {c: getattr(flow, c) for c in ledger_cols}
-        finished = utc_now()
-        flush(finished, custom)
-        upsert("complete", finished, custom)
+        record.custom = {c: getattr(flow, c) for c in ledger_cols}
+        record.finished = utc_now()
+        record.persist(space, progress.to_list(), "complete")
     except Exception:
-        flush()  # persist partial progress so resume can reuse completed branches
-        upsert("failed", finished=utc_now())
+        # persist partial progress so resume can reuse completed branches
+        record.finished = utc_now()
+        record.persist(space, progress.to_list(), "failed")
         raise
     finally:
         write_metrics()  # success AND failure — failed runs need perf data most

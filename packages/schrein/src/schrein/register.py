@@ -1,9 +1,8 @@
 """A linearizable CAS register on one S3 key, via conditional writes.
 
 The whole coordination protocol: every commit is one compare-and-swap on a
-single strongly-consistent S3 object, so commits are totally ordered. No
-locks, no leases, no clocks — a stale writer just fails its If-Match and
-rebases.
+strongly-consistent S3 object, so commits are totally ordered — no locks, no
+leases, no clocks; a stale writer just fails its If-Match and rebases.
 """
 
 import random

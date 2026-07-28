@@ -51,3 +51,41 @@ rebuild is already a supported, tested path).
   the local entry point (the form points at it).
 - `sync` does not carry the publish lake; re-publish from the synced runs if
   consumers need it on the bucket.
+
+## Note (2026-07-28) — the seams moved into `Store`
+
+The three seams named above are no longer module-level functions in
+`storage.py`. `storage.uri()`, `storage.secret_sql()`, `storage.connect()`,
+`storage.make_client()` and `storage.ducklake_at()` were replaced by
+`store.Store` with two subclasses, `S3Store` and `DirStore` (`store.py`);
+`Store.of(config)` is the single dispatch, and `uri()`, `connect()`,
+`lake()` and `verify()` are the methods that differ between them.
+`storage.py` retains only the documented `s3_client` escape hatch.
+
+This strengthens the decision rather than changing it: the claim that
+"nothing branches on the mode beyond one constructor" had decayed to nine
+mode branches across five modules, and is now enforced by construction —
+no store dispatch exists outside the two subclasses. The migration clause
+below is unchanged, except that `sync.py` is now `Space.sync_to`.
+
+## Note (2026-07-28) — the publish consequence was over-broad
+
+The consequence "`publish --to s3://…` from a local store is refused (one
+client per operation; cross-store publish would need two) — sync first" said
+more than the code ever did, and gave a reason that no longer holds.
+
+The **default** local publish was never refused: `publish` drives two stores
+already (it drains the relation on the source connection and uploads through
+the target store — that is what makes the cross-bucket S3 case work), and with
+`Store`/`Space` a second lake in the same store is ordinary. A local flow
+publishing into its own local publish lake is supported, and
+`test_local.py::test_local_publish_and_vanilla_read` now asserts the target
+store and data path stay inside `local_dir`, rather than leaving it incidental.
+
+The refusal survives, but on a narrower and honest ground: a local-mode config
+carries no endpoint, region or credentials for an `s3://` destination, and
+`Store.of` dispatches on `local_dir` first — so a `--to` target derived from a
+local config would silently resolve back to the local directory rather than to
+the named bucket. Giving `publish` its own `--endpoint`/`--region` is what
+would be needed, and that is exactly what `ionflow sync` already offers;
+`sync` therefore remains the path.

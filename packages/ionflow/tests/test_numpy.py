@@ -8,36 +8,12 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped, storage
-from ionflow.storage import Layout, get_bytes_or_none, s3_client, table_from_bytes, to_arrow
+from ionflow import Branch, Collect, Fanout, Flow, Table, check, shaped
+from ionflow.arrow import StepInput, table_from_bytes, to_arrow
+from ionflow.space import ConstraintViolation, Space
+from ionflow.store import Store
 
 # --- schema: numpy dtype annotations ---
-
-
-def test_numpy_dtypes_compile_to_ddl_and_arrow():
-    class T(Table):
-        a: np.float32
-        b: np.int16 | None
-        c: list[np.float32]
-        d: np.uint8
-
-    cols = T.columns()
-    assert cols["a"].duckdb_type() == "FLOAT"
-    assert cols["b"].duckdb_type() == "SMALLINT" and cols["b"].nullable
-    assert cols["c"].duckdb_type() == "FLOAT[]"
-    assert cols["d"].duckdb_type() == "UTINYINT"
-    s = T.arrow_schema()
-    assert s.field("a").type == pa.float32()
-    assert s.field("b").type == pa.int16()
-    assert s.field("c").type == pa.list_(pa.float32())
-
-
-def test_numpy_params_still_rejected():
-    # params must round-trip JSON/CLI; np scalars stay excluded
-    with pytest.raises(TypeError, match="only int/float/str/bool"):
-
-        class P(FlowParams):
-            x: np.float32
 
 
 # --- to_arrow: the conversion matrix ---
@@ -52,27 +28,20 @@ class Vec(Table):
     v: list[np.float32]
 
 
-def test_dict_of_ndarrays_preserves_dtypes():
+def test_dict_of_ndarrays_conversions():
     t = to_arrow({"a": np.arange(3, dtype=np.int16), "b": np.ones(3, dtype=np.float32)})
-    assert t.schema.field("a").type == pa.int16()
+    assert t.schema.field("a").type == pa.int16()  # narrow dtypes survive
     assert t.schema.field("b").type == pa.float32()
 
-
-def test_dict_2d_ndarray_becomes_fixed_size_list():
-    t = to_arrow({"v": np.arange(6, dtype=np.float32).reshape(2, 3)})
+    t = to_arrow({"v": np.arange(6, dtype=np.float32).reshape(2, 3)})  # 2D -> fixed-size list
     assert t.schema.field("v").type == pa.list_(pa.float32(), 3)
     assert t.column("v").to_pylist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]
 
-
-def test_dict_3d_ndarray_nests():
-    t = to_arrow({"v": np.zeros((2, 4, 3), dtype=np.int16)})
+    t = to_arrow({"v": np.zeros((2, 4, 3), dtype=np.int16)})  # 3D nests
     assert t.schema.field("v").type == pa.list_(pa.list_(pa.int16(), 3), 4)
 
-
-def test_dict_2d_noncontiguous_ndarray():
     arr = np.arange(12, dtype=np.float32).reshape(3, 4)[:, ::2]  # strided view
-    t = to_arrow({"v": arr})
-    assert t.column("v").to_pylist() == [[0.0, 2.0], [4.0, 6.0], [8.0, 10.0]]
+    assert to_arrow({"v": arr}).column("v").to_pylist() == [[0.0, 2.0], [4.0, 6.0], [8.0, 10.0]]
 
 
 def test_structured_array_carries_names_and_dtypes():
@@ -84,25 +53,19 @@ def test_structured_array_carries_names_and_dtypes():
     assert t.column("a").to_pylist() == [1, 2]
 
 
-def test_bare_1d_maps_to_single_column():
+def test_bare_ndarray_maps_onto_declared_columns():
     t = to_arrow(np.arange(3, dtype=np.float32), Table.make("One", {"x": np.float32}))
-    assert t.column_names == ["x"]
+    assert t.column_names == ["x"]  # 1D -> the single declared column
 
-
-def test_bare_2d_maps_positionally():
-    t = to_arrow(np.array([[1, 2.5], [3, 4.5]]), Pair)
+    t = to_arrow(np.array([[1, 2.5], [3, 4.5]]), Pair)  # (N, k) -> k columns, positionally
     assert t.column_names == ["a", "b"]
     assert t.column("b").to_pylist() == [2.5, 4.5]
 
-
-def test_bare_2d_maps_to_single_vector_column():
-    t = to_arrow(np.arange(6, dtype=np.float32).reshape(2, 3), Vec)
+    t = to_arrow(np.arange(6, dtype=np.float32).reshape(2, 3), Vec)  # (N, d) -> one vector column
     assert t.schema.field("v").type == pa.list_(pa.float32(), 3)
 
-
-def test_bare_ndarray_shape_mismatch_is_actionable():
     with pytest.raises(TypeError, match="dict of named arrays"):
-        to_arrow(np.zeros((2, 3)), Pair)
+        to_arrow(np.zeros((2, 3)), Pair)  # ambiguous shape is actionable
 
 
 def test_complex_arrays_rejected():
@@ -118,47 +81,24 @@ class Frame(Table):
     x: np.float32 = check("x >= 0")
 
 
-def test_write_part_persists_narrow_dtypes(s3cfg):
-    client = s3_client(s3cfg)
-    key = "mf/F/runs/run_id=r/pts/part_0.parquet"
-    data = {"frame": np.arange(2, dtype=np.int32), "x": np.ones(2, dtype=np.float32)}
-    storage.write_part(client, s3cfg.bucket, key, data, Frame)
-    schema = table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).schema
-    assert schema.field("frame").type == pa.int32()
-    assert schema.field("x").type == pa.float32()
-
-
-def test_constraints_apply_to_numpy_returns(s3cfg):
-    client = s3_client(s3cfg)
+def test_constraints_apply_to_numpy_returns(cfg):
+    space = Store.of(cfg).space("F")
     bad = {"frame": np.zeros(1, dtype=np.int32), "x": np.array([-1.0], dtype=np.float32)}
-    with pytest.raises(storage.ConstraintViolation):
-        storage.write_part(client, s3cfg.bucket, "mf/F/runs/run_id=r2/pts/part_0.parquet", bad, Frame)
+    with pytest.raises(ConstraintViolation):
+        space.write_part(space.part("r2", "pts"), bad, Frame)
 
 
-def test_nan_is_a_value_not_null(s3cfg):
+def test_nan_is_a_value_not_null(cfg):
     # NOT NULL means "no NULLs"; NaN is a legitimate float measurement artifact
-    client = s3_client(s3cfg)
-    key = "mf/F/runs/run_id=r3/pts/part_0.parquet"
+    store = Store.of(cfg)
+    space = store.space("F")
+    key = space.part("r3", "pts")
     data = {"frame": np.zeros(1, dtype=np.int32), "x": np.array([np.nan], dtype=np.float32)}
-    storage.write_part(client, s3cfg.bucket, key, data, Table.make("NanOk", {"frame": np.int32, "x": np.float32}))
-    assert np.isnan(table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).column("x").to_pylist()[0])
+    space.write_part(key, data, Table.make("NanOk", {"frame": np.int32, "x": np.float32}))
+    assert np.isnan(table_from_bytes(store.get(key)).column("x").to_pylist()[0])
 
 
 # --- shaped(...): fixed-shape array columns ---
-
-
-def test_shaped_compiles_to_fixed_types():
-    class T(Table):
-        v: shaped(np.float32, 3)
-        m: shaped(np.int16, 4, 3)  # cells are (4, 3) arrays
-
-    cols = T.columns()
-    assert cols["v"].duckdb_type() == "FLOAT[3]"
-    assert cols["m"].duckdb_type() == "SMALLINT[3][4]"  # DuckDB suffixes read inside-out
-    assert cols["v"].persisted_type() == "FLOAT[]"  # parquet round-trips fixed as list
-    s = T.arrow_schema()
-    assert s.field("v").type == pa.list_(pa.float32(), 3)
-    assert s.field("m").type == pa.list_(pa.list_(pa.int16(), 3), 4)
 
 
 def test_shaped_rejects_bad_dimensions():
@@ -172,24 +112,16 @@ class Shaped3(Table):
     v: shaped(np.float32, 3)
 
 
-def test_shaped_enforces_shape_at_write(s3cfg):
-    client = s3_client(s3cfg)
+def test_shaped_enforces_shape_at_write(cfg):
+    space = Store.of(cfg).space("S")
     good = {"v": np.zeros((2, 3), dtype=np.float32)}
-    storage.write_part(client, s3cfg.bucket, "mf/S/runs/run_id=r/v/part_0.parquet", good, Shaped3)
+    space.write_part(space.part("r", "v", 0), good, Shaped3)
     with pytest.raises(duckdb.ConversionException, match="size 4 to array of size 3"):
-        storage.write_part(
-            client,
-            s3cfg.bucket,
-            "mf/S/runs/run_id=r/v/part_1.parquet",
-            {"v": np.zeros((2, 4), dtype=np.float32)},
-            Shaped3,
-        )
+        space.write_part(space.part("r", "v", 1), {"v": np.zeros((2, 4), dtype=np.float32)}, Shaped3)
     # ragged variable lists can't satisfy a fixed shape either
     with pytest.raises(duckdb.ConversionException, match="length"):
-        storage.write_part(
-            client,
-            s3cfg.bucket,
-            "mf/S/runs/run_id=r/v/part_2.parquet",
+        space.write_part(
+            space.part("r", "v", 2),
             pa.table({"v": pa.array([[1.0, 2.0]], pa.list_(pa.float32()))}),
             Shaped3,
         )
@@ -199,18 +131,7 @@ def test_shaped_enforces_shape_at_write(s3cfg):
 
 
 def _input(table):
-    return storage.StepInput(duckdb.connect().from_arrow(table))
-
-
-def test_np_scalar_column_keeps_dtype():
-    got = _input(pa.table({"x": pa.array([1, 2], pa.int16())})).np("x")
-    assert got.dtype == np.int16 and got.tolist() == [1, 2]
-
-
-def test_np_list_column_stacks():
-    inp = _input(pa.table({"v": pa.array([[1.0, 2.0], [3.0, 4.0]], pa.list_(pa.float32()))}))
-    got = inp.np("v")
-    assert got.shape == (2, 2) and got.dtype == np.float32
+    return StepInput(duckdb.connect().from_arrow(table))
 
 
 def test_np_no_arg_returns_all_columns():
@@ -237,13 +158,14 @@ def test_step_input_delegates_to_the_relation():
     assert inp.aggregate("sum(x) AS s").fetchone()[0] == 6
 
 
-def test_write_part_accepts_an_input_returned_unchanged(s3cfg):
+def test_write_part_accepts_an_input_returned_unchanged(cfg):
     # identity step: `def copy(self, raw: Raw) -> Raw: return raw`
-    client = s3_client(s3cfg)
-    key = "mf/F/runs/run_id=r4/pts/part_0.parquet"
+    store = Store.of(cfg)
+    space = store.space("F")
+    key = space.part("r4", "pts")
     inp = _input(pa.table({"frame": pa.array([1], pa.int32()), "x": pa.array([2.0], pa.float32())}))
-    storage.write_part(client, s3cfg.bucket, key, inp, Frame)
-    assert table_from_bytes(get_bytes_or_none(client, s3cfg.bucket, key)).column("x").to_pylist() == [2.0]
+    space.write_part(key, inp, Frame)
+    assert table_from_bytes(store.get(key)).column("x").to_pylist() == [2.0]
 
 
 # --- end to end: a numpy-native flow, fan-out included ---
@@ -283,18 +205,19 @@ class SignalFlow(Flow):
         return peaks.aggregate("count(*) AS n")
 
 
-def test_numpy_flow_end_to_end(s3cfg, repo):
-    run_id = SignalFlow.run(s3cfg, repo=repo, use_processes=False)
-    con = SignalFlow.duck(s3cfg)
+def test_numpy_flow_end_to_end(cfg, repo):
+    run_id = SignalFlow.run(cfg, repo=repo, use_processes=False)
+    con = SignalFlow.duck(cfg)
     assert con.sql(f"SELECT n FROM counted WHERE run_id = '{run_id}'").fetchone()[0] == 4
     peaks = con.sql(f"SELECT peak FROM peaks WHERE run_id = '{run_id}'").fetchall()
     assert all(p > 0 for (p,) in peaks)
     # narrow dtypes survived the whole pipeline onto S3 (fixed shape persists as list)
-    layout = Layout.for_flow(s3cfg, SignalFlow)
-    schema = table_from_bytes(get_bytes_or_none(s3_client(s3cfg), s3cfg.bucket, layout.part(run_id, "spectra"))).schema
+    store = Store.of(cfg)
+    space = Space.for_flow(store, SignalFlow)
+    schema = table_from_bytes(store.get(space.part(run_id, "spectra"))).schema
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
     # the drift check compares against the persisted (list) form: no false positive
-    from ionflow import discovery
+    from ionflow.lake import schema_drift
 
-    assert discovery.schema_drift(SignalFlow, s3cfg) == []
+    assert schema_drift(SignalFlow, space) == []

@@ -1,6 +1,12 @@
+"""What a launch does before any flow runs: find flows in code, find flows with data.
+
+The declaration-vs-catalog comparison (`schema_drift`) lives in test_lake_contract.
+"""
+
 import textwrap
 
-from ionflow import discovery
+from ionflow.flow import discover_flows
+from ionflow.tui import scan_runs
 
 
 def _make_pkg(root, name, flows):
@@ -23,7 +29,7 @@ def _make_pkg(root, name, flows):
 def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "mypkg", [("a", "FlowA"), ("b", "FlowB")])
     monkeypatch.syspath_prepend(str(tmp_path))
-    flows = discovery.discover_flows("mypkg")
+    flows = discover_flows("mypkg")
     assert set(flows) == {"mypkg.a.FlowA", "mypkg.b.FlowB"}  # keys are flow_ids
     assert flows["mypkg.a.FlowA"].flow_id() == "mypkg.a.FlowA"
 
@@ -31,26 +37,15 @@ def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
 def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "pkgx", [("m", "OnlyX")])
     monkeypatch.syspath_prepend(str(tmp_path))
-    flows = discovery.discover_flows("pkgx")
+    flows = discover_flows("pkgx")
     assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
 
 
-def test_scan_runs(s3cfg):
-    from ionflow import storage
+def test_scan_runs(cfg):
+    from ionflow.store import Store
 
-    assert discovery.scan_runs(s3cfg) == set()
+    store = Store.of(cfg)
+    assert scan_runs(store) == set()
     # key presence is all that matters here; no need for a full flow run
-    storage.s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")
-    assert discovery.scan_runs(s3cfg) == {"Alpha"}
-
-
-def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
-    from tui_flows.pipeline import Alpha
-
-    Alpha.run(s3cfg, repo=repo, use_processes=False)
-    assert discovery.schema_drift(Alpha, s3cfg) == []
-
-    # pretend the code now declares `x` as text instead of the stored bigint
-    monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = discovery.schema_drift(Alpha, s3cfg)
-    assert any("data" in i and "x" in i for i in issues)
+    store.put(f"{cfg.prefix}/Alpha/ledger.parquet", b"")
+    assert scan_runs(store) == {"Alpha"}

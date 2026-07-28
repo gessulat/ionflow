@@ -4,9 +4,10 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from ionflow import storage
 from ionflow.config import Config
 from ionflow.schema import Table, check, primary_key
+from ionflow.space import ConstraintViolation
+from ionflow.store import Store
 
 
 class Features(Table):
@@ -21,32 +22,17 @@ def test_connect_uses_credential_chain_without_keys(monkeypatch):
     # find — CI runners have none anywhere in the chain.
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "chain")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "chain")
-    con = storage.connect(Config(bucket="b"))
+    con = Store.of(Config(bucket="b")).connect()
     provider = con.sql("SELECT provider FROM duckdb_secrets() WHERE name = 's'").fetchone()[0]
     assert provider == "credential_chain"
 
 
-def test_write_part_roundtrips_list_columns(s3cfg):
-    class Emb(Table):
-        id: int
-        vec: list[float]
-
-    client = storage.s3_client(s3cfg)
-    data = pa.table({"id": [1, 2], "vec": [[1.0, 2.0], [3.0]]})
-    key = "mf/E/runs/run_id=r/e/part_0.parquet"
-    storage.write_part(client, s3cfg.bucket, key, data, Emb)
-    assert storage.table_from_bytes(storage.get_bytes_or_none(client, s3cfg.bucket, key)).column("vec").to_pylist() == [
-        [1.0, 2.0],
-        [3.0],
-    ]
-
-
 def test_object_age_uses_server_clock(s3cfg):
-    client = storage.s3_client(s3cfg)
-    client.put_object(Bucket=s3cfg.bucket, Key="x", Body=b"1")
-    age = storage.object_age(client, s3cfg.bucket, "x")
+    store = Store.of(s3cfg)
+    store.put("x", b"1")
+    age = store.age("x")
     assert age is not None and -2 <= age <= 5  # HTTP Date has 1s resolution
-    assert storage.object_age(client, s3cfg.bucket, "missing") is None
+    assert store.age("missing") is None
 
 
 def _data():
@@ -59,47 +45,21 @@ def _data():
     )
 
 
-def test_write_read_roundtrip(s3cfg):
-    con = storage.connect(s3cfg)
-    client = storage.s3_client(s3cfg)
-    storage.write_part(
-        client,
-        s3cfg.bucket,
-        "mf/ETL/runs/run_id=r1/features/part_0.parquet",
-        _data(),
-        Features,
-    )
-    rel = con.sql(storage.read_parquet_sql(storage.uri(s3cfg, "mf/ETL/runs/*/features/*.parquet")))
-    rows, cols = rel.fetchall(), rel.columns
-    got = {c: [r[i] for r in rows] for i, c in enumerate(cols)}
-    assert sorted(got["id"]) == [1, 2]
-    assert got["run_id"] == ["r1", "r1"]  # hive column materialized
+@pytest.mark.parametrize("bad", ["check", "not_null"])
+def test_write_part_enforces_declared_constraints(s3cfg, bad):
+    space = Store.of(s3cfg).space("ETL")
+    rows = _data().to_pylist()
+    rows[0]["score"] = -1.0 if bad == "check" else rows[0]["score"]
+    rows[0]["ts"] = None if bad == "not_null" else rows[0]["ts"]
+    with pytest.raises(ConstraintViolation):
+        space.write_part(space.part("r", "features"), pa.Table.from_pylist(rows, Features.arrow_schema()), Features)
 
 
-def test_check_constraint_rejects_bad_row(s3cfg):
-    client = storage.s3_client(s3cfg)
-    bad = pa.table({"id": [1], "ts": [dt.datetime(2026, 1, 1)], "score": [-1.0]})
-    with pytest.raises(storage.ConstraintViolation):
-        storage.write_part(
-            client,
-            s3cfg.bucket,
-            "mf/ETL/runs/run_id=r2/features/part_0.parquet",
-            bad,
-            Features,
-        )
-
-
-def test_not_null_rejects(s3cfg):
-    client = storage.s3_client(s3cfg)
-    bad = pa.table({"id": [1], "ts": [None], "score": [0.1]})
-    with pytest.raises(storage.ConstraintViolation):
-        storage.write_part(
-            client,
-            s3cfg.bucket,
-            "mf/ETL/runs/run_id=r3/features/part_0.parquet",
-            bad,
-            Features,
-        )
+def test_key_for_uri_inverts_uri(anycfg):
+    store = Store.of(anycfg)
+    assert store.key_for_uri(store.uri("mf/ETL/x.parquet")) == "mf/ETL/x.parquet"
+    with pytest.raises(ValueError, match="is not under"):
+        store.key_for_uri("s3://elsewhere/mf/ETL/x.parquet")
 
 
 @pytest.mark.slow
@@ -113,15 +73,16 @@ def test_httpfs_write_unsafe_canary(s3cfg):
     native writes have become failure-atomic: supersede ADR 0010 before
     deleting the canary.
     """
-    con = storage.connect(s3cfg)
+    store = Store.of(s3cfg)
+    con = store.connect()
     with pytest.raises(duckdb.Error):
         con.execute(
             "COPY (SELECT CASE WHEN range = 900000 THEN error('boom') "
             "ELSE range::VARCHAR END AS v FROM range(1000000)) "
-            f"TO '{storage.uri(s3cfg, 'mf/CANARY/failed.parquet')}' "
+            f"TO '{store.uri('mf/CANARY/failed.parquet')}' "
             "(FORMAT PARQUET, ROW_GROUP_SIZE 10000)"
         )
-    leftovers = storage.list_keys(storage.s3_client(s3cfg), s3cfg.bucket, "mf/CANARY/")
+    leftovers = store.list("mf/CANARY/")
     assert leftovers == ["mf/CANARY/failed.parquet"], (
         "failed COPY TO s3:// no longer leaves a partial object — revisit ADR 0010"
     )

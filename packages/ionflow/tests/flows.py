@@ -4,6 +4,7 @@ Importable (branch workers load it by file path) and controllable via env vars,
 so a specific branch can be made to fail on one run and succeed on a resume.
 """
 
+import json
 import os
 import pathlib
 import time
@@ -11,15 +12,13 @@ import uuid
 
 import pyarrow as pa
 
-from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, fanout_key
-from ionflow.storage import get_bytes_or_none, s3_client
+from ionflow import Branch, Collect, Fanout, Flow, FlowParams, LedgerColumns, Table, fanout_key
+from ionflow.space import Space
+from ionflow.storage import s3_client
+from ionflow.store import Store
 
 
 class Src(Table):
-    g: int
-
-
-class Part(Table):
     g: int
 
 
@@ -39,35 +38,14 @@ class FlakyFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1, 2)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         g = parts.project("g").fetchone()[0]
-        pathlib.Path(os.environ["FLAKY_DIR"], f"exec_{g}_{uuid.uuid4().hex}").touch()
+        _mark("work", g)
         if g == 1 and os.environ.get("FLAKY_FAIL") == "1":
             raise RuntimeError("boom on g=1")
-        return parts.project("g, g * 2 AS doubled")
-
-    def agg(self, work: Collect[Out]) -> Agg:
-        return work.aggregate("count(*) AS n, sum(doubled) AS total")
-
-
-class RetryFlow(Flow):
-    """Every branch fails on its first attempt (marker files in RETRY_DIR count them)."""
-
-    def source(self) -> Src:
-        return pa.table({"g": [0, 1]})
-
-    def parts(self, source: Src) -> Fanout[Part]:
-        return [source.filter(f"g = {g}") for g in (0, 1)]
-
-    def work(self, parts: Branch[Part]) -> Out:
-        g = parts.project("g").fetchone()[0]
-        marker = pathlib.Path(os.environ["RETRY_DIR"], f"tried_{g}")
-        if not marker.exists():
-            marker.touch()
-            raise RuntimeError(f"transient failure on g={g}")
         return parts.project("g, g * 2 AS doubled")
 
     def agg(self, work: Collect[Out]) -> Agg:
@@ -83,10 +61,10 @@ class ParamFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         return parts.project(f"g, g * {self.mult} AS doubled")  # param read in a branch
 
     def agg(self, work: Collect[Out]) -> Agg:
@@ -94,28 +72,55 @@ class ParamFlow(Flow):
 
 
 def _side_n(config):
-    """The side input: an int stored in the bucket outside any run folder."""
-    return int(s3_client(config).get_object(Bucket=config.bucket, Key="side/n")["Body"].read())
+    """The side input: an int stored outside any run folder."""
+    return int(Store.of(config).get("side/n"))
 
 
 def _side_order(config):
     """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
-    blob = get_bytes_or_none(s3_client(config), config.bucket, "side/order")
+    blob = Store.of(config).get("side/order")
     return blob.decode() if blob else "fwd"
 
 
 class SideInputFlow(Flow):
     """Reads a side object via self.config — in a root step and inside a branch."""
 
-    def items(self) -> Fanout[Part]:
+    def items(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(_side_n(self.config))]
 
-    def work(self, items: Branch[Part]) -> Out:
+    def work(self, items: Branch[Src]) -> Out:
         n = _side_n(self.config)  # branch workers bind config on their own flow instance
         return items.project(f"g, g * {n} AS doubled")
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
+class TwoGroupFlow(Flow):
+    """Two fan-out groups in one run, each collecting a fan-out of its own width.
+
+    Thread mode is the only place one process runs both groups, so it is the only
+    place a worker binding cached for the first group could still be around for
+    the second — with the first group's collect widths.
+    """
+
+    def side_a(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def side_b(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(5)]
+
+    def items_a(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def items_b(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def work_a(self, items_a: Branch[Src], side_a: Collect[Src]) -> Out:
+        return items_a.project(f"g, {side_a.aggregate('count(*)').fetchone()[0]} AS doubled")
+
+    def work_b(self, items_b: Branch[Src], side_b: Collect[Src]) -> Out:
+        return items_b.project(f"g, {side_b.aggregate('count(*)').fetchone()[0]} AS doubled")
 
 
 class KeyedItem(Table):
@@ -179,9 +184,12 @@ class Refined(Table):
     quadrupled: int
 
 
+_MARK_DIRS = ("CHAIN_DIR", "PIPE_DIR", "FLAKY_DIR")  # one per flow family; never set together
+
+
 def _mark(step, item):
     """Record one execution of `step` for `item`, if a marker dir is configured."""
-    if d := os.environ.get("CHAIN_DIR") or os.environ.get("PIPE_DIR"):
+    if d := next((v for n in _MARK_DIRS if (v := os.environ.get(n))), None):
         pathlib.Path(d, f"exec|{step}|{item}|{uuid.uuid4().hex}").touch()
 
 
@@ -205,17 +213,17 @@ class ChainFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1, 2)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         g = parts.project("g").fetchone()[0]
         _mark("work", g)
         if os.environ.get("CHAIN_FAIL") == f"work:{g}":
             raise RuntimeError(f"boom on work g={g}")
         return parts.project("g, g * 2 AS doubled")
 
-    def refine(self, parts: Branch[Part], work: Branch[Out]) -> Refined:
+    def refine(self, parts: Branch[Src], work: Branch[Out]) -> Refined:
         """Two branch inputs at the same index: the fan-out item and `work`'s output."""
         g = parts.project("g").fetchone()[0]
         _mark("refine", g)
@@ -387,11 +395,96 @@ class EmptyFanFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return []
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         return parts.project("g, g * 2 AS doubled")
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, coalesce(sum(doubled), 0) AS total")
+
+
+ORDER_ITEMS = 3  # OrderFlow's fan-out width
+
+
+class Timed(Table):
+    g: int
+    finished_at: float
+
+
+class OrderFlow(Flow):
+    """Branches finish in reverse index order: each item waits for its successor.
+
+    Completion order is then the opposite of branch order, which is what makes
+    the order parts are registered in observable. ORDER_DIR holds the markers.
+    """
+
+    def parts(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(ORDER_ITEMS)]
+
+    def work(self, parts: Branch[Src]) -> Timed:
+        g = parts.project("g").fetchone()[0]
+        d = pathlib.Path(os.environ["ORDER_DIR"])
+        if g + 1 < ORDER_ITEMS:  # the last item goes first, the rest queue behind it
+            deadline = time.monotonic() + 30
+            while not d.joinpath(f"done_{g + 1}").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)  # the successor's part must land, not merely its marker
+        d.joinpath(f"done_{g}").touch()
+        return pa.table({"g": [g], "finished_at": [time.time()]})
+
+
+class PartialFanFlow(Flow):
+    """The fan-out itself dies partway: the items it already yielded are on S3."""
+
+    def parts(self) -> Fanout[Src]:
+        for g in range(3):
+            if g == 2:
+                raise RuntimeError("fan-out died on item 2")
+            yield pa.table({"g": [g]})
+
+    def work(self, parts: Branch[Src]) -> Out:
+        return parts.project("g, g * 2 AS doubled")
+
+
+class IntKeyItem(Table):
+    shard: int = fanout_key
+    v: int
+
+
+class IntKeyFlow(Flow):
+    """Integer fanout keys, which the JSON meta must carry back as ints (0008)."""
+
+    def shards(self) -> Fanout[IntKeyItem]:
+        return [pa.table({"shard": [s], "v": [s * 10]}) for s in (2, 7)]
+
+    def work(self, shards: Branch[IntKeyItem]) -> KeyedOut:
+        shard = shards.project("shard").fetchone()[0]
+        return pa.table({"item": [str(shard)], "token": [uuid.uuid4().hex]})
+
+
+class ProbeFlow(Flow):
+    """Copies the ledger as it stands mid-run to LEDGER_PROBE; PROBE_FAIL kills it.
+
+    A `running` ledger row exists only while the run holds the process, so a
+    step is the only place to observe one.
+    """
+
+    class Params(FlowParams):
+        mult: int = 2
+
+    class Ledger(LedgerColumns):
+        note: str
+
+    def source(self) -> Src:
+        if probe := os.environ.get("LEDGER_PROBE"):
+            space = Space.for_flow(Store.of(self.config), self.__class__)
+            pathlib.Path(probe).write_text(json.dumps(space.read_rows(space.ledger), default=str))
+        self.note = "set during the run"
+        return pa.table({"g": [self.mult]})
+
+    def doubled(self, source: Src) -> Out:
+        if os.environ.get("PROBE_FAIL"):
+            raise RuntimeError("boom in doubled")
+        return source.project("g, g * 2 AS doubled")

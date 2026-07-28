@@ -64,7 +64,7 @@ to conflate them. They share a *mechanism*, not a *role*:
 - **ionflow's ledger** is run bookkeeping: an append-only record of flow
   runs (`run_id`, status, timestamps, commit, completed steps, params).
   It has no schema authority — in ionflow, table schemas live in `Table`
-  class annotations and drift checking lives in `discovery.py`. The
+  class annotations and drift checking lives in `lake.py`. The
   ledger never performs or tracks schema changes.
 - **schrein's register** holds a lakehouse *catalog*: table schemas,
   snapshots, and file lists for a datalake. Schema evolution is a

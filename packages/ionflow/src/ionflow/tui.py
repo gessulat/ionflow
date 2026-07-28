@@ -20,8 +20,11 @@ from textual.widgets import (
     Tabs,
 )
 
-from . import discovery, git, query
+from . import git, lake, query
 from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
+from .flow import discover_flows
+from .space import Space, flow_id_of_ledger_key
+from .store import Store
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 
@@ -202,6 +205,27 @@ class SetupScreen(Screen):
         app.switch_screen(app.overview_screen(cfg))
 
 
+def scan_runs(store):
+    """Flow names with a ledger in the store — one LIST of the prefix."""
+    prefix = store.prefix + "/"
+    return {name for key in store.list(prefix) if (name := flow_id_of_ledger_key(prefix, key)) is not None}
+
+
+def startup_warnings(flows, store, with_data):
+    """Health check: orphaned stored data + schema drift, as human-readable lines."""
+    warnings = []
+    for name in sorted(with_data - set(flows)):
+        warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
+    for name, cls in flows.items():  # one store serves every flow's check
+        if name not in with_data:
+            continue
+        try:
+            warnings += lake.schema_drift(cls, Space.for_flow(store, cls))
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"{name}: schema check failed: {e}")
+    return warnings
+
+
 class IonflowTUI(App):
     TITLE = "ionflow"
     BINDINGS = [Binding("q", "quit", "Quit")]
@@ -221,13 +245,14 @@ class IonflowTUI(App):
 
     def overview_screen(self, cfg) -> OverviewScreen:
         try:
-            flows = discovery.discover_flows(cfg.flows) if cfg.flows else {}
+            flows = discover_flows(cfg.flows) if cfg.flows else {}
             import_warnings = []
         except Exception as e:  # noqa: BLE001
             flows, import_warnings = {}, [f"could not import flows '{cfg.flows}': {e}"]
         try:
-            with_ledger = discovery.scan_runs(cfg)
-            warnings = import_warnings + discovery.startup_warnings(flows, cfg, with_ledger)
+            store = Store.of(cfg)
+            with_ledger = scan_runs(store)
+            warnings = import_warnings + startup_warnings(flows, store, with_ledger)
             with_data = set(flows) & with_ledger
         except Exception as e:  # noqa: BLE001
             with_data, warnings = set(), import_warnings + [f"could not read S3: {e}"]

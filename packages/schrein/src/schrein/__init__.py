@@ -2,6 +2,6 @@
 
 from .ducklake import DuckLake, load_ducklake
 from .localfs import LocalClient
-from .register import CasRegister, CommitConflict
+from .register import MISSING, CasRegister, CommitConflict
 
-__all__ = ["CasRegister", "CommitConflict", "DuckLake", "LocalClient", "load_ducklake"]
+__all__ = ["MISSING", "CasRegister", "CommitConflict", "DuckLake", "LocalClient", "load_ducklake"]

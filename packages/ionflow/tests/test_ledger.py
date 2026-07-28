@@ -1,77 +1,40 @@
-"""Ledger semantics. The CAS precondition contract itself (412 on stale
-If-Match, genesis conflicts) is schrein's and is tested in its suite."""
+"""Ledger CAS semantics in isolation. Real runs exercise it end to end
+(test_resume_contract::test_ledger_row_per_status); this pins the upsert
+contract itself, which `sync` depends on being idempotent by run_id. The CAS
+precondition contract (412 on a stale If-Match, genesis conflicts) is
+schrein's and is tested there.
+"""
 
 import datetime as dt
 
 import pyarrow as pa
 
-from ionflow import ledger, storage
-
-
-def _client(cfg):
-    return storage.s3_client(cfg)
+from ionflow.store import Store
 
 
 def _dt(day):
-    return dt.datetime(2026, 1, day)  # naive UTC, matches runner._now()
+    return dt.datetime(2026, 1, day)  # naive UTC, the project's one convention
 
 
-def _row(run_id, started, **extra):
-    return {"run_id": run_id, "started": started, "commit": "abc", **extra}
+def _row(run_id, day, **extra):
+    return {"run_id": run_id, "started": _dt(day), "commit": "abc", **extra}
 
 
-def test_insert_then_read(s3cfg):
-    c = _client(s3cfg)
-    key = "mf/ETL/ledger.parquet"
-    ledger.upsert_run(c, s3cfg.bucket, key, _row("r1", _dt(1)))
-    rows = ledger.read_all(c, s3cfg.bucket, key)
-    assert len(rows) == 1
-    assert rows[0]["run_id"] == "r1"
-    assert rows[0]["finished"] is None
+def test_upsert_replaces_by_run_id_and_appends_others(cfg):
+    s = Store.of(cfg).space("ETL")
+    s.upsert_runs([_row("r1", 1)], custom_fields=[pa.field("auc", pa.float64())])
+    assert s.read_rows(s.ledger)[0]["finished"] is None
+
+    s.upsert_runs([_row("r1", 1, finished=_dt(2), auc=0.9)], custom_fields=[pa.field("auc", pa.float64())])
+    s.upsert_runs([_row("r2", 2)], custom_fields=[pa.field("auc", pa.float64())])
+
+    rows = s.read_rows(s.ledger)
+    assert [r["run_id"] for r in rows] == ["r1", "r2"]  # replaced, not duplicated
+    assert (rows[0]["finished"], rows[0]["auc"]) == (_dt(2), 0.9)
 
 
-def test_update_same_run_replaces(s3cfg):
-    c = _client(s3cfg)
-    key = "mf/ETL/ledger.parquet"
-    ledger.upsert_run(c, s3cfg.bucket, key, _row("r1", _dt(1)))
-    ledger.upsert_run(
-        c,
-        s3cfg.bucket,
-        key,
-        _row("r1", _dt(1), finished=_dt(2)),
-    )
-    rows = ledger.read_all(c, s3cfg.bucket, key)
-    assert len(rows) == 1
-    assert rows[0]["finished"] == _dt(2)
-
-
-def test_multiple_runs_appended(s3cfg):
-    c = _client(s3cfg)
-    key = "mf/ETL/ledger.parquet"
-    ledger.upsert_run(c, s3cfg.bucket, key, _row("r1", _dt(1)))
-    ledger.upsert_run(c, s3cfg.bucket, key, _row("r2", _dt(2)))
-    rows = ledger.read_all(c, s3cfg.bucket, key)
-    assert [r["run_id"] for r in rows] == ["r1", "r2"]
-
-
-def test_custom_columns_stored(s3cfg):
-    c = _client(s3cfg)
-    key = "mf/T/ledger.parquet"
-    fields = [pa.field("auc", pa.float64())]
-    ledger.upsert_run(
-        c,
-        s3cfg.bucket,
-        key,
-        _row("r1", _dt(1), auc=0.9),
-        custom_fields=fields,
-    )
-    rows = ledger.read_all(c, s3cfg.bucket, key)
-    assert rows[0]["auc"] == 0.9
-
-
-def test_meta_roundtrip(s3cfg):
-    c = _client(s3cfg)
-    key = "mf/ETL/runs/run_id=r1/_meta.json"
-    assert ledger.read_meta(c, s3cfg.bucket, key) is None
-    ledger.write_meta(c, s3cfg.bucket, key, {"run_id": "r1", "steps_complete": ["raw/0"]})
-    assert ledger.read_meta(c, s3cfg.bucket, key)["steps_complete"] == ["raw/0"]
+def test_meta_is_absent_until_written(cfg):
+    s = Store.of(cfg).space("ETL")
+    assert s.read_meta("r1") is None
+    s.write_meta("r1", {"run_id": "r1", "steps_complete": ["raw/0"]})
+    assert s.read_meta("r1")["steps_complete"] == ["raw/0"]

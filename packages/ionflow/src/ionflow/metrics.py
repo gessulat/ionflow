@@ -5,7 +5,6 @@ import time
 import psutil
 import pyarrow as pa
 
-from . import storage
 from .schema import Table
 
 BASE_INTERVAL = 1.0  # seconds between samples at run start
@@ -17,8 +16,7 @@ STALE_AFTER = 300.0  # 5 missed flushes: a `running` run quieter than this count
 class Sample(Table):
     """One resource sample; the schema of the `metrics` view.
 
-    `run_id` is added by the hive partition at read time — deliberately
-    absent from the written parquet.
+    `run_id` is absent by design — the hive partition adds it at read time.
     """
 
     ts: dt.datetime  # naive UTC, like the ledger
@@ -34,20 +32,13 @@ SCHEMA = Sample.arrow_schema()
 
 
 class Sampler:
-    """Adaptive process sampler: peaks survive folding, size is bounded.
+    """Adaptive rss/threads/CPU sampler on a daemon thread; peaks survive folding.
 
-    Samples rss / native threads / cumulative CPU every `BASE_INTERVAL`s on a
-    daemon thread. When the buffer reaches `MAX_SAMPLES`, adjacent pairs fold
-    (latest ts + cumulative CPU, max of rss/threads) and the interval doubles,
-    so any run — seconds or days — ends with <= MAX_SAMPLES rows covering its
-    whole life. `mark()` records step boundaries with a forced sample, so even
-    sub-second steps appear.
-
-    With a `flush` callback the buffer is also handed over every
-    `FLUSH_INTERVAL` seconds, on a fixed cadence independent of the adaptive
-    sample interval. That periodic write is the run's heartbeat, and it makes
-    metrics survive hard kills. Flush errors are swallowed — S3 flakiness must
-    kill neither this thread nor the run.
+    Folding keeps the later ts and cumulative CPU but the max of rss/threads, so
+    any run — seconds or days — ends with <= MAX_SAMPLES rows covering its whole
+    life. `mark()` forces a sample, so even sub-second steps appear. A `flush`
+    callback also hands the buffer over on the FLUSH_INTERVAL cadence; its errors
+    are swallowed, since S3 flakiness must kill neither this thread nor the run.
 
     >>> s = Sampler()
     >>> s.mark("load"); s.mark("load", 3)
@@ -150,7 +141,7 @@ def to_table(rows):
     return pa.Table.from_arrays([ts, *rest], schema=SCHEMA)
 
 
-def write_parquet(client, bucket, key, rows):
+def write_parquet(space, key, rows):
     """Upload sample rows as one parquet object (no-op for empty rows)."""
     if rows:
-        client.put_object(Bucket=bucket, Key=key, Body=storage.parquet_bytes(to_table(rows)))
+        space.put(key, to_table(rows))

@@ -32,11 +32,8 @@ class Step:
 
 @dataclass
 class Group:
-    """A fan-out's per-item sub-DAG: the branch steps that run inside one branch.
-
-    Every member of one item runs in a single worker, in dependency order, with
-    independent members concurrent — so an item can reach a late member while
-    another item is still on the first one.
+    """A fan-out's per-item sub-DAG: the branch steps that run inside one branch,
+    all in a single worker, independent members concurrently (0015).
     """
 
     fanout: str
@@ -47,9 +44,18 @@ class Group:
 @dataclass
 class Dag:
     steps: dict[str, Step]
-    order: list[str]
+    _order: list[str]  # global topological order; groups/plan/roots are the public views of it
     groups: dict[str, Group]  # fan-out name -> its per-item sub-DAG (absent if it has none)
     plan: list[str]  # execution order; a fan-out node stands for its whole group
+    roots: dict[str, str]  # branch step -> the fan-out at the root of its chain (0014)
+
+    def downstream(self, root):
+        """`root` plus every step reachable from it through dependency edges."""
+        out = {root}
+        for name in self._order:  # topo order: a step appears after all its deps
+            if any(d in out for d in self.steps[name].deps):
+                out.add(name)
+        return out
 
 
 def branch_dep(step):
@@ -78,9 +84,9 @@ def _toposort(graph):
 def _roots(steps, order):
     """Branch step -> the fan-out at the root of its branch chain.
 
-    A chained branch step inherits its upstream's item: branch i is the fan-out's
-    i-th item however deep the chain runs, which is what makes the chain runnable
-    (and resumable) per item rather than per stage.
+    A chained branch step inherits its upstream's item — branch i is the fan-out's
+    i-th item however deep the chain runs — so the chain runs, and resumes, per
+    item rather than per stage.
     """
     roots = {}
     for name in order:  # topo: a branch dep is classified before its dependents
@@ -181,4 +187,10 @@ def build_dag(cls) -> Dag:
         raise ValueError(f"cycle detected among steps: {' -> '.join(e.args[1])}") from None
     roots = _roots(steps, order)
     _check_item_inputs(steps, roots)
-    return Dag(steps=steps, order=order, groups=_groups(steps, order, roots), plan=_plan(steps, roots))
+    return Dag(
+        steps=steps,
+        _order=order,
+        groups=_groups(steps, order, roots),
+        plan=_plan(steps, roots),
+        roots=roots,
+    )

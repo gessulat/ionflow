@@ -1,13 +1,18 @@
+import pathlib
+
 import pytest
+from flows import FlakyFlow
 
 from examples.embed import EmbedDocs
 from ionflow import runner
 from ionflow.git import DirtyRepoError
+from ionflow.space import Space
+from ionflow.store import Store
 
 
-def test_run_end_to_end(s3cfg, repo):
-    run_id = EmbedDocs.run(s3cfg, repo=repo, use_processes=False)
-    con = EmbedDocs.duck(s3cfg)
+def test_run_end_to_end(anycfg, repo):
+    run_id = EmbedDocs.run(anycfg, repo=repo, use_processes=False)
+    con = EmbedDocs.duck(anycfg)
 
     # fan-out produced one part per source, aggregated back to a summary
     summary = con.sql(f"SELECT * FROM summary WHERE run_id = '{run_id}'").fetchall()
@@ -40,6 +45,16 @@ def test_run_end_to_end(s3cfg, repo):
     assert len(stats) == 4
     assert all(r[2] > 0 for r in stats)  # peak_rss_mb
 
+    # a launch sees the flow; the catalog schema matches the declarations
+    from ionflow.lake import schema_drift
+    from ionflow.space import Space
+    from ionflow.store import Store
+    from ionflow.tui import scan_runs
+
+    store = Store.of(anycfg)
+    assert scan_runs(store) == {EmbedDocs.flow_id()}
+    assert schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
+
 
 @pytest.mark.slow
 def test_run_with_processes(s3cfg, repo):
@@ -60,23 +75,18 @@ def test_run_with_processes(s3cfg, repo):
     assert totals[5] == 2  # processes
 
 
-def test_dirty_git_refused(s3cfg, tmp_path):
-    import subprocess
-
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    (tmp_path / "dirty.txt").write_text("x")  # untracked -> dirty
+def test_dirty_git_refused(s3cfg, clean_repo):
+    pathlib.Path(clean_repo, "dirty.txt").write_text("x")  # untracked -> dirty
     with pytest.raises(DirtyRepoError):
-        EmbedDocs.run(s3cfg, repo=str(tmp_path))
+        EmbedDocs.run(s3cfg, repo=clean_repo)
 
 
 def test_resume_refuses_commit_drift(s3cfg, clean_repo):
-    from pathlib import Path
-
     from conftest import _git
     from flows import EmptyFanFlow
 
     origin = EmptyFanFlow.run(s3cfg, repo=clean_repo, use_processes=False)
-    Path(clean_repo, "flow.py").write_text("# changed\n")
+    pathlib.Path(clean_repo, "flow.py").write_text("# changed\n")
     _git(clean_repo, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix")
 
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
@@ -86,16 +96,24 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
     assert resumed != origin
 
 
-@pytest.mark.slow
-def test_resume_reuses_completed_steps(s3cfg, repo):
-    origin = EmbedDocs.run(s3cfg, repo=repo, use_processes=False)
-    resumed = runner.run(EmbedDocs, s3cfg, repo=repo, resume=origin, use_processes=False)
-    assert resumed != origin
+def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
+    """`_meta.json`'s shape is what a LATER release reads to resume an older run."""
+    space = Space.for_flow(Store.of(cfg), FlakyFlow)
+    run_id = FlakyFlow.run(cfg, repo=repo, use_processes=False)
+    meta = space.read_meta(run_id)
+    assert list(meta) == ["run_id", "started", "finished", "commit", "origin_run_id",
+                          "steps_complete", "fanout_keys", "params", "custom"]
+    assert meta["steps_complete"] == ["agg/0", "parts/0", "parts/1", "parts/2",
+                                      "source/0", "work/0", "work/1", "work/2"]
 
-    con = EmbedDocs.duck(s3cfg)
-    # resumed run is self-contained and identical to origin
-    got = con.sql(f"SELECT n_docs FROM summary WHERE run_id = '{resumed}'").fetchone()[0]
-    assert got == 4
-    # ledger records the origin pointer
-    origin_ptr = con.sql(f"SELECT origin_run_id FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
-    assert origin_ptr == origin
+    # an origin written by hand in today's format must still drive a resume: `work/1`
+    # is absent, so exactly that branch recomputes and the rest are copied forward
+    origin = dict(meta, run_id="hand-written", origin_run_id=None,
+                  steps_complete=[s for s in meta["steps_complete"] if s not in ("work/1", "agg/0")])
+    for key in space.store.list(space.run_dir(run_id) + "/"):
+        space.store.client.copy_object(
+            Bucket=space.store.bucket, CopySource={"Bucket": space.store.bucket, "Key": key},
+            Key=key.replace(f"run_id={run_id}", "run_id=hand-written"))
+    space.write_meta("hand-written", origin)
+    resumed = FlakyFlow.run(cfg, repo=repo, resume="hand-written", use_processes=False)
+    assert FlakyFlow.duck(cfg).sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)

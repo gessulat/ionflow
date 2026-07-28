@@ -103,8 +103,26 @@ def s3cfg(moto_endpoint, request):
 
 
 @pytest.fixture
+def cfg(localcfg):
+    """The default for a mode-agnostic test: local mode, no moto round trips.
+
+    Storage mode is one dispatch (`Store.of`), so a test that never reaches
+    `S3Store`'s uri/connect/lake/client is not testing the mode — it is just
+    paying for it. Tests that DO exercise those take `s3cfg` by name, and
+    `anycfg` covers both where the difference is the point.
+    """
+    return localcfg
+
+
+@pytest.fixture
 def localcfg(tmp_path):
     """Local-mode config: the whole store is a directory, no S3 involved."""
     from ionflow.config import Config
 
     return Config(local_dir=str(tmp_path / "store"), prefix="mf")
+
+
+@pytest.fixture(params=["s3", "local"])
+def anycfg(request):
+    """Both storage modes: the mode is one dispatch (Store.of), so most tests want both."""
+    return request.getfixturevalue("s3cfg" if request.param == "s3" else "localcfg")

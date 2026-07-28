@@ -3,11 +3,11 @@
 import pytest
 from flows import PipelineFlow, exec_counts
 
-from ionflow.storage import s3_client
+from ionflow.store import Store
 
 
 def _put_n(cfg, n):
-    s3_client(cfg).put_object(Bucket=cfg.bucket, Key="side/n", Body=str(n).encode())
+    Store.of(cfg).put("side/n", str(n).encode())
 
 
 def _setup(cfg, tmp_path, monkeypatch, n=2):
@@ -49,7 +49,7 @@ def test_side_effect_step_records_what_it_wrote(s3cfg, repo, tmp_path, monkeypat
 
     con = PipelineFlow.duck(s3cfg)
     rows = con.sql(f"SELECT raw, uri, etag FROM upload_db WHERE run_id = '{run_id}' ORDER BY raw").fetchall()
-    client = s3_client(s3cfg)
+    client = Store.of(s3cfg).client
     for raw, uri, etag in rows:
         assert uri == f"s3://{s3cfg.bucket}/uploads/{raw}.db"
         head = client.head_object(Bucket=s3cfg.bucket, Key=f"uploads/{raw}.db")

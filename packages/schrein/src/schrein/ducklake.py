@@ -136,10 +136,9 @@ class DuckLake:
     def _live_files(self) -> set[str]:
         """Basenames of every data-path file a retained snapshot still needs.
 
-        Read from the catalog's own metadata tables via a plain (non-ducklake)
-        ATTACH of the downloaded artifact — the full historical file list,
-        minus files expiry already scheduled for deletion. Basenames suffice:
-        DuckLake names its files with UUIDs.
+        Read via a plain (non-ducklake) ATTACH of the downloaded artifact, minus
+        what expiry already scheduled for deletion. Basenames suffice: DuckLake
+        names its files with UUIDs.
         """
         blob, _ = self.register.read()
         if blob is None:
@@ -164,9 +163,8 @@ class DuckLake:
     def gc(self, grace_days: float = 7.0, dry_run: bool = True) -> list[str]:
         """Delete (or with dry_run just list) data-path objects that are BOTH
         unneeded by every retained snapshot AND older than the grace TTL — so an
-        in-flight writer's just-uploaded files can never be reaped before its
-        commit lands (spec §5.5). Covers expiry leftovers and commit orphans
-        alike; reads the catalog, never commits. Returns the object keys.
+        in-flight writer's just-uploaded files can never be reaped before its commit
+        lands (spec §5.5). Reads the catalog, never commits; returns the object keys.
         """
         live = self._live_files()
         bucket, _, prefix = self.data_path.removeprefix("s3://").partition("/")
