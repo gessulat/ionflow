@@ -73,6 +73,11 @@ def _side_n(config):
     return int(Store.of(config).get("side/n"))
 
 
+def put_n(config, n):
+    """Set the `side/n` object `_side_n` reads — the tests' fan-out width knob."""
+    Store.of(config).put("side/n", str(n).encode())
+
+
 def _side_order(config):
     """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
     blob = Store.of(config).get("side/order")

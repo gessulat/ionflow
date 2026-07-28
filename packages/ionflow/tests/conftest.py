@@ -1,56 +1,13 @@
-import atexit
-import socket
 import subprocess
-import sys
-import threading
-import time
 
 import pytest
+from schrein.testing import background_server
 
-# Start + warm the moto server in a background thread at import time, so the
-# heavy imports (boto3) and botocore's first-client JSON load overlap with
-# collection instead of stalling each worker's first S3 test. The server is
-# schrein.testing (atomic conditional PUTs — schrein decision 0003), run as a
-# subprocess, never in-process: DuckDB httpfs relation binds starve an
-# in-process werkzeug server (see AGENTS.md, Testing).
-_moto = {}
-
-
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _warm():
-    import boto3
-
-    port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "schrein.testing", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    atexit.register(proc.kill)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.05)
-    _moto["endpoint"] = f"http://127.0.0.1:{port}"
-    boto3.client(
-        "s3",
-        endpoint_url=_moto["endpoint"],
-        region_name="us-east-1",
-        aws_access_key_id="warm",
-        aws_secret_access_key="warm",
-    ).list_buckets()
-
-
-_warmup = threading.Thread(target=_warm, daemon=True)
-_warmup.start()
+# Moto with atomic conditional PUTs (schrein decision 0003), as a subprocess —
+# never in-process: DuckDB httpfs relation binds starve an in-process werkzeug
+# server (see AGENTS.md, Testing). Spawned + warmed in the background at import
+# so the boot overlaps with collection.
+_endpoint = background_server()
 
 
 def _git(cwd, *args):
@@ -80,8 +37,7 @@ def repo(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def moto_endpoint():
-    _warmup.join()
-    return _moto["endpoint"]  # subprocess; killed via atexit
+    return _endpoint()
 
 
 @pytest.fixture

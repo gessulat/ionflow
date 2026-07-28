@@ -1,22 +1,19 @@
 """Per-item sub-DAGs: a fan-out branch is a small DAG, run per item, not per stage."""
 
 import pytest
-from flows import PipelineFlow, exec_counts
+from flows import PipelineFlow, exec_counts, put_n
 
 from ionflow.store import Store
 
 
-def _put_n(cfg, n):
-    Store.of(cfg).put("side/n", str(n).encode())
-
-
 def _setup(cfg, tmp_path, monkeypatch, n=2):
-    _put_n(cfg, n)
+    put_n(cfg, n)
     monkeypatch.setenv("PIPE_DIR", str(tmp_path))
 
 
-def test_sub_dag_runs_siblings_concurrently_within_an_item(s3cfg, repo, tmp_path, monkeypatch):
-    """`upload_db` and `search` are independent, so one item runs them at once."""
+def test_sub_dag_runs_siblings_concurrently_and_records_side_effects(s3cfg, repo, tmp_path, monkeypatch):
+    """`upload_db` and `search` are independent, so one item runs them at once —
+    and the upload's output table is its provenance: one row per item, uri + etag."""
     _setup(s3cfg, tmp_path, monkeypatch)
     run_id = PipelineFlow.run(s3cfg, repo=repo, use_processes=False)
 
@@ -26,6 +23,13 @@ def test_sub_dag_runs_siblings_concurrently_within_an_item(s3cfg, repo, tmp_path
     assert con.sql(f"SELECT bool_and(concurrent) FROM upload_db WHERE run_id = '{run_id}'").fetchone()[0]
     assert con.sql(f"SELECT n, peptides FROM summary WHERE run_id = '{run_id}'").fetchone() == (2, 6)
     assert con.sql(f"SELECT status FROM ledger WHERE run_id = '{run_id}'").fetchone()[0] == "complete"
+
+    rows = con.sql(f"SELECT raw, uri, etag FROM upload_db WHERE run_id = '{run_id}' ORDER BY raw").fetchall()
+    client = Store.of(s3cfg).client
+    for raw, uri, etag in rows:
+        assert uri == f"s3://{s3cfg.bucket}/uploads/{raw}.db"
+        head = client.head_object(Bucket=s3cfg.bucket, Key=f"uploads/{raw}.db")
+        assert head["ETag"].strip('"') == etag  # the recorded object is really there
 
 
 def test_items_pipeline_without_a_stage_barrier(s3cfg, repo, tmp_path, monkeypatch):
@@ -40,20 +44,6 @@ def test_items_pipeline_without_a_stage_barrier(s3cfg, repo, tmp_path, monkeypat
     # a stage barrier would convert BOTH raws before searching either — which is
     # exactly what forces N converted .db files onto disk instead of `max_workers`
     assert searched[first] < converted[second]
-
-
-def test_side_effect_step_records_what_it_wrote(s3cfg, repo, tmp_path, monkeypatch):
-    """The upload's output table is its provenance: one row per item, uri + etag."""
-    _setup(s3cfg, tmp_path, monkeypatch)
-    run_id = PipelineFlow.run(s3cfg, repo=repo, use_processes=False)
-
-    con = PipelineFlow.duck(s3cfg)
-    rows = con.sql(f"SELECT raw, uri, etag FROM upload_db WHERE run_id = '{run_id}' ORDER BY raw").fetchall()
-    client = Store.of(s3cfg).client
-    for raw, uri, etag in rows:
-        assert uri == f"s3://{s3cfg.bucket}/uploads/{raw}.db"
-        head = client.head_object(Bucket=s3cfg.bucket, Key=f"uploads/{raw}.db")
-        assert head["ETag"].strip('"') == etag  # the recorded object is really there
 
 
 @pytest.mark.slow
@@ -119,7 +109,7 @@ def test_resume_restarts_an_item_at_its_first_incomplete_sub_step(s3cfg, repo, t
 def test_keyed_resume_reuses_a_whole_item_and_computes_the_new_one(s3cfg, repo, tmp_path, monkeypatch):
     _setup(s3cfg, tmp_path, monkeypatch, n=1)
     origin = PipelineFlow.run(s3cfg, repo=repo, use_processes=False)
-    _put_n(s3cfg, 2)
+    put_n(s3cfg, 2)
     resumed = PipelineFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
     for step in ("convert", "upload_db", "search"):  # every sub-step is key-matched

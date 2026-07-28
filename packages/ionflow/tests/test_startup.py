@@ -26,19 +26,15 @@ def _make_pkg(root, name, flows):
     return pkg
 
 
-def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
+def test_discover_flows_walks_submodules_and_isolates_packages(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "mypkg", [("a", "FlowA"), ("b", "FlowB")])
+    _make_pkg(tmp_path, "pkgx", [("m", "OnlyX")])
     monkeypatch.syspath_prepend(str(tmp_path))
     flows = discover_flows("mypkg")
     assert set(flows) == {"mypkg.a.FlowA", "mypkg.b.FlowB"}  # keys are flow_ids
     assert flows["mypkg.a.FlowA"].flow_id() == "mypkg.a.FlowA"
-
-
-def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
-    _make_pkg(tmp_path, "pkgx", [("m", "OnlyX")])
-    monkeypatch.syspath_prepend(str(tmp_path))
-    flows = discover_flows("pkgx")
-    assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
+    # the registry holds every imported flow; discovery filters to the package
+    assert set(discover_flows("pkgx")) == {"pkgx.m.OnlyX"}
 
 
 def test_scan_runs(cfg):

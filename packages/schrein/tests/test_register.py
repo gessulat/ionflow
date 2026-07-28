@@ -15,31 +15,21 @@ def register_for(s3):
     return CasRegister(client, bucket, KEY)
 
 
-def test_read_absent(s3):
-    assert register_for(s3).read() == (None, None)
-
-
-def test_genesis_then_read_your_write(s3):
+def test_register_basics(s3):
+    """One timeline: absent read, genesis, read-your-write, then a second
+    genesis and a stale If-Match both refused as retryable."""
     reg = register_for(s3)
-    etag = reg.write(b"v1", None)
-    assert reg.read() == (b"v1", etag)
-
-
-def test_second_genesis_fails(s3):
-    reg = register_for(s3)
-    reg.write(b"v1", None)
-    with pytest.raises(ClientError) as e:
+    assert reg.read() == (None, None)
+    etag1 = reg.write(b"v1", None)
+    assert reg.read() == (b"v1", etag1)
+    with pytest.raises(ClientError) as e:  # second genesis
         reg.write(b"v2", None)
     assert error_code(e) in RETRYABLE
-
-
-def test_stale_ifmatch_is_retryable(s3):
-    reg = register_for(s3)
-    etag1 = reg.write(b"v1", None)
-    reg.write(b"v2", etag1)
-    with pytest.raises(ClientError) as e:
-        reg.write(b"stale", etag1)
+    etag2 = reg.write(b"v2", etag1)
+    with pytest.raises(ClientError) as e:  # stale If-Match
+        reg.write(b"v3", etag1)
     assert error_code(e) in RETRYABLE
+    assert reg.read() == (b"v2", etag2)  # the refused writes changed nothing
 
 
 def test_zombie_writer_rebases(s3):

@@ -2,19 +2,11 @@
 
 import pyarrow as pa
 import pytest
-from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, exec_counts
+from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, exec_counts, put_n
 
 from ionflow import ConstraintViolation
 from ionflow.space import Space
 from ionflow.store import Store
-
-
-def _put_n(cfg, n):
-    Store.of(cfg).put("side/n", str(n).encode())
-
-
-def _put_order(cfg, order):
-    Store.of(cfg).put("side/order", order.encode())
 
 
 def _tokens(con, run_id):
@@ -26,52 +18,39 @@ def _agg(con, run_id):
 
 
 @pytest.mark.slow
-def test_keyed_resume_computes_only_new_items(cfg, repo):
-    _put_n(cfg, 3)
+def test_keyed_resume_grow_shrink_unchanged(cfg, repo):
+    """One incremental lineage: the work-list grows, then shrinks, then holds."""
+    put_n(cfg, 3)
     origin = KeyedFlow.run(cfg, repo=repo, use_processes=False)
-    _put_n(cfg, 5)
-    resumed = KeyedFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
+    put_n(cfg, 5)
+    grown = KeyedFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedFlow.duck(cfg)
-    old, new = _tokens(con, origin), _tokens(con, resumed)
+    old, new = _tokens(con, origin), _tokens(con, grown)
     assert set(new) == {f"file-{g}" for g in range(5)}
     for item in old:  # matched items were server-side copied, not recomputed
         assert new[item] == old[item]
     # the collect step reflects the grown work-list, so it was recomputed
-    assert _agg(con, resumed)[0] == 5
-    assert _agg(con, resumed)[1] != _agg(con, origin)[1]
-    status = con.sql(f"SELECT status FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
-    assert status == "complete"
+    assert _agg(con, grown)[0] == 5
+    assert _agg(con, grown)[1] != _agg(con, origin)[1]
+    assert con.sql(f"SELECT status FROM ledger WHERE run_id = '{grown}'").fetchone()[0] == "complete"
 
-
-@pytest.mark.slow
-def test_keyed_resume_drops_removed_items(cfg, repo):
-    _put_n(cfg, 3)
-    origin = KeyedFlow.run(cfg, repo=repo, use_processes=False)
-    _put_n(cfg, 2)
-    resumed = KeyedFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
-
+    put_n(cfg, 2)
+    shrunk = KeyedFlow.run(cfg, repo=repo, resume=grown, use_processes=False)
     con = KeyedFlow.duck(cfg)
-    old, new = _tokens(con, origin), _tokens(con, resumed)
-    assert set(new) == {"file-0", "file-1"}  # file-2 gone from the corpus and the run
-    assert new == {k: old[k] for k in new}
-    assert _agg(con, resumed)[0] == 2
+    kept = _tokens(con, shrunk)
+    assert kept == {k: new[k] for k in ("file-0", "file-1")}  # the rest gone from the run
+    assert _agg(con, shrunk)[0] == 2
 
-
-@pytest.mark.slow
-def test_keyed_resume_unchanged_worklist_reuses_downstream(cfg, repo):
-    _put_n(cfg, 2)
-    origin = KeyedFlow.run(cfg, repo=repo, use_processes=False)
-    resumed = KeyedFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
-
+    same = KeyedFlow.run(cfg, repo=repo, resume=shrunk, use_processes=False)
     con = KeyedFlow.duck(cfg)
-    assert _tokens(con, resumed) == _tokens(con, origin)
-    assert _agg(con, resumed) == _agg(con, origin)  # collect step copied, not recomputed
+    assert _tokens(con, same) == kept
+    assert _agg(con, same) == _agg(con, shrunk)  # unchanged key set: collect copied, not recomputed
 
 
 @pytest.mark.slow
 def test_resume_from_origin_without_fanout_keys_recomputes(cfg, repo):
-    _put_n(cfg, 2)
+    put_n(cfg, 2)
     origin = KeyedFlow.run(cfg, repo=repo, use_processes=False)
     # simulate an origin written before fanout keys existed
     space = Space.for_flow(Store.of(cfg), KeyedFlow)
@@ -89,9 +68,9 @@ def test_resume_from_origin_without_fanout_keys_recomputes(cfg, repo):
 
 @pytest.mark.slow
 def test_resume_latest_uses_newest_complete_run(cfg, repo):
-    _put_n(cfg, 2)
+    put_n(cfg, 2)
     first = KeyedFlow.run(cfg, repo=repo, use_processes=False, resume="latest")  # no prior: fresh
-    _put_n(cfg, 3)
+    put_n(cfg, 3)
     second = KeyedFlow.run(cfg, repo=repo, use_processes=False, resume="latest")
 
     con = KeyedFlow.duck(cfg)
@@ -110,9 +89,9 @@ def test_resume_latest_uses_newest_complete_run(cfg, repo):
 @pytest.mark.slow
 def test_branch_reuse_tainted_by_other_keyed_ancestor(cfg, repo):
     """Matching fanout keys must not be reused when another input changed."""
-    _put_n(cfg, 1)
+    put_n(cfg, 1)
     origin = TwoKeyFlow.run(cfg, repo=repo, use_processes=False)
-    _put_n(cfg, 2)
+    put_n(cfg, 2)
     resumed = TwoKeyFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
     con = TwoKeyFlow.duck(cfg)
@@ -123,7 +102,7 @@ def test_branch_reuse_tainted_by_other_keyed_ancestor(cfg, repo):
 @pytest.mark.slow
 def test_branch_collects_a_non_sibling_fanout_in_a_worker(cfg, repo):
     """A spawned worker resolves a Collect of another fan-out from the payload's widths."""
-    _put_n(cfg, 3)
+    put_n(cfg, 3)
     run_id = TwoKeyFlow.run(cfg, repo=repo, use_processes=True)
 
     con = TwoKeyFlow.duck(cfg)
@@ -154,9 +133,9 @@ def _assert_aligned(con, run_id, items):
 @pytest.mark.slow
 def test_keyed_resume_chained_branch_matches_new_items(cfg, repo):
     """A grown work-list reuses matched branches through the whole chain."""
-    _put_n(cfg, 2)
+    put_n(cfg, 2)
     origin = KeyedChainFlow.run(cfg, repo=repo, use_processes=False)
-    _put_n(cfg, 3)
+    put_n(cfg, 3)
     resumed = KeyedChainFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedChainFlow.duck(cfg)
@@ -169,7 +148,7 @@ def test_keyed_resume_chained_branch_matches_new_items(cfg, repo):
 @pytest.mark.slow
 def test_keyed_resume_chained_branch_survives_reordered_worklist(cfg, repo, tmp_path, monkeypatch):
     """Item keys, not branch positions, decide reuse — even for a partial chained step."""
-    _put_n(cfg, 2)
+    put_n(cfg, 2)
     monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
     monkeypatch.setenv("KEYED_CHAIN_FAIL", "file-1")
     with pytest.raises(RuntimeError, match="file-1"):
@@ -179,7 +158,7 @@ def test_keyed_resume_chained_branch_survives_reordered_worklist(cfg, repo, tmp_
     origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
     old_work = dict(con.sql(f"SELECT item, token FROM work WHERE run_id = '{origin}'").fetchall())
     monkeypatch.delenv("KEYED_CHAIN_FAIL")
-    _put_order(cfg, "rev")  # same keys, branch positions swapped
+    Store.of(cfg).put("side/order", b"rev")  # same keys, branch positions swapped
     resumed = KeyedChainFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
     con = KeyedChainFlow.duck(cfg)

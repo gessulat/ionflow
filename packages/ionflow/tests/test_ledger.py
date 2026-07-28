@@ -1,7 +1,7 @@
-"""Ledger CAS semantics in isolation. Real runs exercise it end to end
-(test_resume_contract::test_ledger_row_per_status); this pins the upsert
-contract itself, which `sync` depends on being idempotent by run_id. The CAS
-precondition contract (412 on a stale If-Match, genesis conflicts) is
+"""Ledger CAS semantics in isolation. Real runs exercise it end to end (the
+failed→complete rows in test_fanout, test_e2e's ledger row); this pins the
+upsert contract itself, which `sync` depends on being idempotent by run_id.
+The CAS precondition contract (412 on a stale If-Match, genesis conflicts) is
 schrein's and is tested there.
 """
 
