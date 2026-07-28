@@ -11,7 +11,7 @@ import uuid
 
 import pyarrow as pa
 
-from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, fanout_key
+from ionflow import Branch, Collect, Fanout, Flow, FlowParams, LedgerColumns, Table, fanout_key
 from ionflow.store import Store, s3_client
 
 
@@ -66,6 +66,24 @@ class ParamFlow(Flow):
 
     def agg(self, work: Collect[Out]) -> Agg:
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
+
+
+class NoteFlow(Flow):
+    """Declares one ledger column, set in the first step. NOTE_SKIP leaves it
+    unset; NOTE_FAIL fails the later step after it was set."""
+
+    class Ledger(LedgerColumns):
+        note: str
+
+    def source(self) -> Src:
+        if not os.environ.get("NOTE_SKIP"):
+            self.note = "set during the run"
+        return pa.table({"g": [1]})
+
+    def doubled(self, source: Src) -> Out:
+        if os.environ.get("NOTE_FAIL"):
+            raise RuntimeError("boom in doubled")
+        return source.project("g, g * 2 AS doubled")
 
 
 def _side_n(config):

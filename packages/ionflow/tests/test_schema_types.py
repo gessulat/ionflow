@@ -13,7 +13,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from ionflow import FlowParams, Table, check, fanout_key, field, primary_key, shaped
+from ionflow import FlowParams, LedgerColumns, Table, check, fanout_key, field, primary_key, shaped
 from ionflow.query import _empty_view_sql
 
 # --- 1. the type grammar, one case per annotation ---
@@ -148,6 +148,20 @@ def test_flow_params_reject_non_scalar_types(annotation):
             x: annotation
 
         P.columns()  # pragma: no cover — the class body already raised
+
+
+def test_ledger_columns_always_nullable_and_may_be_empty():
+    class L(LedgerColumns):
+        auc: float
+        tag: str | None
+
+    # every column nullable regardless of spelling: older runs predate any column
+    assert [f.nullable for f in L.arrow_fields()] == [True, True]
+
+    class NoCols(LedgerColumns):
+        pass
+
+    assert NoCols.columns() == {}  # an empty declaration is legal here, unlike Table
 
 
 def test_make_carries_constraints():
