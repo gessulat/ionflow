@@ -3,7 +3,6 @@ import datetime as dt
 import pytest
 
 from ionflow import metrics, query
-from ionflow.arrow import table_from_bytes
 from ionflow.dag import build_dag
 from ionflow.store import Store
 
@@ -96,18 +95,6 @@ def test_stale_running_detection(cfg):
     rel = query.ledger_with_liveness(stub, cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())
     assert statuses == {"dead": "running (stale?)", "alive": "running"}
-
-
-def test_write_parquet_roundtrip(cfg):
-    rows = [(1000.0, "load", None, 512, 4, 0.5, 0.1), (1001.0, "score", 2, 1024, 8, 1.5, 0.2)]
-    store = Store.of(cfg)
-    space = store.space("F")
-    metrics.write_parquet(space, space.metrics("r1"), rows)
-    blob = store.get("mf/F/runs/run_id=r1/_metrics.parquet")
-    table = table_from_bytes(blob)
-    assert table.schema.equals(metrics.SCHEMA)
-    assert table.column("rss").to_pylist() == [512, 1024]
-    assert table.column("branch").to_pylist() == [None, 2]
 
 
 def test_reserved_step_names_rejected():

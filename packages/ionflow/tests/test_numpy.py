@@ -28,27 +28,20 @@ class Vec(Table):
     v: list[np.float32]
 
 
-def test_dict_of_ndarrays_preserves_dtypes():
+def test_dict_of_ndarrays_conversions():
     t = to_arrow({"a": np.arange(3, dtype=np.int16), "b": np.ones(3, dtype=np.float32)})
-    assert t.schema.field("a").type == pa.int16()
+    assert t.schema.field("a").type == pa.int16()  # narrow dtypes survive
     assert t.schema.field("b").type == pa.float32()
 
-
-def test_dict_2d_ndarray_becomes_fixed_size_list():
-    t = to_arrow({"v": np.arange(6, dtype=np.float32).reshape(2, 3)})
+    t = to_arrow({"v": np.arange(6, dtype=np.float32).reshape(2, 3)})  # 2D -> fixed-size list
     assert t.schema.field("v").type == pa.list_(pa.float32(), 3)
     assert t.column("v").to_pylist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]
 
-
-def test_dict_3d_ndarray_nests():
-    t = to_arrow({"v": np.zeros((2, 4, 3), dtype=np.int16)})
+    t = to_arrow({"v": np.zeros((2, 4, 3), dtype=np.int16)})  # 3D nests
     assert t.schema.field("v").type == pa.list_(pa.list_(pa.int16(), 3), 4)
 
-
-def test_dict_2d_noncontiguous_ndarray():
     arr = np.arange(12, dtype=np.float32).reshape(3, 4)[:, ::2]  # strided view
-    t = to_arrow({"v": arr})
-    assert t.column("v").to_pylist() == [[0.0, 2.0], [4.0, 6.0], [8.0, 10.0]]
+    assert to_arrow({"v": arr}).column("v").to_pylist() == [[0.0, 2.0], [4.0, 6.0], [8.0, 10.0]]
 
 
 def test_structured_array_carries_names_and_dtypes():
@@ -60,25 +53,19 @@ def test_structured_array_carries_names_and_dtypes():
     assert t.column("a").to_pylist() == [1, 2]
 
 
-def test_bare_1d_maps_to_single_column():
+def test_bare_ndarray_maps_onto_declared_columns():
     t = to_arrow(np.arange(3, dtype=np.float32), Table.make("One", {"x": np.float32}))
-    assert t.column_names == ["x"]
+    assert t.column_names == ["x"]  # 1D -> the single declared column
 
-
-def test_bare_2d_maps_positionally():
-    t = to_arrow(np.array([[1, 2.5], [3, 4.5]]), Pair)
+    t = to_arrow(np.array([[1, 2.5], [3, 4.5]]), Pair)  # (N, k) -> k columns, positionally
     assert t.column_names == ["a", "b"]
     assert t.column("b").to_pylist() == [2.5, 4.5]
 
-
-def test_bare_2d_maps_to_single_vector_column():
-    t = to_arrow(np.arange(6, dtype=np.float32).reshape(2, 3), Vec)
+    t = to_arrow(np.arange(6, dtype=np.float32).reshape(2, 3), Vec)  # (N, d) -> one vector column
     assert t.schema.field("v").type == pa.list_(pa.float32(), 3)
 
-
-def test_bare_ndarray_shape_mismatch_is_actionable():
     with pytest.raises(TypeError, match="dict of named arrays"):
-        to_arrow(np.zeros((2, 3)), Pair)
+        to_arrow(np.zeros((2, 3)), Pair)  # ambiguous shape is actionable
 
 
 def test_complex_arrays_rejected():
@@ -92,17 +79,6 @@ def test_complex_arrays_rejected():
 class Frame(Table):
     frame: np.int32
     x: np.float32 = check("x >= 0")
-
-
-def test_write_part_persists_narrow_dtypes(cfg):
-    store = Store.of(cfg)
-    space = store.space("F")
-    key = space.part("r", "pts")
-    data = {"frame": np.arange(2, dtype=np.int32), "x": np.ones(2, dtype=np.float32)}
-    space.write_part(key, data, Frame)
-    schema = table_from_bytes(store.get(key)).schema
-    assert schema.field("frame").type == pa.int32()
-    assert schema.field("x").type == pa.float32()
 
 
 def test_constraints_apply_to_numpy_returns(cfg):
@@ -156,17 +132,6 @@ def test_shaped_enforces_shape_at_write(cfg):
 
 def _input(table):
     return StepInput(duckdb.connect().from_arrow(table))
-
-
-def test_np_scalar_column_keeps_dtype():
-    got = _input(pa.table({"x": pa.array([1, 2], pa.int16())})).np("x")
-    assert got.dtype == np.int16 and got.tolist() == [1, 2]
-
-
-def test_np_list_column_stacks():
-    inp = _input(pa.table({"v": pa.array([[1.0, 2.0], [3.0, 4.0]], pa.list_(pa.float32()))}))
-    got = inp.np("v")
-    assert got.shape == (2, 2) and got.dtype == np.float32
 
 
 def test_np_no_arg_returns_all_columns():

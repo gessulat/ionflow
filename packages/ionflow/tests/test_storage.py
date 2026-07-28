@@ -4,7 +4,6 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from ionflow.arrow import read_parquet_sql, table_from_bytes
 from ionflow.config import Config
 from ionflow.schema import Table, check, primary_key
 from ionflow.space import ConstraintViolation
@@ -28,22 +27,6 @@ def test_connect_uses_credential_chain_without_keys(monkeypatch):
     assert provider == "credential_chain"
 
 
-def test_write_part_roundtrips_list_columns(s3cfg):
-    class Emb(Table):
-        id: int
-        vec: list[float]
-
-    store = Store.of(s3cfg)
-    space = store.space("E")
-    data = pa.table({"id": [1, 2], "vec": [[1.0, 2.0], [3.0]]})
-    key = space.part("r", "e")
-    space.write_part(key, data, Emb)
-    assert table_from_bytes(store.get(key)).column("vec").to_pylist() == [
-        [1.0, 2.0],
-        [3.0],
-    ]
-
-
 def test_object_age_uses_server_clock(s3cfg):
     store = Store.of(s3cfg)
     store.put("x", b"1")
@@ -60,18 +43,6 @@ def _data():
             "score": [0.5, 0.9],
         }
     )
-
-
-def test_write_read_roundtrip(s3cfg):
-    store = Store.of(s3cfg)
-    space = store.space("ETL")
-    con = store.connect()
-    space.write_part(space.part("r1", "features"), _data(), Features)
-    rel = con.sql(read_parquet_sql(store.uri("mf/ETL/runs/*/features/*.parquet")))
-    rows, cols = rel.fetchall(), rel.columns
-    got = {c: [r[i] for r in rows] for i, c in enumerate(cols)}
-    assert sorted(got["id"]) == [1, 2]
-    assert got["run_id"] == ["r1", "r1"]  # hive column materialized
 
 
 def test_check_constraint_rejects_bad_row(s3cfg):

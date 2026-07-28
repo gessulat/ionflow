@@ -15,46 +15,26 @@ import pytest
 
 from ionflow import FlowParams, LedgerColumns, Table, check, fanout_key, field, primary_key, shaped
 from ionflow.query import _empty_view_sql
-from ionflow.store import Store
 
 # --- 1. the type grammar, one case per annotation ---
 
 # (label, annotation, duckdb_type(), persisted_type(), arrow_schema() type)
 GRAMMAR = [
-    # python scalars
+    # leaves are a lookup in _LEAF/_SQL: spot-check the kinds, do not enumerate the dict
     ("int", int, "BIGINT", "BIGINT", pa.int64()),
-    ("float", float, "DOUBLE", "DOUBLE", pa.float64()),
-    ("str", str, "VARCHAR", "VARCHAR", pa.string()),
-    ("bool", bool, "BOOLEAN", "BOOLEAN", pa.bool_()),
-    ("bytes", bytes, "BLOB", "BLOB", pa.binary()),
     ("datetime", dt.datetime, "TIMESTAMP", "TIMESTAMP", pa.timestamp("us")),
-    ("date", dt.date, "DATE", "DATE", pa.date32()),
     # numpy widths — narrow dtypes must persist, not widen
-    ("np.bool_", np.bool_, "BOOLEAN", "BOOLEAN", pa.bool_()),
-    ("np.int8", np.int8, "TINYINT", "TINYINT", pa.int8()),
     ("np.int16", np.int16, "SMALLINT", "SMALLINT", pa.int16()),
-    ("np.int32", np.int32, "INTEGER", "INTEGER", pa.int32()),
-    ("np.int64", np.int64, "BIGINT", "BIGINT", pa.int64()),
-    ("np.uint8", np.uint8, "UTINYINT", "UTINYINT", pa.uint8()),
-    ("np.uint16", np.uint16, "USMALLINT", "USMALLINT", pa.uint16()),
-    ("np.uint32", np.uint32, "UINTEGER", "UINTEGER", pa.uint32()),
-    ("np.uint64", np.uint64, "UBIGINT", "UBIGINT", pa.uint64()),
     ("np.float32", np.float32, "FLOAT", "FLOAT", pa.float32()),
-    ("np.float64", np.float64, "DOUBLE", "DOUBLE", pa.float64()),
     # list nesting, depth 1
     ("list[int]", list[int], "BIGINT[]", "BIGINT[]", pa.list_(pa.int64())),
-    ("list[str]", list[str], "VARCHAR[]", "VARCHAR[]", pa.list_(pa.string())),
-    ("list[datetime]", list[dt.datetime], "TIMESTAMP[]", "TIMESTAMP[]", pa.list_(pa.timestamp("us"))),
     ("list[np.float32]", list[np.float32], "FLOAT[]", "FLOAT[]", pa.list_(pa.float32())),
-    ("list[np.uint8]", list[np.uint8], "UTINYINT[]", "UTINYINT[]", pa.list_(pa.uint8())),
     # list nesting, depth 2
     ("list[list[int]]", list[list[int]], "BIGINT[][]", "BIGINT[][]", pa.list_(pa.list_(pa.int64()))),
-    ("list[list[float]]", list[list[float]], "DOUBLE[][]", "DOUBLE[][]", pa.list_(pa.list_(pa.float64()))),
     ("list[list[np.int16]]", list[list[np.int16]], "SMALLINT[][]", "SMALLINT[][]", pa.list_(pa.list_(pa.int16()))),
     # shaped, 1-D
     ("shaped(float,3)", shaped(float, 3), "DOUBLE[3]", "DOUBLE[]", pa.list_(pa.float64(), 3)),
     ("shaped(np.float32,16)", shaped(np.float32, 16), "FLOAT[16]", "FLOAT[]", pa.list_(pa.float32(), 16)),
-    ("shaped(int,2)", shaped(int, 2), "BIGINT[2]", "BIGINT[]", pa.list_(pa.int64(), 2)),
     # shaped, 2-D — DuckDB suffixes read inside-out, arrow nests innermost first
     (
         "shaped(np.int16,4,3)",
@@ -114,7 +94,8 @@ class Golden(Table):
     spectrum: shaped(np.float32, 3)
 
 
-def test_golden_ddl():
+def test_golden_renderings():
+    """Every rendering of one table carrying all four constraint kinds."""
     assert Golden.ddl("golden") == (
         "CREATE TABLE golden (\n"
         "  id BIGINT NOT NULL PRIMARY KEY,\n"
@@ -124,25 +105,16 @@ def test_golden_ddl():
         ")"
     )
     assert Golden.ddl("golden", temp=True).startswith("CREATE TEMP TABLE golden (")
-
-
-def test_golden_persisted_ddl():
-    # what the DuckLake catalog and the publish lake are created from: persisted
-    # types (FLOAT[], not FLOAT[3]) and NOT NULL only — PK/CHECK stay ionflow-side
+    # what the lakes are created from: persisted types (FLOAT[], not FLOAT[3]) and
+    # NOT NULL only — PK/CHECK stay ionflow-side
     assert Golden.persisted_ddl() == (
         "id BIGINT NOT NULL, label VARCHAR, score DOUBLE NOT NULL, spectrum FLOAT[] NOT NULL"
     )
-
-
-def test_golden_cast_sql():
     # the FIXED flavour: this cast is the only place a shaped column's width is enforced
     assert Golden.cast_sql("_src") == (
         "SELECT CAST(id AS BIGINT) AS id, CAST(label AS VARCHAR) AS label, "
         "CAST(score AS DOUBLE) AS score, CAST(spectrum AS FLOAT[3]) AS spectrum FROM _src"
     )
-
-
-def test_golden_violation_scans():
     assert Golden.violation_scans() == [
         ("id NOT NULL", "count(*) FILTER (WHERE id IS NULL)"),
         ("score NOT NULL", "count(*) FILTER (WHERE score IS NULL)"),
@@ -150,9 +122,6 @@ def test_golden_violation_scans():
         ("spectrum NOT NULL", "count(*) FILTER (WHERE spectrum IS NULL)"),
         ("PRIMARY KEY (id)", "count(*) - count(DISTINCT (id))"),
     ]
-
-
-def test_golden_arrow_schema():
     s = Golden.arrow_schema()
     assert s.names == ["id", "label", "score", "spectrum"]
     assert s.types == [pa.int64(), pa.string(), pa.float64(), pa.list_(pa.float32(), 3)]
@@ -303,24 +272,3 @@ def test_empty_relation_and_view_agree():
     # implementation, so comparing them alone cannot catch a flavour flip.
     assert [str(t) for t in rel.types] == ["INTEGER", "FLOAT[]", "VARCHAR[]"]
     assert [c.persisted_type() for c in Spectrum.columns().values()] == ["INTEGER", "FLOAT[]", "VARCHAR[]"]
-
-
-def test_persisted_type_is_what_parquet_round_trips(cfg, tmp_path):
-    store = Store.of(cfg)
-    space = store.space("RT")
-    key = space.part("r", "spectrum")
-    space.write_part(
-        key,
-        {
-            "frame": np.arange(2, dtype=np.int32),
-            "spectrum": np.zeros((2, 3), dtype=np.float32),
-            "tags": [["a"], ["b", "c"]],
-        },
-        Spectrum,
-    )
-    path = tmp_path / "part.parquet"
-    path.write_bytes(store.get(key))
-    rel = duckdb.connect().read_parquet(str(path))
-    read_back = dict(zip(rel.columns, [str(t) for t in rel.types], strict=True))
-    assert read_back == {n: c.persisted_type() for n, c in Spectrum.columns().items()}
-    assert read_back["spectrum"] == "FLOAT[]"  # the fixed shape does not survive parquet

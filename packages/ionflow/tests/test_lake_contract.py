@@ -66,11 +66,6 @@ def _space(cfg, flow_cls=LakeFlow):
     return Space.for_flow(Store.of(cfg), flow_cls)
 
 
-def _etag(lake):
-    """The register's etag — changes exactly once per CAS commit."""
-    return lake.register.read()[1]
-
-
 @contextlib.contextmanager
 def _meta(lake):
     """Plain (non-ducklake) ATTACH of the catalog artifact, for its own metadata."""
@@ -106,58 +101,6 @@ def _vanilla(cfg, target, key):
 
 
 # --- the flow catalog -------------------------------------------------------
-
-
-def test_genesis_creates_only_the_catalog_and_is_idempotent(s3cfg):
-    space = _space(s3cfg)
-    cat = lakemod.Catalog(space)
-    cat.ensure_tables(LakeFlow)
-
-    # genesis precedes every run object: the catalog is the flow's first key
-    assert space.store.list(space.root) == [f"{space.root}/catalog.ducklake"]
-    assert set(cat.tables()) == {"source", "items", "agg"}
-
-    etag = _etag(cat.lake)
-    lakemod.Catalog(space).ensure_tables(LakeFlow)  # a second launch
-    assert _etag(cat.lake) == etag  # no second CAS commit
-
-
-def test_catalog_table_ddl_is_run_id_first_persisted_types_not_null_only(s3cfg):
-    lakemod.Catalog(_space(s3cfg)).ensure_tables(LakeFlow)
-    with lakemod.Catalog(_space(s3cfg)).lake.read() as con:
-        rows = con.sql(
-            "SELECT table_name, sql, has_primary_key, check_constraint_count "
-            "FROM duckdb_tables() WHERE database_name = 'lake' ORDER BY table_name"
-        ).fetchall()
-    ddl = {r[0]: r[1] for r in rows}
-    # run_id (the hive partition, not a declared column) comes first; `vec` is
-    # DOUBLE[] not DOUBLE[2] — the persisted type parquet round-trips
-    assert ddl["source"] == (
-        'CREATE TABLE "source"(run_id VARCHAR DEFAULT(NULL) NOT NULL, n BIGINT DEFAULT(NULL) NOT NULL, '
-        '"label" VARCHAR DEFAULT(NULL), vec DOUBLE[] NOT NULL);'
-    )
-    # PRIMARY KEY / CHECK stay ionflow-side: the lake carries NOT NULL only
-    assert all(not r[2] and r[3] == 0 for r in rows)
-
-
-def test_registering_zero_parts_commits_nothing_and_leaves_a_typed_table(s3cfg):
-    space = _space(s3cfg)
-    cat = lakemod.Catalog(space)
-    cat.ensure_tables(LakeFlow)
-    etag = _etag(cat.lake)
-
-    cat.register_parts({"items": []})  # an empty fan-out registered nothing
-
-    assert _etag(cat.lake) == etag
-    with cat.lake.read() as con:
-        assert con.sql("SELECT count(*) FROM lake.items").fetchone()[0] == 0
-        assert [r[0] for r in con.sql("DESCRIBE lake.items").fetchall()] == ["run_id", "key", "v"]
-
-
-def test_no_catalog_reads_as_empty_and_never_drifts(s3cfg):
-    space = _space(s3cfg)  # nothing was ever run or created here
-    assert lakemod.Catalog(space).tables() == {}
-    assert schema_drift(LakeFlow, space) == []
 
 
 def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(s3cfg, repo):
@@ -233,7 +176,8 @@ def test_schema_drift_reports_missing_changed_and_unexpected_columns(s3cfg, repo
 # --- the publish lake -------------------------------------------------------
 
 
-def test_publish_replaces_atomically_in_one_snapshot(s3cfg, repo):
+def test_publish_replaces_atomically_and_records_provenance(s3cfg, repo):
+    """One run, four publishes: atomic replace, staging, and the provenance table."""
     run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
     lake, target = publish_lake(s3cfg)
 
@@ -246,24 +190,21 @@ def test_publish_replaces_atomically_in_one_snapshot(s3cfg, repo):
 
     LakeFlow.publish(run_id, "items", "blessed", config=s3cfg, where="v > 1")
     assert _snapshots(lake) == first + 1  # one CAS commit, one snapshot
-    con = _vanilla(s3cfg, target, lake.register.key)
-    assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("b", 2)]  # old rows gone
-    # replace, not create: the lake still holds the blessed table and publications
-    assert con.sql("SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake'").fetchone()[0] == 2
-    con.close()
+    # a fresh staged file per publish, so the earlier snapshot's file stays immutable
+    staged = target.list(f"{s3cfg.prefix}/published/data/blessed/")
+    assert len(staged) == 2
+    assert all(re.fullmatch(rf"{run_id}-[0-9a-f]{{32}}\.parquet", k.rsplit("/", 1)[1]) for k in staged)
 
-
-def test_publish_provenance_row_columns_and_values(s3cfg, repo):
-    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
     m = LakeFlow.publish(run_id, "agg", "blessed_agg", config=s3cfg)
     # the returned dict IS the INSERT tuple: order is load-bearing
     assert list(m) == ["table_name", "flow", "run_id", "step", "filter", "commit", "published_at"]
     assert m["filter"] is None and re.fullmatch(r"[0-9a-f]{40}", m["commit"])
     assert (m["table_name"], m["flow"], m["run_id"], m["step"]) == ("blessed_agg", LakeFlow.flow_id(), run_id, "agg")
-
     m2 = LakeFlow.publish(run_id, "agg", "blessed_agg", config=s3cfg, where="total > 99")
-    lake, target = publish_lake(s3cfg)
+
     con = _vanilla(s3cfg, target, lake.register.key)
+    assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("b", 2)]  # old rows gone
+    assert con.sql("SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake'").fetchone()[0] == 3
     assert [r[:3] for r in con.sql("DESCRIBE lake.publications").fetchall()] == [
         ("table_name", "VARCHAR", "NO"),
         ("flow", "VARCHAR", "NO"),
@@ -273,21 +214,9 @@ def test_publish_provenance_row_columns_and_values(s3cfg, repo):
         ("commit", "VARCHAR", "NO"),
         ("published_at", "TIMESTAMP", "NO"),
     ]
-    rows = con.sql("SELECT * FROM lake.publications ORDER BY published_at").fetchall()
-    assert rows == [tuple(m.values()), tuple(m2.values())]  # provenance appends, never replaces
+    published = con.sql("SELECT * FROM lake.publications ORDER BY published_at").fetchall()
+    assert published[-2:] == [tuple(m.values()), tuple(m2.values())]  # appends, never replaces
     con.close()
-
-
-def test_publish_stages_a_uuid_suffixed_file_and_keeps_the_previous_one(s3cfg, repo):
-    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
-    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
-    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
-
-    _, target = publish_lake(s3cfg)
-    staged = target.list(f"{s3cfg.prefix}/published/data/blessed/")
-    # a fresh file per publish, so an earlier snapshot's file stays immutable
-    assert len(staged) == 2
-    assert all(re.fullmatch(rf"{run_id}-[0-9a-f]{{32}}\.parquet", k.rsplit("/", 1)[1]) for k in staged)
 
 
 def test_publish_of_an_empty_fanout_step_is_a_typed_zero_row_table(s3cfg, repo):

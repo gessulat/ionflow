@@ -50,6 +50,12 @@ uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debu
 - `repo` fixture = session-scoped git repo, for tests that only *read* git.
   Use `clean_repo` (function-scoped) if the test mutates the repo or its cwd.
 - The TUI has no automated tests (deliberate — human-tested). Don't add TUI tests.
+- **Never test what the library guarantees.** Writer and reader both derive from the
+  same `Table`, so a write-then-read-back assertion tests pyarrow/DuckDB, not ionflow.
+  Test only where ionflow's own mapping DIFFERS from the pass-through — `_persist`
+  (a fixed array round-trips as a plain list), the constraint scans, the numpy
+  conversion. Likewise, `_LEAF`/`_SQL` are lookup tables: spot-check the kinds,
+  never enumerate the dict.
 
 ## Commands
 
