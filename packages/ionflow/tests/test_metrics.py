@@ -81,8 +81,8 @@ def test_stop_joins_the_thread():
     assert not s._thread.is_alive()
 
 
-def test_stale_running_detection(s3cfg):
-    store = Store.of(s3cfg)
+def test_stale_running_detection(cfg):
+    store = Store.of(cfg)
     space = store.space("F")
     old = dt.datetime(2020, 1, 1)
     for run_id in ("dead", "alive"):
@@ -93,14 +93,14 @@ def test_stale_running_detection(s3cfg):
     con = store.connect()
     con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{space.uri(space.ledger)}')")
     stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the space above
-    rel = query.ledger_with_liveness(stub, s3cfg, con)
+    rel = query.ledger_with_liveness(stub, cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())
     assert statuses == {"dead": "running (stale?)", "alive": "running"}
 
 
-def test_write_parquet_roundtrip(s3cfg):
+def test_write_parquet_roundtrip(cfg):
     rows = [(1000.0, "load", None, 512, 4, 0.5, 0.1), (1001.0, "score", 2, 1024, 8, 1.5, 0.2)]
-    store = Store.of(s3cfg)
+    store = Store.of(cfg)
     space = store.space("F")
     metrics.write_parquet(space, space.metrics("r1"), rows)
     blob = store.get("mf/F/runs/run_id=r1/_metrics.parquet")

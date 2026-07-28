@@ -305,8 +305,8 @@ def test_empty_relation_and_view_agree():
     assert [c.persisted_type() for c in Spectrum.columns().values()] == ["INTEGER", "FLOAT[]", "VARCHAR[]"]
 
 
-def test_persisted_type_is_what_parquet_round_trips(s3cfg, tmp_path):
-    store = Store.of(s3cfg)
+def test_persisted_type_is_what_parquet_round_trips(cfg, tmp_path):
+    store = Store.of(cfg)
     space = store.space("RT")
     key = space.part("r", "spectrum")
     space.write_part(

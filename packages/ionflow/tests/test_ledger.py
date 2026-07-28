@@ -20,8 +20,8 @@ def _row(run_id, started, **extra):
     return {"run_id": run_id, "started": started, "commit": "abc", **extra}
 
 
-def test_insert_then_read(s3cfg):
-    s = _space(s3cfg)
+def test_insert_then_read(cfg):
+    s = _space(cfg)
     s.upsert_runs([_row("r1", _dt(1))])
     rows = s.read_rows(s.ledger)
     assert len(rows) == 1
@@ -29,8 +29,8 @@ def test_insert_then_read(s3cfg):
     assert rows[0]["finished"] is None
 
 
-def test_update_same_run_replaces(s3cfg):
-    s = _space(s3cfg)
+def test_update_same_run_replaces(cfg):
+    s = _space(cfg)
     s.upsert_runs([_row("r1", _dt(1))])
     s.upsert_runs([_row("r1", _dt(1), finished=_dt(2))])
     rows = s.read_rows(s.ledger)
@@ -38,24 +38,24 @@ def test_update_same_run_replaces(s3cfg):
     assert rows[0]["finished"] == _dt(2)
 
 
-def test_multiple_runs_appended(s3cfg):
-    s = _space(s3cfg)
+def test_multiple_runs_appended(cfg):
+    s = _space(cfg)
     s.upsert_runs([_row("r1", _dt(1))])
     s.upsert_runs([_row("r2", _dt(2))])
     rows = s.read_rows(s.ledger)
     assert [r["run_id"] for r in rows] == ["r1", "r2"]
 
 
-def test_custom_columns_stored(s3cfg):
-    s = _space(s3cfg, "T")
+def test_custom_columns_stored(cfg):
+    s = _space(cfg, "T")
     fields = [pa.field("auc", pa.float64())]
     s.upsert_runs([_row("r1", _dt(1), auc=0.9)], custom_fields=fields)
     rows = s.read_rows(s.ledger)
     assert rows[0]["auc"] == 0.9
 
 
-def test_meta_roundtrip(s3cfg):
-    s = _space(s3cfg)
+def test_meta_roundtrip(cfg):
+    s = _space(cfg)
     assert s.read_meta("r1") is None
     s.write_meta("r1", {"run_id": "r1", "steps_complete": ["raw/0"]})
     assert s.read_meta("r1")["steps_complete"] == ["raw/0"]

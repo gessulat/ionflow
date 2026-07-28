@@ -93,8 +93,8 @@ class ParamFlow(Flow):
 
 
 def _side_n(config):
-    """The side input: an int stored in the bucket outside any run folder."""
-    return int(s3_client(config).get_object(Bucket=config.bucket, Key="side/n")["Body"].read())
+    """The side input: an int stored outside any run folder."""
+    return int(Store.of(config).get("side/n"))
 
 
 def _side_order(config):

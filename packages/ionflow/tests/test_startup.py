@@ -41,11 +41,11 @@ def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
 
 
-def test_scan_runs(s3cfg):
+def test_scan_runs(cfg):
     from ionflow.store import Store
 
-    store = Store.of(s3cfg)
+    store = Store.of(cfg)
     assert scan_runs(store) == set()
     # key presence is all that matters here; no need for a full flow run
-    store.put(f"{s3cfg.prefix}/Alpha/ledger.parquet", b"")
+    store.put(f"{cfg.prefix}/Alpha/ledger.parquet", b"")
     assert scan_runs(store) == {"Alpha"}

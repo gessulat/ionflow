@@ -79,11 +79,11 @@ def _registered(cfg, flow_cls, step):
     return [pathlib.PurePosixPath(p).name for (p,) in rows]
 
 
-def test_meta_json_shape_of_a_complete_run(s3cfg, repo):
+def test_meta_json_shape_of_a_complete_run(cfg, repo):
     """_meta.json's keys, and steps_complete as sorted "step/branch" strings."""
-    run_id = EmbedDocs.run(s3cfg, repo=repo, use_processes=False, params={"min_len": 1})
+    run_id = EmbedDocs.run(cfg, repo=repo, use_processes=False, params={"min_len": 1})
 
-    space = _space(s3cfg, EmbedDocs)
+    space = _space(cfg, EmbedDocs)
     meta = json.loads(space.store.get(space.meta(run_id)).decode())  # plain UTF-8 JSON
     assert list(meta) == META_KEYS
     assert meta["steps_complete"] == [
@@ -105,13 +105,13 @@ def test_meta_json_shape_of_a_complete_run(s3cfg, repo):
     assert dt.datetime.fromisoformat(meta["finished"]) >= started
 
 
-def test_meta_json_of_a_failed_run_claims_no_outcome(s3cfg, repo, monkeypatch):
+def test_meta_json_of_a_failed_run_claims_no_outcome(cfg, repo, monkeypatch):
     """A failed run keeps its progress but no finish time and no ledger columns."""
     monkeypatch.setenv("PROBE_FAIL", "1")
     with pytest.raises(RuntimeError, match="boom in doubled"):
-        ProbeFlow.run(s3cfg, repo=repo, use_processes=False, params={"mult": 3})
+        ProbeFlow.run(cfg, repo=repo, use_processes=False, params={"mult": 3})
 
-    space = _space(s3cfg, ProbeFlow)
+    space = _space(cfg, ProbeFlow)
     run_id = space.read_rows(space.ledger)[0]["run_id"]
     meta = space.read_meta(run_id)
     assert list(meta) == META_KEYS
@@ -121,12 +121,12 @@ def test_meta_json_of_a_failed_run_claims_no_outcome(s3cfg, repo, monkeypatch):
     assert meta["params"] == {"mult": 3}
 
 
-def test_partial_fanout_is_never_recorded_as_complete(s3cfg, repo):
+def test_partial_fanout_is_never_recorded_as_complete(cfg, repo):
     """Two items reached S3; the fan-out still counts as nothing (all-or-nothing)."""
     with pytest.raises(RuntimeError, match="fan-out died"):
-        PartialFanFlow.run(s3cfg, repo=repo, use_processes=False)
+        PartialFanFlow.run(cfg, repo=repo, use_processes=False)
 
-    space = _space(s3cfg, PartialFanFlow)
+    space = _space(cfg, PartialFanFlow)
     run_id = space.read_rows(space.ledger)[0]["run_id"]
     assert space.read_meta(run_id)["steps_complete"] == []
     # the parts really are there — completion is not "whatever exists on S3",
@@ -137,16 +137,16 @@ def test_partial_fanout_is_never_recorded_as_complete(s3cfg, repo):
     ]
 
 
-def test_resume_reads_a_hand_written_origin_meta(s3cfg, repo, tmp_path, monkeypatch):
+def test_resume_reads_a_hand_written_origin_meta(cfg, repo, tmp_path, monkeypatch):
     """The origin's `_meta.json`, written by hand in today's on-disk format.
 
     An origin from any release with this format must still drive a resume: the
     "step/branch" strings alone decide what is copied and what re-runs.
     """
     monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
-    origin = FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+    origin = FlakyFlow.run(cfg, repo=repo, use_processes=False)
 
-    space = _space(s3cfg, FlakyFlow)
+    space = _space(cfg, FlakyFlow)
     space.write_meta(
         origin,
         {
@@ -161,32 +161,32 @@ def test_resume_reads_a_hand_written_origin_meta(s3cfg, repo, tmp_path, monkeypa
             "custom": {},
         },
     )
-    resumed = FlakyFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
+    resumed = FlakyFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
 
     # only the branch the meta omitted re-ran
     assert exec_counts(tmp_path, "work") == {"0": 1, "1": 2, "2": 1}
 
-    con = FlakyFlow.duck(s3cfg)
+    con = FlakyFlow.duck(cfg)
     assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)
     assert con.sql(f"SELECT status FROM ledger WHERE run_id = '{resumed}'").fetchone()[0] == "complete"
 
 
-def test_int_fanout_keys_survive_the_json_meta(s3cfg, repo):
+def test_int_fanout_keys_survive_the_json_meta(cfg, repo):
     """Integer item keys stay ints in `_meta.json`, so a resume can match them."""
-    origin = IntKeyFlow.run(s3cfg, repo=repo, use_processes=False)
+    origin = IntKeyFlow.run(cfg, repo=repo, use_processes=False)
 
-    space = _space(s3cfg, IntKeyFlow)
+    space = _space(cfg, IntKeyFlow)
     assert space.read_meta(origin)["fanout_keys"] == {"shards": [2, 7]}
 
-    resumed = IntKeyFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
-    con = IntKeyFlow.duck(s3cfg)
+    resumed = IntKeyFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
+    con = IntKeyFlow.duck(cfg)
     tokens = dict(con.sql(f"SELECT item, token FROM work WHERE run_id = '{resumed}'").fetchall())
     old = dict(con.sql(f"SELECT item, token FROM work WHERE run_id = '{origin}'").fetchall())
     assert tokens == old  # both items matched by key and were copied, not recomputed
 
 
 @pytest.mark.slow
-def test_registration_order_is_branch_order_not_completion_order(s3cfg, repo, tmp_path, monkeypatch):
+def test_registration_order_is_branch_order_not_completion_order(cfg, repo, tmp_path, monkeypatch):
     """Branches land back to front; their parts still register 0, 1, 2.
 
     Registration order is the data-file order in the catalog, hence the scan
@@ -194,16 +194,16 @@ def test_registration_order_is_branch_order_not_completion_order(s3cfg, repo, tm
     or an `arg_max` tie vary from run to run.
     """
     monkeypatch.setenv("ORDER_DIR", str(tmp_path))
-    run_id = OrderFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=ORDER_ITEMS)
+    run_id = OrderFlow.run(cfg, repo=repo, use_processes=True, max_workers=ORDER_ITEMS)
 
-    con = OrderFlow.duck(s3cfg)
+    con = OrderFlow.duck(cfg)
     by_finish = [g for (g,) in con.sql(f"SELECT g FROM work WHERE run_id = '{run_id}' ORDER BY finished_at").fetchall()]
     assert by_finish == [2, 1, 0]  # the test is only meaningful if completion was reversed
 
     parts = [f"part_{i}.parquet" for i in range(ORDER_ITEMS)]
-    assert _registered(s3cfg, OrderFlow, "work") == parts
-    assert _registered(s3cfg, OrderFlow, "parts") == parts
-    space = _space(s3cfg, OrderFlow)
+    assert _registered(cfg, OrderFlow, "work") == parts
+    assert _registered(cfg, OrderFlow, "parts") == parts
+    space = _space(cfg, OrderFlow)
     assert space.part_keys(run_id, "work") == [space.part(run_id, "work", i) for i in range(ORDER_ITEMS)]
     # and the registered order is what a plain scan returns
     assert [g for (g,) in con.sql(f"SELECT g FROM work WHERE run_id = '{run_id}'").fetchall()] == [0, 1, 2]
@@ -242,11 +242,11 @@ def test_sub_steps_complete_for_every_item_survive_a_later_failure(s3cfg, repo, 
     assert space.part(run_id, "search", 0) in space.store.list(space.step_dir(run_id, "search") + "/")
 
 
-def test_ledger_row_per_status(s3cfg, repo, tmp_path, monkeypatch):
+def test_ledger_row_per_status(cfg, repo, tmp_path, monkeypatch):
     """The ledger row's exact columns and values while running, complete, failed."""
     probe = tmp_path / "ledger.json"
     monkeypatch.setenv("LEDGER_PROBE", str(probe))
-    done = ProbeFlow.run(s3cfg, repo=repo, use_processes=False, params={"mult": 3})
+    done = ProbeFlow.run(cfg, repo=repo, use_processes=False, params={"mult": 3})
     mid_run = json.loads(probe.read_text())
 
     assert len(mid_run) == 1
@@ -259,7 +259,7 @@ def test_ledger_row_per_status(s3cfg, repo, tmp_path, monkeypatch):
     assert running["mult"] == 3  # params are ledger columns from the first upsert
     assert running["note"] is None
 
-    complete = _ledger(s3cfg, ProbeFlow, done)
+    complete = _ledger(cfg, ProbeFlow, done)
     assert list(complete) == [*LEDGER_COLS, "mult", "note"]
     assert complete["status"] == "complete"
     assert complete["commit"] == require_clean(repo)
@@ -269,8 +269,8 @@ def test_ledger_row_per_status(s3cfg, repo, tmp_path, monkeypatch):
 
     monkeypatch.setenv("PROBE_FAIL", "1")
     with pytest.raises(RuntimeError, match="boom in doubled"):
-        ProbeFlow.run(s3cfg, repo=repo, use_processes=False, params={"mult": 3})
-    space = _space(s3cfg, ProbeFlow)
+        ProbeFlow.run(cfg, repo=repo, use_processes=False, params={"mult": 3})
+    space = _space(cfg, ProbeFlow)
     failed = next(r for r in space.read_rows(space.ledger) if r["run_id"] != done)
     assert failed["status"] == "failed"
     assert failed["finished"] is not None  # unlike _meta.json, the ledger times a failure

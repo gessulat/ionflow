@@ -120,8 +120,8 @@ class Frame(Table):
     x: np.float32 = check("x >= 0")
 
 
-def test_write_part_persists_narrow_dtypes(s3cfg):
-    store = Store.of(s3cfg)
+def test_write_part_persists_narrow_dtypes(cfg):
+    store = Store.of(cfg)
     space = store.space("F")
     key = space.part("r", "pts")
     data = {"frame": np.arange(2, dtype=np.int32), "x": np.ones(2, dtype=np.float32)}
@@ -131,16 +131,16 @@ def test_write_part_persists_narrow_dtypes(s3cfg):
     assert schema.field("x").type == pa.float32()
 
 
-def test_constraints_apply_to_numpy_returns(s3cfg):
-    space = Store.of(s3cfg).space("F")
+def test_constraints_apply_to_numpy_returns(cfg):
+    space = Store.of(cfg).space("F")
     bad = {"frame": np.zeros(1, dtype=np.int32), "x": np.array([-1.0], dtype=np.float32)}
     with pytest.raises(ConstraintViolation):
         space.write_part(space.part("r2", "pts"), bad, Frame)
 
 
-def test_nan_is_a_value_not_null(s3cfg):
+def test_nan_is_a_value_not_null(cfg):
     # NOT NULL means "no NULLs"; NaN is a legitimate float measurement artifact
-    store = Store.of(s3cfg)
+    store = Store.of(cfg)
     space = store.space("F")
     key = space.part("r3", "pts")
     data = {"frame": np.zeros(1, dtype=np.int32), "x": np.array([np.nan], dtype=np.float32)}
@@ -176,8 +176,8 @@ class Shaped3(Table):
     v: shaped(np.float32, 3)
 
 
-def test_shaped_enforces_shape_at_write(s3cfg):
-    space = Store.of(s3cfg).space("S")
+def test_shaped_enforces_shape_at_write(cfg):
+    space = Store.of(cfg).space("S")
     good = {"v": np.zeros((2, 3), dtype=np.float32)}
     space.write_part(space.part("r", "v", 0), good, Shaped3)
     with pytest.raises(duckdb.ConversionException, match="size 4 to array of size 3"):
@@ -233,9 +233,9 @@ def test_step_input_delegates_to_the_relation():
     assert inp.aggregate("sum(x) AS s").fetchone()[0] == 6
 
 
-def test_write_part_accepts_an_input_returned_unchanged(s3cfg):
+def test_write_part_accepts_an_input_returned_unchanged(cfg):
     # identity step: `def copy(self, raw: Raw) -> Raw: return raw`
-    store = Store.of(s3cfg)
+    store = Store.of(cfg)
     space = store.space("F")
     key = space.part("r4", "pts")
     inp = _input(pa.table({"frame": pa.array([1], pa.int32()), "x": pa.array([2.0], pa.float32())}))
@@ -280,14 +280,14 @@ class SignalFlow(Flow):
         return peaks.aggregate("count(*) AS n")
 
 
-def test_numpy_flow_end_to_end(s3cfg, repo):
-    run_id = SignalFlow.run(s3cfg, repo=repo, use_processes=False)
-    con = SignalFlow.duck(s3cfg)
+def test_numpy_flow_end_to_end(cfg, repo):
+    run_id = SignalFlow.run(cfg, repo=repo, use_processes=False)
+    con = SignalFlow.duck(cfg)
     assert con.sql(f"SELECT n FROM counted WHERE run_id = '{run_id}'").fetchone()[0] == 4
     peaks = con.sql(f"SELECT peak FROM peaks WHERE run_id = '{run_id}'").fetchall()
     assert all(p > 0 for (p,) in peaks)
     # narrow dtypes survived the whole pipeline onto S3 (fixed shape persists as list)
-    store = Store.of(s3cfg)
+    store = Store.of(cfg)
     space = Space.for_flow(store, SignalFlow)
     schema = table_from_bytes(store.get(space.part(run_id, "spectra"))).schema
     assert schema.field("frame").type == pa.int32()
