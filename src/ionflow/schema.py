@@ -75,6 +75,21 @@ def shaped(dtype, *shape):
     return type(name, (Shaped,), {"dtype": dtype, "shape": shape})
 
 
+def _q(name):
+    """Quote a column name so any identifier survives interpolation into SQL.
+
+    Column names are user data — scientific schemas carry things like
+    `'b 1 +1'` — so every generated statement quotes them. Embedded quotes are
+    doubled, which is how SQL escapes them inside a quoted identifier.
+
+    >>> _q("plain"), _q("b 1 +1")
+    ('"plain"', '"b 1 +1"')
+    >>> _q('we"ird')
+    '"we""ird"'
+    """
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def _is_shaped(dtype):
     return isinstance(dtype, type) and issubclass(dtype, Shaped)
 
@@ -200,7 +215,7 @@ class Column:
         return typing.get_origin(self.dtype) is list or _is_shaped(self.dtype)
 
     def ddl(self, name):
-        parts = [name, self.duckdb_type()]
+        parts = [_q(name), self.duckdb_type()]
         if not self.nullable:
             parts.append("NOT NULL")
         if self.primary_key:
@@ -298,10 +313,10 @@ class Table:
         PK/CHECK stay ionflow-side (0003).
 
         >>> Table.make("T", {"x": int, "s": str | None}).persisted_ddl()
-        'x BIGINT NOT NULL, s VARCHAR'
+        '"x" BIGINT NOT NULL, "s" VARCHAR'
         """
         return ", ".join(
-            f"{n} {c.persisted_type()}{'' if c.nullable else ' NOT NULL'}" for n, c in cls._columns.items()
+            f"{_q(n)} {c.persisted_type()}{'' if c.nullable else ' NOT NULL'}" for n, c in cls._columns.items()
         )
 
     @classmethod
@@ -321,9 +336,9 @@ class Table:
         >>> class C(Table):
         ...     a: int
         >>> C.cast_sql("_src")
-        'SELECT CAST(a AS BIGINT) AS a FROM _src'
+        'SELECT CAST("a" AS BIGINT) AS "a" FROM _src'
         """
-        cols = ", ".join(f"CAST({n} AS {c.duckdb_type()}) AS {n}" for n, c in cls._columns.items())
+        cols = ", ".join(f"CAST({_q(n)} AS {c.duckdb_type()}) AS {_q(n)}" for n, c in cls._columns.items())
         return f"SELECT {cols} FROM {source}"
 
     @classmethod
@@ -344,12 +359,12 @@ class Table:
         scans = []
         for n, c in cls._columns.items():
             if not c.nullable:
-                scans.append((f"{n} NOT NULL", f"count(*) FILTER (WHERE {n} IS NULL)"))
+                scans.append((f"{n} NOT NULL", f"count(*) FILTER (WHERE {_q(n)} IS NULL)"))
             if c.check:
                 scans.append((f"CHECK ({c.check})", f"count(*) FILTER (WHERE ({c.check}) IS FALSE)"))
         if pk := [n for n, c in cls._columns.items() if c.primary_key]:
-            cols = ", ".join(pk)
-            scans.append((f"PRIMARY KEY ({cols})", f"count(*) - count(DISTINCT ({cols}))"))
+            quoted = ", ".join(_q(n) for n in pk)
+            scans.append((f"PRIMARY KEY ({', '.join(pk)})", f"count(*) - count(DISTINCT ({quoted}))"))
         return scans
 
     @classmethod

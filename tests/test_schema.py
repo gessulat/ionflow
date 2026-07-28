@@ -21,12 +21,30 @@ def test_ddl():
     ddl = Features.ddl("features")
     assert ddl == (
         "CREATE TABLE features (\n"
-        "  id BIGINT NOT NULL PRIMARY KEY,\n"
-        "  ts TIMESTAMP NOT NULL,\n"
-        "  score DOUBLE CHECK (score >= 0),\n"
-        "  label VARCHAR\n"
+        '  "id" BIGINT NOT NULL PRIMARY KEY,\n'
+        '  "ts" TIMESTAMP NOT NULL,\n'
+        '  "score" DOUBLE CHECK (score >= 0),\n'
+        '  "label" VARCHAR\n'
         ")"
     )
+
+
+def test_column_names_needing_quotes():
+    """Scientific schemas carry names SQL cannot take bare: 'b 1 +1', 'z* 5 +1'."""
+    import duckdb
+
+    Ions = Table.make(
+        "Ions",
+        {"scan": int, "b 1 +1": float | None, "z* 5 +1": float | None, 'we"ird': float | None},
+    )
+    duckdb.connect().execute(Ions.ddl("ions"))  # the whole point: it parses
+
+    assert '"b 1 +1" DOUBLE' in Ions.ddl("ions")
+    assert 'CAST("b 1 +1" AS DOUBLE) AS "b 1 +1"' in Ions.cast_sql("_src")
+    assert '"we""ird"' in Ions.ddl("ions")  # embedded quote doubled
+    assert '"scan" BIGINT NOT NULL' in Ions.persisted_ddl()
+    labels = [label for label, _ in Ions.violation_scans()]
+    assert labels == ["scan NOT NULL"]  # labels stay human-readable, unquoted
 
 
 def test_arrow_schema():
@@ -62,8 +80,8 @@ def test_list_columns():
         tags: list[str] | None
 
     ddl = Emb.ddl("emb")
-    assert "vec DOUBLE[] NOT NULL" in ddl
-    assert "tags VARCHAR[]" in ddl and "tags VARCHAR[] NOT NULL" not in ddl
+    assert '"vec" DOUBLE[] NOT NULL' in ddl
+    assert '"tags" VARCHAR[]' in ddl and '"tags" VARCHAR[] NOT NULL' not in ddl
     schema = Emb.arrow_schema()
     assert schema.field("vec").type == pa.list_(pa.float64())
     assert schema.field("tags").nullable

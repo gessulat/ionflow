@@ -1,6 +1,7 @@
 import duckdb
 
 from . import catalog, metrics
+from .schema import _q
 from .storage import (
     Layout,
     connect,
@@ -24,7 +25,7 @@ def _empty_view_sql(table):
 
     `run_id` goes last, matching its position in the catalog views.
     """
-    cols = [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
+    cols = [f"NULL::{c.persisted_type()} AS {_q(name)}" for name, c in table.columns().items()]
     return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
 
 
