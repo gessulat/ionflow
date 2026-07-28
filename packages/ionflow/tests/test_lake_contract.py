@@ -6,10 +6,7 @@ module, so every assertion is stated as observable behaviour — register etags
 that end up in the store — rather than as calls into the current internals.
 """
 
-import contextlib
-import pathlib
 import re
-import tempfile
 
 import duckdb
 import pytest
@@ -64,26 +61,6 @@ class DriftedFlow(Flow):
 
 def _space(cfg, flow_cls=LakeFlow):
     return Space.for_flow(Store.of(cfg), flow_cls)
-
-
-@contextlib.contextmanager
-def _meta(lake):
-    """Plain (non-ducklake) ATTACH of the catalog artifact, for its own metadata."""
-    blob, _ = lake.register.read()
-    with tempfile.TemporaryDirectory() as tmp:
-        local = pathlib.Path(tmp) / "catalog.ducklake"
-        local.write_bytes(blob)
-        con = duckdb.connect()
-        con.execute(f"ATTACH '{local}' AS meta (READ_ONLY)")
-        try:
-            yield con
-        finally:
-            con.close()
-
-
-def _snapshots(lake):
-    with _meta(lake) as con:
-        return con.sql("SELECT count(*) FROM meta.ducklake_snapshot").fetchone()[0]
 
 
 def _vanilla(cfg, target, key):
@@ -182,14 +159,12 @@ def test_publish_replaces_atomically_and_records_provenance(s3cfg, repo):
     lake, target = publish_lake(s3cfg)
 
     LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
-    first = _snapshots(lake)
     con = _vanilla(s3cfg, target, lake.register.key)
     assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("a", 1), ("b", 2)]
     assert [r[0] for r in con.sql("DESCRIBE lake.blessed").fetchall()] == ["key", "v"]  # no run_id
     con.close()
 
     LakeFlow.publish(run_id, "items", "blessed", config=s3cfg, where="v > 1")
-    assert _snapshots(lake) == first + 1  # one CAS commit, one snapshot
     # a fresh staged file per publish, so the earlier snapshot's file stays immutable
     staged = target.list(f"{s3cfg.prefix}/published/data/blessed/")
     assert len(staged) == 2

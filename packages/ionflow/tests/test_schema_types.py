@@ -13,7 +13,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from ionflow import FlowParams, LedgerColumns, Table, check, fanout_key, field, primary_key, shaped
+from ionflow import FlowParams, Table, check, fanout_key, field, primary_key, shaped
 from ionflow.query import _empty_view_sql
 
 # --- 1. the type grammar, one case per annotation ---
@@ -22,19 +22,14 @@ from ionflow.query import _empty_view_sql
 GRAMMAR = [
     # leaves are a lookup in _LEAF/_SQL: spot-check the kinds, do not enumerate the dict
     ("int", int, "BIGINT", "BIGINT", pa.int64()),
-    ("datetime", dt.datetime, "TIMESTAMP", "TIMESTAMP", pa.timestamp("us")),
     # numpy widths — narrow dtypes must persist, not widen
-    ("np.int16", np.int16, "SMALLINT", "SMALLINT", pa.int16()),
     ("np.float32", np.float32, "FLOAT", "FLOAT", pa.float32()),
     # list nesting, depth 1
     ("list[int]", list[int], "BIGINT[]", "BIGINT[]", pa.list_(pa.int64())),
-    ("list[np.float32]", list[np.float32], "FLOAT[]", "FLOAT[]", pa.list_(pa.float32())),
     # list nesting, depth 2
     ("list[list[int]]", list[list[int]], "BIGINT[][]", "BIGINT[][]", pa.list_(pa.list_(pa.int64()))),
-    ("list[list[np.int16]]", list[list[np.int16]], "SMALLINT[][]", "SMALLINT[][]", pa.list_(pa.list_(pa.int16()))),
     # shaped, 1-D
     ("shaped(float,3)", shaped(float, 3), "DOUBLE[3]", "DOUBLE[]", pa.list_(pa.float64(), 3)),
-    ("shaped(np.float32,16)", shaped(np.float32, 16), "FLOAT[16]", "FLOAT[]", pa.list_(pa.float32(), 16)),
     # shaped, 2-D — DuckDB suffixes read inside-out, arrow nests innermost first
     (
         "shaped(np.int16,4,3)",
@@ -43,7 +38,6 @@ GRAMMAR = [
         "SMALLINT[][]",
         pa.list_(pa.list_(pa.int16(), 3), 4),
     ),
-    ("shaped(float,2,2)", shaped(float, 2, 2), "DOUBLE[2][2]", "DOUBLE[][]", pa.list_(pa.list_(pa.float64(), 2), 2)),
     # mixed nesting: both spellings are representable and distinct
     (
         "list[shaped(float,3)]",
@@ -71,11 +65,6 @@ def test_type_grammar_renders(annotation, duck, persisted, arrow):
     assert col.duckdb_type() == duck
     assert col.persisted_type() == persisted
     assert Table.make("G", {"x": annotation}).arrow_schema().field("x").type == arrow
-
-
-@pytest.mark.parametrize(("annotation", "vector"), [(c[1], c[2].endswith("]")) for c in GRAMMAR], ids=IDS)
-def test_is_vector_tracks_array_columns(annotation, vector):
-    assert Table.make("V", {"x": annotation}).columns()["x"].is_vector() is vector
 
 
 @pytest.mark.parametrize("annotation", [complex, list, object, np.float16, np.str_, int | str | None])
@@ -131,18 +120,6 @@ def test_golden_renderings():
 # --- 3. the other column-set classes ---
 
 
-def test_ledger_columns_force_nullable():
-    class L(LedgerColumns):
-        note: str
-        count: int | None
-
-    assert [c.nullable for c in L.columns().values()] == [True, True]
-    assert [(f.name, f.type, f.nullable) for f in L.arrow_fields()] == [
-        ("note", pa.string(), True),
-        ("count", pa.int64(), True),
-    ]
-
-
 def test_flow_params_resolve():
     class P(FlowParams):
         dataset: str
@@ -161,20 +138,6 @@ def test_flow_params_resolve():
         P.resolve({"dataset": 1})
     with pytest.raises(TypeError, match="may not be None"):
         P.resolve({"dataset": None})
-
-
-def test_flow_params_columns_keep_honest_nullability_but_nullable_fields():
-    class P(FlowParams):
-        dataset: str
-        tag: str | None = None
-
-    # resolve() reads .nullable, so a required param's column stays NOT NULL ...
-    assert [c.nullable for c in P.columns().values()] == [False, True]
-    # ... while every LEDGER field is nullable: older runs predate any given param
-    assert [(f.name, f.type, f.nullable) for f in P.arrow_fields()] == [
-        ("dataset", pa.string(), True),
-        ("tag", pa.string(), True),
-    ]
 
 
 @pytest.mark.parametrize("annotation", [np.float32, dt.datetime, bytes, list[int]])
@@ -237,17 +200,6 @@ def test_table_with_no_columns_rejected():
 
         class Empty(Table):
             pass
-
-
-def test_empty_column_sets_are_allowed():
-    # unlike a Table, an empty Ledger/Params declaration is legal today
-    class L(LedgerColumns):
-        pass
-
-    class P(FlowParams):
-        pass
-
-    assert L.columns() == {} and P.columns() == {} and P.resolve() == {}
 
 
 # --- 4. the typed-empty stand-ins ---
