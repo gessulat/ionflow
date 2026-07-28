@@ -1,7 +1,10 @@
+import importlib
+import pkgutil
+
 from . import query, runner
 from .config import Config
 from .dag import build_dag
-from .publish import publish as _publish
+from .lake import publish as _publish
 from .space import BASE_COLS
 
 
@@ -79,3 +82,21 @@ class Flow:
                 raise ValueError(f"{cls.__name__} declares no Params")
             return {}
         return cls.Params.resolve(given)
+
+
+def discover_flows(package):
+    """Import `package` and all its submodules, returning its {flow_id: Flow subclass}.
+
+    Registration is a side effect of importing (see Flow.__init_subclass__), so
+    this walks the whole package to catch flows split across modules, then keeps
+    only the flows defined under `package`. A TUI launch is a fresh process, so
+    the registry reflects the current code with no stale entries.
+    """
+    mod = importlib.import_module(package)
+    for info in pkgutil.walk_packages(getattr(mod, "__path__", []), mod.__name__ + "."):
+        importlib.import_module(info.name)
+    return {
+        name: cls
+        for name, cls in Flow._registry.items()
+        if cls.__module__ == package or cls.__module__.startswith(package + ".")
+    }

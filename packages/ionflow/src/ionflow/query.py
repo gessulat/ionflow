@@ -1,6 +1,6 @@
 import duckdb
 
-from . import catalog, metrics
+from . import lake, metrics
 from .arrow import read_parquet_sql
 from .space import Space, utc_now
 from .store import Store
@@ -116,7 +116,7 @@ def duck(flow_cls, config):
     store = Store.of(config)
     con = store.connect()
     space = Space.for_flow(store, flow_cls)
-    if catalog.Catalog(space).attach_readonly(con):
+    if lake.Catalog(space).attach_readonly(con):
         for name in flow_cls._dag.steps:
             # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")

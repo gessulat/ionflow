@@ -8,7 +8,7 @@ import pytest
 from flows import EmptyFanFlow, FlakyFlow
 from schrein.ducklake import load_ducklake
 
-from ionflow.publish import publish_lake
+from ionflow.lake import publish_lake
 from ionflow.store import Store, secret_sql
 
 

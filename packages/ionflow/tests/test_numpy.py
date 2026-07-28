@@ -293,6 +293,6 @@ def test_numpy_flow_end_to_end(s3cfg, repo):
     assert schema.field("frame").type == pa.int32()
     assert schema.field("spectrum").type == pa.list_(pa.float32())
     # the drift check compares against the persisted (list) form: no false positive
-    from ionflow import discovery
+    from ionflow.lake import schema_drift
 
-    assert discovery.schema_drift(SignalFlow, space) == []
+    assert schema_drift(SignalFlow, space) == []

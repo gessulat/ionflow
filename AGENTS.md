@@ -122,6 +122,8 @@ ionflow query myproj.flows:Training \
   (written from run start); resume reuses the origin's params from `_meta.json`.
   There is no prototype/scratch mode (0012): every flow carries the full
   guarantees — clean git, typed steps, a catalog — from its first run.
+  `discover_flows(package)` imports a package (and its submodules) to register
+  the flows it defines — registration is a side effect of importing.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`),
   in-worker branch retries (`branch_retries`), git gate,
@@ -152,11 +154,6 @@ ionflow query myproj.flows:Training \
   key-matched too, never positionally reused.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
-- `publish.py` — bless one step's output from a complete run into the publish
-  lake (a schrein DuckLake, default `<prefix>/published/`, `--to` for any
-  bucket): atomic replace in one CAS commit, snapshot history instead of
-  --force, `publications` provenance table, optional `--where` filter.
-  Still a copy into the lake's data path, never a pointer (0009).
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode item workers each flush their own
@@ -192,7 +189,7 @@ ionflow query myproj.flows:Training \
   stay separate: the ledger is run bookkeeping, never a catalog), per-run
   `_meta.json` (`read_meta`/`write_meta`), and `sync_to` (local -> S3 migration:
   copy immutable run folders, MERGE ledger rows idempotently by run_id, rebuild
-  the target catalog via `catalog.backfill` — a DuckLake catalog holds absolute
+  the target catalog via `lake.backfill` — a DuckLake catalog holds absolute
   paths, so it is re-derived, never copied). Timestamps are naive UTC (`utc_now`;
   tz-aware parquet needs pytz in DuckDB).
 - `arrow.py`   — pure marshalling, no store knowledge.
@@ -201,24 +198,33 @@ ionflow query myproj.flows:Training \
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `catalog.py` — every flow's DuckLake catalog (0012 — the only
-  read/registration mode; no config flag): at the flow root, one table per
-  step, run_id inferred from the parts' hive paths at registration (parts
-  never rewritten). One CAS commit per completed step by the orchestrator;
-  registration failure fails the run. `duck()` views an attached snapshot
-  (run_id kept last) and refuses a pre-catalog bucket, pointing at
-  `ionflow catalog-backfill` (the corruption-recovery path; there is no
-  other read path). No schema-migration workflow, deliberately: schema
-  change = new flow name, or backfill --replace when old parts conform.
-  Ledger/meta/metrics untouched.
+- `lake.py`    — both DuckLakes ionflow keeps, driven by the same three operations
+  (genesis, register pre-uploaded parquet, attach a snapshot read-only):
+  `Catalog`, every flow's catalog (0012 — the only read/registration mode; no
+  config flag): at the flow root, one table per step, run_id inferred from the
+  parts' hive paths at registration (parts never rewritten). One CAS commit per
+  completed step by the orchestrator; registration failure fails the run.
+  `duck()` views an attached snapshot (run_id kept last) and refuses a
+  pre-catalog bucket, pointing at `backfill()` / `ionflow catalog-backfill`
+  (the corruption-recovery path; there is no other read path). No
+  schema-migration workflow, deliberately: schema change = new flow name, or
+  backfill --replace when old parts conform. Ledger/meta/metrics untouched;
+  `schema_drift()` compares a step's declared columns against its catalog table.
+  And `publish()`: bless one step's output from a complete run into the publish
+  lake (default `<prefix>/published/`, `--to` for any bucket) — atomic replace
+  in one CAS commit, snapshot history instead of --force, `publications`
+  provenance table (the `Publication` Table), optional `--where` filter. Still
+  a copy into the lake's data path, never a pointer (0009). A lake only ever
+  receives table schemas and data-file registrations; the ledger keeps sole
+  authority over run bookkeeping.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
-- `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
-  LIST); schema-drift check (one parquet footer per step).
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
   Exactly one of `bucket` / `local_dir` (relative `local_dir` anchors at the repo root).
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
+  The TUI owns its own startup helpers: `scan_runs` (one store LIST for flows
+  with a ledger) and `startup_warnings` (orphaned data + `lake.schema_drift`).
 
 ## Conventions & gotchas
 

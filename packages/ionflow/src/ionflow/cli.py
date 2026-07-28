@@ -252,10 +252,10 @@ def catalog_backfill(
     replace: bool = typer.Option(False, "--replace", help="Rebuild an existing catalog from the run folders"),
 ):
     """Rebuild a flow's catalog from its run folders (recovery for a lost register)."""
-    from . import catalog
+    from .lake import backfill
 
     cls = _load(flow)
-    n = catalog.backfill(cls, Space.for_flow(Store.of(_config_or_setup()), cls), replace=replace)
+    n = backfill(cls, Space.for_flow(Store.of(_config_or_setup()), cls), replace=replace)
     typer.echo(f"registered {n} complete run(s) into the catalog")
 
 

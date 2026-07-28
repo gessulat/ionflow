@@ -255,7 +255,7 @@ class Space:
         re-running is cheap; ledger rows MERGE through the target's CAS ledger; the
         catalog is re-derived (it stores absolute data-file locations) — decision 0016.
         """
-        from . import catalog  # catalog builds on Space; the import stays local to break the cycle
+        from .lake import backfill  # lake builds on Space; the import stays local to break the cycle
 
         if not self.store.local_dir:
             raise ValueError("sync sources a local store; the active config has no local_dir")
@@ -286,5 +286,5 @@ class Space:
             runs = table.num_rows
 
         if runs:
-            catalog.backfill(flow_cls, other, replace=True)
+            backfill(flow_cls, other, replace=True)
         return {"copied": len(todo), "runs": runs}

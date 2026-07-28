@@ -11,7 +11,7 @@ from multiprocessing import get_context
 
 import psutil
 
-from . import catalog, metrics
+from . import lake, metrics
 from .arrow import StepInput
 from .config import Config
 from .git import require_clean
@@ -316,7 +316,7 @@ def run(
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = store.connect()
-    cat = catalog.Catalog(space)
+    cat = lake.Catalog(space)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
@@ -458,7 +458,7 @@ def run(
             pass
 
     def register(name):
-        cat.register_step(name, [space.part(run_id, name, i) for i in range(_count_of(completed, name))])
+        cat.register_parts({name: [space.part(run_id, name, i) for i in range(_count_of(completed, name))]})
 
     def run_group(group):
         """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.

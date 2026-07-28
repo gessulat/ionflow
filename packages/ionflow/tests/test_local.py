@@ -7,10 +7,11 @@ from flows import EmptyFanFlow, FlakyFlow
 from schrein.ducklake import load_ducklake
 
 from examples.embed import EmbedDocs
-from ionflow import discovery, query
-from ionflow.publish import publish_lake
+from ionflow import query
+from ionflow.lake import publish_lake, schema_drift
 from ionflow.space import Space
 from ionflow.store import Store
+from ionflow.tui import scan_runs
 
 
 def _sync(flow_cls, src_cfg, dst_cfg):
@@ -38,10 +39,10 @@ def test_run_end_to_end_local(localcfg, repo):
     stats = query.step_stats(con, run_id).fetchall()
     assert len(stats) == 4 and all(r[2] > 0 for r in stats)
 
-    # discovery sees the flow; the catalog schema matches the declarations
+    # a launch sees the flow; the catalog schema matches the declarations
     store = Store.of(localcfg)
-    assert discovery.scan_runs(store) == {EmbedDocs.flow_id()}
-    assert discovery.schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
+    assert scan_runs(store) == {EmbedDocs.flow_id()}
+    assert schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
 
 
 def test_local_publish_and_vanilla_read(localcfg, repo):
@@ -49,8 +50,11 @@ def test_local_publish_and_vanilla_read(localcfg, repo):
     m = EmptyFanFlow.publish(run_id, "agg", "blessed_agg", config=localcfg)
     assert m["run_id"] == run_id
 
+    # the default target is a second Space over the SAME local store — no S3 client
+    lake, target = publish_lake(localcfg)
+    assert target.local_dir == localcfg.local_dir and lake.data_path.startswith(localcfg.local_dir)
+
     # a stock-DuckDB reader attaches the lake straight off the filesystem
-    lake, _ = publish_lake(localcfg)
     con = duckdb.connect()
     load_ducklake(con)
     con.execute(f"ATTACH 'ducklake:{localcfg.local_dir}/{lake.register.key}' AS lake (READ_ONLY)")

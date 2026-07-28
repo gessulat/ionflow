@@ -9,7 +9,7 @@ import pytest
 from schrein.ducklake import load_ducklake
 
 from ionflow import Collect, Fanout, Flow, Table, fanout_key
-from ionflow import catalog as catmod
+from ionflow import lake as lakemod
 from ionflow.query import duck
 from ionflow.space import Space
 from ionflow.store import Store, secret_sql
@@ -64,17 +64,17 @@ def test_backfill_restores_a_lost_catalog(s3cfg, repo):
     space = Space.for_flow(Store.of(s3cfg), CatFlow)
 
     # simulate a clobbered/lost catalog: runs exist, register object gone
-    space.store.delete(f"{space.root}/{catmod.CATALOG_KEY}")
+    space.store.delete(f"{space.root}/{lakemod.CATALOG_KEY}")
     with pytest.raises(RuntimeError, match="catalog-backfill"):
         duck(CatFlow, s3cfg)
 
-    assert catmod.backfill(CatFlow, space) == 1
+    assert lakemod.backfill(CatFlow, space) == 1
     con = duck(CatFlow, s3cfg)
     assert con.sql("SELECT run_id, total FROM agg").fetchall() == [(run_id, 3)]
 
     with pytest.raises(FileExistsError, match="--replace"):
-        catmod.backfill(CatFlow, space)
-    assert catmod.backfill(CatFlow, space, replace=True) == 1
+        lakemod.backfill(CatFlow, space)
+    assert lakemod.backfill(CatFlow, space, replace=True) == 1
 
 
 @pytest.mark.slow

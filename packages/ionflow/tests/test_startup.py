@@ -1,6 +1,11 @@
+"""What a launch does before any flow runs: find flows in code, find flows with
+data, compare declarations against the catalog."""
+
 import textwrap
 
-from ionflow import discovery
+from ionflow.flow import discover_flows
+from ionflow.lake import schema_drift
+from ionflow.tui import scan_runs
 
 
 def _make_pkg(root, name, flows):
@@ -23,7 +28,7 @@ def _make_pkg(root, name, flows):
 def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "mypkg", [("a", "FlowA"), ("b", "FlowB")])
     monkeypatch.syspath_prepend(str(tmp_path))
-    flows = discovery.discover_flows("mypkg")
+    flows = discover_flows("mypkg")
     assert set(flows) == {"mypkg.a.FlowA", "mypkg.b.FlowB"}  # keys are flow_ids
     assert flows["mypkg.a.FlowA"].flow_id() == "mypkg.a.FlowA"
 
@@ -31,7 +36,7 @@ def test_discover_flows_walks_submodules(tmp_path, monkeypatch):
 def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
     _make_pkg(tmp_path, "pkgx", [("m", "OnlyX")])
     monkeypatch.syspath_prepend(str(tmp_path))
-    flows = discovery.discover_flows("pkgx")
+    flows = discover_flows("pkgx")
     assert set(flows) == {"pkgx.m.OnlyX"}  # other packages' flows are filtered out
 
 
@@ -39,10 +44,10 @@ def test_scan_runs(s3cfg):
     from ionflow.store import Store
 
     store = Store.of(s3cfg)
-    assert discovery.scan_runs(store) == set()
+    assert scan_runs(store) == set()
     # key presence is all that matters here; no need for a full flow run
     store.put(f"{s3cfg.prefix}/Alpha/ledger.parquet", b"")
-    assert discovery.scan_runs(store) == {"Alpha"}
+    assert scan_runs(store) == {"Alpha"}
 
 
 def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
@@ -53,9 +58,9 @@ def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
 
     Alpha.run(s3cfg, repo=repo, use_processes=False)
     space = Space.for_flow(Store.of(s3cfg), Alpha)
-    assert discovery.schema_drift(Alpha, space) == []
+    assert schema_drift(Alpha, space) == []
 
     # pretend the code now declares `x` as text instead of the stored bigint
     monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = discovery.schema_drift(Alpha, space)
+    issues = schema_drift(Alpha, space)
     assert any("data" in i and "x" in i for i in issues)

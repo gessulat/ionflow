@@ -67,3 +67,25 @@ This strengthens the decision rather than changing it: the claim that
 mode branches across five modules, and is now enforced by construction —
 no store dispatch exists outside the two subclasses. The migration clause
 below is unchanged, except that `sync.py` is now `Space.sync_to`.
+
+## Note (2026-07-28) — the publish consequence was over-broad
+
+The consequence "`publish --to s3://…` from a local store is refused (one
+client per operation; cross-store publish would need two) — sync first" said
+more than the code ever did, and gave a reason that no longer holds.
+
+The **default** local publish was never refused: `publish` drives two stores
+already (it drains the relation on the source connection and uploads through
+the target store — that is what makes the cross-bucket S3 case work), and with
+`Store`/`Space` a second lake in the same store is ordinary. A local flow
+publishing into its own local publish lake is supported, and
+`test_local.py::test_local_publish_and_vanilla_read` now asserts the target
+store and data path stay inside `local_dir`, rather than leaving it incidental.
+
+The refusal survives, but on a narrower and honest ground: a local-mode config
+carries no endpoint, region or credentials for an `s3://` destination, and
+`Store.of` dispatches on `local_dir` first — so a `--to` target derived from a
+local config would silently resolve back to the local directory rather than to
+the named bucket. Giving `publish` its own `--endpoint`/`--region` is what
+would be needed, and that is exactly what `ionflow sync` already offers;
+`sync` therefore remains the path.

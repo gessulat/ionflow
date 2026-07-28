@@ -1,0 +1,295 @@
+"""Characterization of the two DuckLakes: a flow's catalog and the publish lake.
+
+Written before catalog.py + publish.py + discovery.schema_drift merge into one
+module, so every assertion is stated as observable behaviour — register etags
+(one per CAS commit), snapshot rows, the DDL DuckDB itself renders, the objects
+that end up in the store — rather than as calls into the current internals.
+"""
+
+import contextlib
+import pathlib
+import re
+import tempfile
+
+import duckdb
+import pytest
+from flows import FlakyFlow
+from schrein.ducklake import load_ducklake
+
+from ionflow import Collect, Fanout, Flow, Table, fanout_key, primary_key, shaped
+from ionflow import lake as lakemod
+from ionflow.lake import publish_lake, schema_drift
+from ionflow.query import duck
+from ionflow.space import Space
+from ionflow.store import Store, secret_sql
+
+
+class LSrc(Table):
+    n: int = primary_key
+    label: str | None
+    vec: shaped(float, 2)
+
+
+class LItem(Table):
+    key: str = fanout_key
+    v: int
+
+
+class LAgg(Table):
+    total: int
+
+
+class LakeFlow(Flow):
+    def source(self) -> LSrc:
+        return {"n": [1, 2], "label": ["a", None], "vec": [[1.0, 2.0], [3.0, 4.0]]}
+
+    def items(self, source: LSrc) -> Fanout[LItem]:
+        return [{"key": ["a"], "v": [1]}, {"key": ["b"], "v": [2]}]
+
+    def agg(self, items: Collect[LItem]) -> LAgg:
+        return {"total": [items.aggregate("sum(v)").fetchone()[0]]}
+
+
+class DriftedSrc(Table):
+    n: str  # BIGINT in the catalog
+    extra: int  # not in the catalog at all
+
+
+class DriftedFlow(Flow):
+    """Declares `source` differently from LakeFlow — read against LakeFlow's space."""
+
+    def source(self) -> DriftedSrc:
+        return {"n": ["x"], "extra": [1]}
+
+
+def _space(cfg, flow_cls=LakeFlow):
+    return Space.for_flow(Store.of(cfg), flow_cls)
+
+
+def _etag(lake):
+    """The register's etag — changes exactly once per CAS commit."""
+    return lake.register.read()[1]
+
+
+@contextlib.contextmanager
+def _meta(lake):
+    """Plain (non-ducklake) ATTACH of the catalog artifact, for its own metadata."""
+    blob, _ = lake.register.read()
+    with tempfile.TemporaryDirectory() as tmp:
+        local = pathlib.Path(tmp) / "catalog.ducklake"
+        local.write_bytes(blob)
+        con = duckdb.connect()
+        con.execute(f"ATTACH '{local}' AS meta (READ_ONLY)")
+        try:
+            yield con
+        finally:
+            con.close()
+
+
+def _snapshots(lake):
+    with _meta(lake) as con:
+        return con.sql("SELECT count(*) FROM meta.ducklake_snapshot").fetchone()[0]
+
+
+def _vanilla(cfg, lake, target):
+    """Stock DuckDB attached to a lake read-only — no ionflow on the read path."""
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs")
+    con.execute(secret_sql(cfg))
+    load_ducklake(con)
+    con.execute(f"ATTACH 'ducklake:s3://{target.bucket}/{lake.register.key}' AS lake (READ_ONLY)")
+    return con
+
+
+# --- the flow catalog -------------------------------------------------------
+
+
+def test_genesis_creates_only_the_catalog_and_is_idempotent(s3cfg):
+    space = _space(s3cfg)
+    cat = lakemod.Catalog(space)
+    cat.ensure_tables(LakeFlow)
+
+    # genesis precedes every run object: the catalog is the flow's first key
+    assert space.store.list(space.root) == [f"{space.root}/catalog.ducklake"]
+    assert set(cat.tables()) == {"source", "items", "agg"}
+
+    etag = _etag(cat.lake)
+    lakemod.Catalog(space).ensure_tables(LakeFlow)  # a second launch
+    assert _etag(cat.lake) == etag  # no second CAS commit
+
+
+def test_catalog_table_ddl_is_run_id_first_persisted_types_not_null_only(s3cfg):
+    lakemod.Catalog(_space(s3cfg)).ensure_tables(LakeFlow)
+    with lakemod.Catalog(_space(s3cfg)).lake.read() as con:
+        rows = con.sql(
+            "SELECT table_name, sql, has_primary_key, check_constraint_count "
+            "FROM duckdb_tables() WHERE database_name = 'lake' ORDER BY table_name"
+        ).fetchall()
+    ddl = {r[0]: r[1] for r in rows}
+    # run_id (the hive partition, not a declared column) comes first; `vec` is
+    # DOUBLE[] not DOUBLE[2] — the persisted type parquet round-trips
+    assert ddl["source"] == (
+        'CREATE TABLE "source"(run_id VARCHAR DEFAULT(NULL) NOT NULL, n BIGINT DEFAULT(NULL) NOT NULL, '
+        '"label" VARCHAR DEFAULT(NULL), vec DOUBLE[] NOT NULL);'
+    )
+    # PRIMARY KEY / CHECK stay ionflow-side: the lake carries NOT NULL only
+    assert all(not r[2] and r[3] == 0 for r in rows)
+
+
+def test_registering_zero_parts_commits_nothing_and_leaves_a_typed_table(s3cfg):
+    space = _space(s3cfg)
+    cat = lakemod.Catalog(space)
+    cat.ensure_tables(LakeFlow)
+    etag = _etag(cat.lake)
+
+    cat.register_parts({"items": []})  # an empty fan-out registered nothing
+
+    assert _etag(cat.lake) == etag
+    with cat.lake.read() as con:
+        assert con.sql("SELECT count(*) FROM lake.items").fetchone()[0] == 0
+        assert [r[0] for r in con.sql("DESCRIBE lake.items").fetchall()] == ["run_id", "key", "v"]
+
+
+def test_no_catalog_reads_as_empty_and_never_drifts(s3cfg):
+    space = _space(s3cfg)  # nothing was ever run or created here
+    assert lakemod.Catalog(space).tables() == {}
+    assert schema_drift(LakeFlow, space) == []
+
+
+def test_backfill_registers_only_complete_runs_and_infers_run_id_from_the_path(s3cfg, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
+    monkeypatch.setenv("FLAKY_FAIL", "1")
+    with pytest.raises(RuntimeError, match="boom"):
+        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)  # writes `source` parts, then dies
+    monkeypatch.setenv("FLAKY_FAIL", "0")
+    good = FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+
+    space = _space(s3cfg, FlakyFlow)
+    cat = lakemod.Catalog(space)
+    with pytest.raises(FileExistsError, match="--replace"):
+        lakemod.backfill(FlakyFlow, space)
+
+    cat.discard()  # the recovery situation: run folders intact, register lost
+    assert lakemod.backfill(FlakyFlow, space) == 1  # one COMPLETE run
+
+    con = duck(FlakyFlow, s3cfg)
+    assert {r[0] for r in con.sql("SELECT DISTINCT run_id FROM source").fetchall()} == {good}
+    assert con.sql("SELECT n, total FROM agg").fetchall() == [(3, 6)]
+    con.close()
+
+    assert lakemod.backfill(FlakyFlow, space, replace=True) == 1  # rebuild over an existing catalog
+
+
+def test_schema_drift_reports_missing_changed_and_unexpected_columns(s3cfg, repo):
+    LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+    space = _space(s3cfg)
+
+    assert schema_drift(LakeFlow, space) == []
+    flow = DriftedFlow.flow_id()
+    assert schema_drift(DriftedFlow, space) == [
+        f"{flow}.source: 'n' BIGINT→VARCHAR",
+        f"{flow}.source: missing column 'extra'",
+        f"{flow}.source: unexpected column 'label'",
+        f"{flow}.source: unexpected column 'vec'",
+    ]
+
+
+# --- the publish lake -------------------------------------------------------
+
+
+def test_publish_replaces_atomically_in_one_snapshot(s3cfg, repo):
+    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+    lake, target = publish_lake(s3cfg)
+
+    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
+    first = _snapshots(lake)
+    con = _vanilla(s3cfg, lake, target)
+    assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("a", 1), ("b", 2)]
+    assert [r[0] for r in con.sql("DESCRIBE lake.blessed").fetchall()] == ["key", "v"]  # no run_id
+    con.close()
+
+    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg, where="v > 1")
+    assert _snapshots(lake) == first + 1  # one CAS commit, one snapshot
+    con = _vanilla(s3cfg, lake, target)
+    assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("b", 2)]  # old rows gone
+    con.close()
+
+
+def test_publish_provenance_row_columns_and_values(s3cfg, repo):
+    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+    m = LakeFlow.publish(run_id, "agg", "blessed_agg", config=s3cfg)
+    # the returned dict IS the INSERT tuple: order is load-bearing
+    assert list(m) == ["table_name", "flow", "run_id", "step", "filter", "commit", "published_at"]
+    assert m["filter"] is None and re.fullmatch(r"[0-9a-f]{40}", m["commit"])
+
+    m2 = LakeFlow.publish(run_id, "agg", "blessed_agg", config=s3cfg, where="total > 99")
+    lake, target = publish_lake(s3cfg)
+    con = _vanilla(s3cfg, lake, target)
+    assert [r[:3] for r in con.sql("DESCRIBE lake.publications").fetchall()] == [
+        ("table_name", "VARCHAR", "NO"),
+        ("flow", "VARCHAR", "NO"),
+        ("run_id", "VARCHAR", "NO"),
+        ("step", "VARCHAR", "NO"),
+        ("filter", "VARCHAR", "YES"),
+        ("commit", "VARCHAR", "NO"),
+        ("published_at", "TIMESTAMP", "NO"),
+    ]
+    rows = con.sql("SELECT * FROM lake.publications ORDER BY published_at").fetchall()
+    assert rows == [tuple(m.values()), tuple(m2.values())]  # provenance appends, never replaces
+    con.close()
+
+
+def test_publish_stages_a_uuid_suffixed_file_and_keeps_the_previous_one(s3cfg, repo):
+    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
+    LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
+
+    _, target = publish_lake(s3cfg)
+    staged = target.list(f"{s3cfg.prefix}/published/data/blessed/")
+    # a fresh file per publish, so an earlier snapshot's file stays immutable
+    assert len(staged) == 2
+    assert all(re.fullmatch(rf"{run_id}-[0-9a-f]{{32}}\.parquet", k.rsplit("/", 1)[1]) for k in staged)
+
+
+def test_publish_refuses_unknown_step_bad_names_and_incomplete_runs(s3cfg, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
+    monkeypatch.setenv("FLAKY_FAIL", "1")
+    with pytest.raises(RuntimeError, match="boom"):
+        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+    failed = FlakyFlow.duck(s3cfg).sql("SELECT run_id FROM ledger").fetchone()[0]
+
+    with pytest.raises(RuntimeError, match="did not complete"):
+        FlakyFlow.publish(failed, "source", "blessed", config=s3cfg)
+    with pytest.raises(RuntimeError, match="run not found"):
+        FlakyFlow.publish("nope", "source", "blessed", config=s3cfg)
+    with pytest.raises(ValueError, match="unknown step"):
+        FlakyFlow.publish(failed, "nostep", "blessed", config=s3cfg)
+    for bad in ("no-dashes", "1leading", "publications", ""):
+        with pytest.raises(ValueError, match="invalid published table name"):
+            FlakyFlow.publish(failed, "source", bad, config=s3cfg)
+    # nothing was staged by any refusal
+    assert Store.of(s3cfg).list(f"{s3cfg.prefix}/published/") == []
+
+
+# --- local store ------------------------------------------------------------
+
+
+def test_default_publish_from_a_local_store_stays_in_that_store(localcfg, repo):
+    run_id = LakeFlow.run(localcfg, repo=repo, use_processes=False)
+    lake, target = publish_lake(localcfg)
+    assert target.local_dir == localcfg.local_dir and lake.data_path.startswith(localcfg.local_dir)
+
+    LakeFlow.publish(run_id, "items", "blessed", config=localcfg)
+    con = duckdb.connect()
+    load_ducklake(con)
+    con.execute(f"ATTACH 'ducklake:{localcfg.local_dir}/{lake.register.key}' AS lake (READ_ONLY)")
+    assert con.sql("SELECT key, v FROM lake.blessed ORDER BY key").fetchall() == [("a", 1), ("b", 2)]
+    con.close()
+
+
+def test_publish_from_a_local_store_to_an_s3_dest_is_refused(localcfg, repo):
+    """A local store cannot reach an s3:// destination: the target config keeps
+    local_dir, so `--to` would resolve back to a DirStore. `sync` first."""
+    run_id = LakeFlow.run(localcfg, repo=repo, use_processes=False)
+    with pytest.raises(ValueError, match="cannot publish from a local store"):
+        LakeFlow.publish(run_id, "items", "blessed", config=localcfg, dest="s3://elsewhere/consumers")
