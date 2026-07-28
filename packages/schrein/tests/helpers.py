@@ -6,6 +6,7 @@ import threading
 
 import duckdb
 
+import schrein
 from schrein import DuckLake
 
 PREFIX = "lake"  # every test lake lives at s3://<bucket>/lake/
@@ -13,7 +14,7 @@ PREFIX = "lake"  # every test lake lives at s3://<bucket>/lake/
 
 def error_code(excinfo):
     """AWS error code from a pytest.raises(ClientError) excinfo."""
-    return excinfo.value.response["Error"]["Code"]
+    return schrein.error_code(excinfo.value)
 
 
 def make_client(endpoint):
