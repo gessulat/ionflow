@@ -6,7 +6,7 @@ Tables, R2, BigLake) were considered for the roadmap. Both are out of
 scope permanently — scrapped, not deferred.
 
 Why no adapter: schrein's consumer is ionflow, which is
-DuckLake-native end to end; the spec's own analysis (§2.3) concedes the
+DuckLake-native end to end; the spec's own analysis conceded the
 Iceberg adapter answers a narrower question with a worse pitch — the
 metadata labyrinth (round-trip floor, per-commit file spray) is the
 format itself, so a CAS register only replaces the *service*, not the

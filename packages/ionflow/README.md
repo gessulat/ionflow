@@ -540,5 +540,5 @@ the old id.
 - Set custom ledger columns on non-branch (main-process) steps; branch steps run in
   separate processes and their `self` is not carried back.
 - Steps can read **side inputs** (raw files that aren't step outputs) via `self.config`
-  (e.g. `ionflow.storage.s3_client(self.config)`). Side inputs escape run provenance —
+  (e.g. `ionflow.store.s3_client(self.config)`). Side inputs escape run provenance —
   record their identifiers as ledger columns.

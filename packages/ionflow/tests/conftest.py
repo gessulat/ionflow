@@ -86,8 +86,8 @@ def moto_endpoint():
 
 @pytest.fixture
 def s3cfg(moto_endpoint, request):
-    from ionflow import storage
     from ionflow.config import Config
+    from ionflow.store import s3_client
 
     # unique bucket per test: no teardown needed (server dies with the process)
     cfg = Config(
@@ -98,7 +98,7 @@ def s3cfg(moto_endpoint, request):
         access_key="test",
         secret_key="test",
     )
-    storage.s3_client(cfg).create_bucket(Bucket=cfg.bucket)
+    s3_client(cfg).create_bucket(Bucket=cfg.bucket)
     return cfg
 
 

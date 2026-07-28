@@ -20,8 +20,8 @@ Why:
   ionflow in either direction. `uv sync`/`uv run` at the repo root are
   unaffected; schrein commands run from `schrein/`.
 - Extraction later is mechanical: the `schrein/` directory is already the
-  spec's §11 skeleton; moving it out means copying the tree and dropping the
-  workspace entry.
+  spec's repository skeleton; moving it out means copying the tree and
+  dropping the workspace entry.
 
 Boundaries this imposes: schrein must never import ionflow — the spec is
 deliberately self-contained and the package must stay buildable from it
