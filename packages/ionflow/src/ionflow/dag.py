@@ -32,11 +32,8 @@ class Step:
 
 @dataclass
 class Group:
-    """A fan-out's per-item sub-DAG: the branch steps that run inside one branch.
-
-    Every member of one item runs in a single worker, in dependency order, with
-    independent members concurrent — so an item can reach a late member while
-    another item is still on the first one.
+    """A fan-out's per-item sub-DAG: the branch steps that run inside one branch,
+    all in a single worker, independent members concurrently (0015).
     """
 
     fanout: str
@@ -87,9 +84,9 @@ def _toposort(graph):
 def _roots(steps, order):
     """Branch step -> the fan-out at the root of its branch chain.
 
-    A chained branch step inherits its upstream's item: branch i is the fan-out's
-    i-th item however deep the chain runs, which is what makes the chain runnable
-    (and resumable) per item rather than per stage.
+    A chained branch step inherits its upstream's item — branch i is the fan-out's
+    i-th item however deep the chain runs — so the chain runs, and resumes, per
+    item rather than per stage.
     """
     roots = {}
     for name in order:  # topo: a branch dep is classified before its dependents

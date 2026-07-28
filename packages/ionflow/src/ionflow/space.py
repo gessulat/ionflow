@@ -208,8 +208,7 @@ class Space:
 
     def copy_parts(self, items):
         """Server-side copies of (src_key, dst_key, tag) triples; yields each tag as
-        its copy lands, in submission order. Consume it immediately: a failed copy
-        raises mid-iteration and the tags already yielded are the progress that counts.
+        its copy lands, in submission order (consume it as `Store.copy_many` says).
         """
         tag_of = {dst: tag for _, dst, tag in items}
         return (tag_of[dst] for dst in self.store.copy_many([(s, d) for s, d, _ in items]))
@@ -220,16 +219,10 @@ class Space:
         The COPY runs on a fresh local connection fed by an arrow batch reader —
         its pipeline must never read httpfs (COPY over a partially consumed httpfs
         source deadlocks), and the write itself goes through boto3, never httpfs
-        (a failed `COPY TO s3://` leaves a corrupt part visible, ADR 0010;
-        upload_file does multipart, so parts can exceed S3's 5GB single-PUT cap).
+        (a failed `COPY TO s3://` leaves a corrupt part visible, ADR 0010).
         Nothing touches S3 until the staged file is complete and validated, so a
-        part object's existence implies the part is whole. Types are enforced by the cast
-        projection, NOT NULL / CHECK / PRIMARY KEY by one scan of the written file.
-        `threads`/`memory_mb` keep pooled workers within their
-        share during the write, the pipeline's memory/CPU peak. `fanout_key`
-        (a column name, for keyed fan-out parts) validates that the written file
-        holds exactly one distinct non-NULL value of that column and returns it;
-        otherwise the return value is None.
+        part object's existence implies the part is whole. Returns the item's
+        `fanout_key` value when a key column is given, else None.
         """
         # capability dispatch: covers relations and StepInput (which delegates
         # to_arrow_reader to its relation) without per-wrapper unwrap branches
@@ -249,18 +242,15 @@ class Space:
 
     def sync_to(self, other, flow_cls):
         """Copy this local space's runs + ledger into `other`, then rebuild the
-        catalog there. Returns {copied, runs}.
+        catalog there (decision 0016). Returns {copied, runs}.
 
-        Run folders are immutable, so keys already on the target are skipped and
-        re-running is cheap; ledger rows MERGE through the target's CAS ledger; the
-        catalog is re-derived (it stores absolute data-file locations) — decision 0016.
+        Ledger rows MERGE through the target's CAS ledger; the catalog is
+        re-derived rather than copied — it stores absolute data-file locations.
         """
         from .lake import backfill  # lake builds on Space; the import stays local to break the cycle
 
         if not self.store.local_dir:
             raise ValueError("sync sources a local store; the active config has no local_dir")
-        # the old sync_flow(flow_cls, src_cfg, dst_cfg) derived both layouts from one
-        # flow_cls, so a mismatch was unrepresentable; two Spaces can express it
         if not self.flow_id == other.flow_id == flow_cls.flow_id():
             raise ValueError(
                 f"sync_to: source, target and flow must name one flow, got "

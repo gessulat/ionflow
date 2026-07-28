@@ -33,10 +33,8 @@ def s3_client(cfg):
 
 
 def secret_sql(cfg):
-    """CREATE SECRET statement for the configured S3 endpoint.
-
-    Explicit keys when the config carries them (MinIO/tests), otherwise the
-    standard AWS credential chain. Shared by connect() and the catalog.
+    """CREATE SECRET for the configured S3 endpoint: explicit keys when the config
+    carries them (MinIO/tests), else the standard AWS credential chain.
     """
     parts = ["TYPE s3", f"REGION '{cfg.region}'"]
     if cfg.access_key:
@@ -182,10 +180,8 @@ class Store:
         return _local_connection(threads, memory_mb)
 
     def connect(self, threads=None, memory_mb=None):
-        """Return a DuckDB connection wired to this store.
-
-        Local mode needs neither httpfs nor a secret — DuckDB reads plain paths
-        natively; S3Store overrides.
+        """A DuckDB connection wired to this store; local mode needs neither httpfs
+        nor a secret (DuckDB reads plain paths natively), so S3Store overrides.
         """
         return self.local_connection(threads, memory_mb)
 

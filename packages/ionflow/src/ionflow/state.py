@@ -1,9 +1,6 @@
-"""A run's mutable state and its two bookkeeping records, as types.
-
-`Progress` owns what has been written so far, `RunRecord` the run's own
-identity and outcome; between them they cover everything the runner mutates
-across a run. Both know the on-disk forms — `"step/branch"` in `_meta.json`,
-the ledger's flat row — so the runner never spells them out.
+"""A run's mutable state and its two bookkeeping records, as types: `Progress`
+owns what has been written so far, `RunRecord` the run's identity and outcome.
+Both know their on-disk forms, so the runner never spells them out.
 """
 
 import datetime as dt
@@ -31,11 +28,10 @@ class Slot(typing.NamedTuple):
 class Progress:
     """A run's completed parts: Slot -> the part key written for it.
 
-    Membership and width are O(1). `keys()` is in NUMERIC branch order, which is
-    the order the catalog registers a step's parts in: registration order is the
-    lake's data-file order, hence a reader's scan order, so insertion order —
-    nondeterministic under a worker pool — would make a reducer's `first()`,
-    `arg_max` ties or `list_agg` vary between runs of the same work.
+    `keys()` is in NUMERIC branch order, the order the catalog registers a step's
+    parts in: registration order is the lake's data-file order, hence a reader's
+    scan order, so insertion order — nondeterministic under a worker pool — would
+    make a reducer's `first()`, `arg_max` ties or `list_agg` vary between runs.
 
     >>> p = Progress()
     >>> p.add(Slot("v", 2), "k2"); p.add(Slot("v", 0), "k0"); p.add(Slot("v", 1), "k1")
@@ -70,10 +66,8 @@ class Progress:
 
 @dataclass
 class RunRecord:
-    """One run's bookkeeping, and the two objects it is written to.
-
-    `_meta.json` carries progress and resume provenance, the ledger row carries
-    status; the rest is shared, so `persist` writes both from one state.
+    """One run's bookkeeping, and the two objects `persist` writes it to from one
+    state: `_meta.json` (progress + resume provenance) and the ledger row (status).
     """
 
     run_id: str
@@ -89,10 +83,9 @@ class RunRecord:
 
     @property
     def _ok(self):
-        """A run's outcome — ledger columns, and `_meta.json`'s finish time — exists
-        only once it is complete: publish reads meta's `finished` as the success
-        flag, so a failed run, which does get a ledger finish time, must not
-        claim one there."""
+        """True once the run is complete. Publish reads `_meta.json`'s `finished`
+        as the success flag, so a failed run — which does get a ledger finish
+        time — must not claim one there."""
         return self.status == "complete"
 
     def meta(self, done):

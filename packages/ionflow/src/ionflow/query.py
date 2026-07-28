@@ -66,10 +66,9 @@ def step_stats(con, run_id):
 def is_stale(space, run_id, started):
     """True if a run's heartbeat (metrics flush) has been quiet for STALE_AFTER.
 
-    Skew-free on the primary path (the object's LastModified vs S3's own
-    clock). Runs with no metrics object yet — crashed before the first flush,
-    or predating heartbeats — fall back to comparing `started` against the
-    local clock, a best-effort cross-machine comparison.
+    Skew-free on the primary path (see `Store.age`). With no metrics object yet —
+    crashed before the first flush — it falls back to `started` against the local
+    clock, a best-effort cross-machine comparison.
     """
     age = space.store.age(space.metrics(run_id))
     if age is None:
@@ -84,10 +83,9 @@ def _stale_running(con, space):
 
 
 def ledger_with_liveness(flow_cls, config, con=None):
-    """Ledger relation where stale running runs read 'running (stale?)'.
-
-    A SIGKILL'd run stays `running` in the ledger forever; this derives the
-    honest display state at read time (one HEAD per running run).
+    """Ledger relation where stale running runs read 'running (stale?)' — a
+    SIGKILL'd run stays `running` forever, so liveness is derived at read time
+    (one HEAD per running run).
     """
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
@@ -104,14 +102,11 @@ def ledger_with_liveness(flow_cls, config, con=None):
 
 
 def duck(flow_cls, config):
-    """DuckDB connection with a view per step table + a `ledger` view.
+    """DuckDB connection with a view per step table + `ledger` and `metrics` views.
 
-    Views sit over the flow's DuckLake catalog, attached read-only (a
-    consistent snapshot), so `SELECT ... WHERE run_id = ...` time-travels. A
-    flow that never ran gets typed empty views; runs without a catalog mean
-    the register was lost — refused with a pointer at `catalog-backfill`.
-    `ledger` and `metrics` keep their own plumbing: run bookkeeping and
-    telemetry are not lake data.
+    Step views sit over the flow's DuckLake catalog, attached read-only (one
+    consistent snapshot). `ledger` and `metrics` keep their own plumbing: run
+    bookkeeping and telemetry are not lake data.
     """
     store = Store.of(config)
     con = store.connect()

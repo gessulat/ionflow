@@ -1,16 +1,13 @@
 """Test double for S3: moto with ATOMIC conditional PUTs.
 
-Upstream moto checks If-Match/If-None-Match preconditions and stores the
-object non-atomically: under the threaded werkzeug server, two concurrent
-conditional PUTs against the same etag can BOTH pass the check, and the
-second silently clobbers the first — a lost update real S3 can never
-produce (schrein decision 0003; traced via the CAS hammer tests). A
-process-wide lock around conditional PUTs restores real-S3 semantics;
-unconditional traffic (data uploads, reads) stays concurrent.
+Upstream moto checks the precondition and stores the object non-atomically, so
+under the threaded werkzeug server two conditional PUTs against the same etag
+can BOTH pass and the second silently clobbers the first — a lost update real S3
+can never produce (decision 0003). A process-wide lock around conditional PUTs
+restores real-S3 semantics; unconditional traffic stays concurrent.
 
-Run as a subprocess — never in-process, DuckDB httpfs starves an
-in-process werkzeug server: `python -m schrein.testing <port>`.
-Requires moto (a dev dependency, not a schrein runtime dependency).
+Run as a subprocess — never in-process, DuckDB httpfs starves an in-process
+werkzeug server: `python -m schrein.testing <port>`. Requires moto (dev only).
 """
 
 import sys

@@ -1,17 +1,13 @@
 """A boto3-shaped S3 client over a local directory — the zero-bucket backend.
 
-Implements exactly the client surface schrein (and its users) touch:
-get/put/head/copy/delete/list plus `upload_file`, with conditional PUTs
-(If-Match / If-None-Match) genuinely enforced, so `CasRegister` and
-`DuckLake` run unchanged against a plain directory. Failures raise botocore
-`ClientError` with the S3 error codes callers already handle.
+Conditional PUTs (If-Match / If-None-Match) are genuinely enforced, so
+`CasRegister` and `DuckLake` run unchanged against a plain directory; failures
+raise botocore `ClientError` with the S3 codes callers already handle. `Bucket`
+is accepted and ignored: one client, one root directory, keys relative to it.
 
-Semantics: the `Bucket` argument is accepted and ignored — one client, one
-root directory; keys are paths relative to it. ETags are content MD5 (quoted,
-like S3). Writes are atomic (`os.replace` of a same-directory temp file), and
-conditional writes serialize on one advisory file lock at the root, which
-makes CAS linearizable across processes ON ONE HOST — the point of this
-backend is prototyping without infrastructure, not multi-host coordination.
+Conditional writes serialize on one advisory file lock at the root, which makes
+CAS linearizable across processes ON ONE HOST — this backend is for prototyping
+without infrastructure, not multi-host coordination (decision 0005).
 """
 
 import datetime as dt

@@ -31,9 +31,8 @@ def _column_array(name, value):
 def _ndarray_table(arr, table):
     """Table from a bare ndarray, taking column names from the declared schema.
 
-    Structured arrays carry their own names/dtypes. A plain array maps onto a
-    single declared column (rows = vectors when it's a list column), or
-    positionally onto k columns for an (N, k) array.
+    Structured arrays carry their own names/dtypes; a plain array maps onto a
+    single declared column, or positionally onto k columns for an (N, k) array.
     """
     if arr.dtype.names:
         return pa.table({n: _column_array(n, arr[n]) for n in arr.dtype.names})
@@ -53,11 +52,10 @@ def to_arrow(obj, table=None) -> pa.Table:
     """Materialize a step return value into a pyarrow Table.
 
     Accepts a pyarrow Table, a dict of columns (ndarrays — 2D+ become
-    fixed-size-list columns — lists, or arrow arrays), a numpy structured or
-    bare array (mapped onto `table`'s declared columns), or a polars/pandas
-    DataFrame. numpy dtypes are preserved, so a float32 array stays FLOAT.
-    DuckDB relations are intercepted by `write_part` and streamed, never
-    materialized.
+    fixed-size-list columns — lists, or arrow arrays), a numpy structured or bare
+    array (mapped onto `table`'s declared columns), or a polars/pandas DataFrame;
+    numpy dtypes are preserved. DuckDB relations never reach here — `write_part`
+    streams them.
 
     >>> import numpy as np
     >>> to_arrow({"x": np.arange(2, dtype=np.int16)}).schema.types
@@ -118,10 +116,9 @@ def _np_column(name, arr):
 class StepInput:
     """A step's input: the lazy DuckDB relation plus a numpy accessor.
 
-    Everything a relation offers delegates through (`.filter`, `.aggregate`,
-    `.project`, `.df()`, ...) and returns plain relations. `.np()` is the one
-    addition, and it MATERIALIZES what it touches — the relation itself stays
-    lazy, so filter/project first when the input is large.
+    Relation methods (`.filter`, `.aggregate`, `.project`, `.df()`, ...) delegate
+    through and return plain relations. `.np()` is the one addition, and it
+    MATERIALIZES what it touches — filter/project first when the input is large.
     """
 
     def __init__(self, rel):

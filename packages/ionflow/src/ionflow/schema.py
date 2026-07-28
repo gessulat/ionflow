@@ -60,10 +60,9 @@ class Shaped:
 def shaped(dtype, *shape):
     """Fixed-shape array column: `spectrum: shaped(np.float32, 4096)`.
 
-    Compiles to a DuckDB fixed array / arrow fixed_size_list, so a row with
-    the wrong number of elements fails the write instead of persisting.
-    Parquet has no fixed-size logical type — the shape is enforced at write,
-    and reads (views, `.np()`) see an ordinary list column.
+    Compiles to a DuckDB fixed array, so a row with the wrong number of elements
+    fails the write. Parquet has no fixed-size logical type — the shape is
+    enforced at write, and reads (views, `.np()`) see an ordinary list column.
 
     >>> Column(shaped(float, 3)).duckdb_type()
     'DOUBLE[3]'
@@ -83,11 +82,9 @@ def _is_shaped(dtype):
 def _arrow(dtype) -> pa.DataType:
     """Arrow type for a scalar, (nested) list, or fixed-shape annotation.
 
-    The one recursion over the annotation grammar: every other rendering is a
-    walk over what this returns. List elements are always nullable
-    (DuckDB/Arrow semantics), so `list[T | None]` is unsupported rather than
-    redundant. Raises KeyError on an unknown leaf — `Column` turns that into a
-    TypeError naming the annotation.
+    List elements are always nullable (DuckDB/Arrow semantics), so
+    `list[T | None]` is unsupported rather than redundant. Raises KeyError on an
+    unknown leaf — `Column` turns that into a TypeError naming the annotation.
     """
     if _is_shaped(dtype):  # arrow nests innermost dimension first
         t = _arrow(dtype.dtype)
@@ -115,10 +112,8 @@ def _sql(t: pa.DataType) -> str:
 
 
 def _persist(t: pa.DataType) -> pa.DataType:
-    """Arrow type as parquet round-trips it: fixed-size lists come back plain.
-
-    Recurses through plain lists too, so a fixed size nested under one is
-    dropped as well.
+    """Arrow type as parquet round-trips it: fixed-size lists come back plain,
+    at any nesting depth.
 
     >>> _sql(_persist(_arrow(list[shaped(float, 3)])))
     'DOUBLE[][]'
@@ -152,9 +147,8 @@ def _is_key_dtype(dtype):
 
 primary_key = field(primary_key=True)
 
-# On a `Fanout[...]` step's output table: marks the column that is each fan-out
-# item's identity, enabling keyed resume (`run --resume latest`). See
-# `Table.fanout_key_column`.
+# On a `Fanout[...]` step's output table: marks each item's identity column,
+# enabling keyed resume (`run --resume latest`). See `Table.fanout_key_column`.
 fanout_key = field(fanout_key=True)
 
 
@@ -251,13 +245,10 @@ def _columns_of(cls, force_nullable=False):
 
 
 class _ColumnSet:
-    """An ordered set of typed columns declared as class annotations.
-
-    Shared by `Table` (a step's output schema) and the flow-level sets that
-    carry no table semantics (`LedgerColumns`, `FlowParams`) — hence the split:
-    a params class has columns, but no DDL, no constraints and no rows.
-    `base=True` marks the three intermediate classes, whose own bodies declare
-    nothing and must not be validated as a user's declaration.
+    """An ordered set of typed columns declared as class annotations — shared by
+    `Table` (a step's output schema) and the flow-level sets that carry no table
+    semantics (`LedgerColumns`, `FlowParams`). `base=True` marks the intermediate
+    classes themselves, whose bodies are not a user's declaration.
     """
 
     # Subclass behaviour, read by __init_subclass__ and inherited (so `make`'s
@@ -316,11 +307,8 @@ class Table(_ColumnSet, base=True):
     def fanout_key_column(cls):
         """Name of the column marked `= fanout_key`, or None.
 
-        On a `Fanout[...]` step's output table, this column is each item's
-        stable identity (e.g. source file path + etag): every item must hold
-        exactly one distinct value, and resume matches branch outputs across
-        runs by that value instead of by list position — added items compute,
-        matching items are copied from the origin run.
+        Resume matches branch outputs across runs by this column's value instead
+        of by list position, so every item must hold exactly one distinct value.
 
         >>> class Item(Table):
         ...     path: str = fanout_key
@@ -334,8 +322,7 @@ class Table(_ColumnSet, base=True):
     def persisted_ddl(cls):
         """Column DDL as a reader sees it: persisted types, NOT NULL only.
 
-        What DuckLake tables (catalog and publish lake) are created from —
-        PK/CHECK stay ionflow-side (0003).
+        What DuckLake tables are created from — PK/CHECK stay ionflow-side (0003).
 
         >>> Table.make("T", {"x": int, "s": str | None}).persisted_ddl()
         'x BIGINT NOT NULL, s VARCHAR'
@@ -354,9 +341,8 @@ class Table(_ColumnSet, base=True):
     def empty(cls, con=None):
         """Typed, zero-row stand-in for a table with no parts: SQL text, or a relation on `con`.
 
-        Always the persisted flavour — parquet round-trips a fixed array as a
-        plain list — so an empty fan-out and an empty view agree on types with
-        each other and with every non-empty read.
+        Always the persisted flavour, so an empty fan-out, an empty view and
+        every non-empty read agree on types.
 
         >>> Table.make("T", {"x": int}).empty()
         'SELECT NULL::BIGINT AS x WHERE false'
@@ -384,9 +370,8 @@ class Table(_ColumnSet, base=True):
         """(label, count-of-violations SQL) per constraint, for one scan.
 
         A CHECK passes on NULL (SQL semantics), so violations are `(expr) IS
-        FALSE`; PRIMARY KEY NULLs are caught by its NOT NULL, so DISTINCT-
-        counting handles uniqueness alone (the row-value form covers composite
-        keys).
+        FALSE`; a PRIMARY KEY's NULLs are its NOT NULL's job, leaving DISTINCT-
+        counting to cover uniqueness alone (row-value form: composite keys).
 
         >>> class V(Table):
         ...     id: int = primary_key
@@ -409,9 +394,9 @@ class Table(_ColumnSet, base=True):
     def make(cls, name, cols, **constraints):
         """Build a Table subclass programmatically (wide/generated schemas).
 
-        `cols` maps column name -> type object (real types, not strings —
-        there is no module scope to resolve forward references against);
-        `constraints` attach per column the way defaults do in a class body.
+        `cols` maps name -> a real type object, never a string (there is no module
+        scope to resolve forward references against); `constraints` attach per
+        column the way defaults do in a class body.
 
         >>> Wide = Table.make("Wide", {"id": int, "f0": float | None}, id=primary_key)
         >>> Wide.columns()["id"].primary_key
@@ -440,9 +425,8 @@ class LedgerColumns(_ColumnSet, base=True):
 class FlowParams(_ColumnSet, base=True):
     """Typed run inputs: annotations declare types, class values are defaults.
 
-    A bare type is required; a default (or `T | None`) makes it optional.
-    Only int/float/str/bool — params must round-trip JSON meta, ledger
-    parquet, and `-p key=value` CLI flags.
+    A bare type is required, a default (or `T | None`) optional. Only
+    int/float/str/bool: params round-trip JSON meta, ledger parquet and `-p k=v`.
 
     >>> class P(FlowParams):
     ...     dataset: str
@@ -460,10 +444,8 @@ class FlowParams(_ColumnSet, base=True):
 
     @classmethod
     def arrow_fields(cls):
-        """Ledger fields, all nullable: older runs predate any given param.
-
-        Column nullability stays honest (`resolve` reads it to reject a None
-        for a required param); only the ledger field is widened.
+        """Ledger fields, all nullable (older runs predate any given param); only
+        the field is widened, the Column's own nullability stays honest for `resolve`.
         """
         return [pa.field(n, c.arrow_type, nullable=True) for n, c in cls._columns.items()]
 

@@ -2,18 +2,9 @@
 publish lake (decision 0009).
 
 Both are schrein DuckLakes driven by the same three operations — genesis (typed
-tables), registering pre-uploaded parquet, attaching a snapshot read-only — so
-they live here together. Roles stay strictly separate: a lake only ever receives
-table schemas and data-file registrations; the ledger keeps sole authority over
-run bookkeeping.
-
-A flow's catalog holds one table per step, rows across runs keyed by `run_id`,
-which `ducklake_add_data_files` infers from the parts' hive `run_id=` path
-segments (0012) — parts are never rewritten, so resume's server-side copies
-register under the new run's id for free. The publish lake belongs to no flow:
-consumers attach it read-only and see blessed tables plus the `publications`
-table saying where each came from. Publishing COPIES into the lake's own data
-path, so a published table outlives the run folders it came from.
+tables), registering pre-uploaded parquet, attaching a snapshot read-only. Roles
+stay separate: a lake only ever receives table schemas and data-file
+registrations; the ledger keeps sole authority over run bookkeeping.
 """
 
 import atexit
@@ -68,10 +59,9 @@ class Catalog:
     def tables(self):
         """{table: {column: type}} from the current catalog; {} when none exists.
 
-        Reads through schrein's context manager, NOT `attach_readonly`: this is a
-        transient lookup (once per run via `ensure_tables`, once per flow via
-        `schema_drift`), so its local copy must be freed on the way out rather
-        than held to process exit the way a returned connection's must be.
+        Reads through schrein's context manager, NOT `attach_readonly`: a
+        transient lookup's local copy must be freed on the way out, not held to
+        process exit the way a returned connection's must be.
         """
         if self._blob() is None:
             return {}
@@ -93,10 +83,7 @@ class Catalog:
 
     def register_parts(self, parts):
         """One CAS commit registering {table: [part keys]} (metadata-only), in the
-        given order; each part's run_id comes from its hive path (0012).
-
-        Nothing to register commits nothing — an empty fan-out's typed table
-        already exists from genesis.
+        given order; nothing to register commits nothing.
         """
         uris = {t: [self.space.uri(k) for k in keys] for t, keys in parts.items() if keys}
         if not uris:
@@ -104,10 +91,9 @@ class Catalog:
         self.lake.commit(lambda con: [_add_files(con, t, u, hive=True) for t, u in uris.items()])
 
     def attach_readonly(self, con):
-        """Download-then-attach the catalog on `con` as `lake` (snapshot-consistent).
-
-        The local copy must outlive the connection; the temp dir is reclaimed
-        at process exit. Returns False when no catalog exists yet.
+        """Download-then-attach the catalog on `con` as `lake` (snapshot-consistent);
+        False when no catalog exists yet. The local copy must outlive the
+        connection, so its temp dir is only reclaimed at process exit.
         """
         blob = self._blob()
         if blob is None:
@@ -126,8 +112,7 @@ class Catalog:
 
 def _branch_order(tail):
     """Sort key ordering part_2 before part_10 — a rebuilt catalog must register
-    a step's parts in the same order the runner did (`Progress.keys`), or a
-    reducer's `first()` would see a different row after a backfill.
+    a step's parts in the runner's order, for the reason `Progress.keys` gives.
 
     >>> sorted(["part_10.parquet", "part_2.parquet"], key=_branch_order)
     ['part_2.parquet', 'part_10.parquet']
@@ -138,9 +123,7 @@ def _branch_order(tail):
 
 def backfill(flow_cls, space, replace=False):
     """Rebuild a flow's catalog from its run folders — the recovery path for a
-    lost or corrupt register. One LIST, genesis, one registration commit.
-
-    Returns the number of complete runs registered.
+    lost or corrupt register; returns the number of complete runs registered.
     """
     cat = Catalog(space)
     if cat._blob() is not None:
@@ -162,9 +145,8 @@ def backfill(flow_cls, space, replace=False):
 def schema_drift(flow_cls, space):
     """Messages where a step's declared schema differs from its catalog table.
 
-    One catalog read covers every step. No catalog (flow never ran) means no
-    drift; a step without a table yet was added since genesis and gets one on
-    the next run — also not drift.
+    No catalog (flow never ran) is no drift; nor is a step added since genesis,
+    which gets its table on the next run.
     """
     issues = []
     tables = Catalog(space).tables()
@@ -200,12 +182,8 @@ def publish_lake(config, dest=None):
     """The publish DuckLake at `dest` ('s3://bucket/prefix') or the project
     default; returns (lake, target store).
 
-    A custom `dest` supports publishing across buckets: consumers need read
-    access to that location only, never to the pipeline bucket. The target
-    store is built from `config` with the bucket swapped, so everything
-    downstream flows through the ordinary Store seams. The default lake lives
-    in the config's own store, local or S3 alike — that is a second Space over
-    the same store, not a second mode.
+    A custom `dest` publishes across buckets: the target store is `config` with
+    the bucket swapped, so consumers need read access to that location only.
     """
     if dest:
         if config.local_dir:
@@ -220,9 +198,8 @@ def publish_lake(config, dest=None):
 def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     """Copy `step`'s output from a complete run into the publish lake as `table`.
 
-    Replaces the table's current contents atomically (previous versions stay
-    reachable via DuckLake snapshots) and appends a `publications` row in the
-    same commit. Returns that provenance row.
+    Atomic replace: previous contents stay reachable as DuckLake snapshots, and
+    the returned `publications` provenance row lands in the same commit.
     """
     if step not in flow_cls._dag.steps:
         raise ValueError(f"unknown step '{step}' (steps: {', '.join(flow_cls._dag.steps)})")
