@@ -12,7 +12,7 @@ from multiprocessing import get_context
 import psutil
 
 from . import catalog, metrics
-from .arrow import StepInput, empty_relation
+from .arrow import StepInput
 from .config import Config
 from .git import require_clean
 from .space import Space, utc_now
@@ -86,7 +86,7 @@ def _step_input(con, space, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
         keys = space.part_keys(run_id, dep)
         if not keys:  # empty fan-out: hand the reducer a typed empty table
-            return empty_relation(con, dep_table)
+            return dep_table.empty(con)
     else:
         keys = [space.part(run_id, dep, branch if kind == "BRANCH" else 0)]
     return space.relation(con, keys)

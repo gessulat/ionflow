@@ -146,11 +146,6 @@ class StepInput:
         return _np_column(column, arr)
 
 
-def empty_relation(con, table):
-    """Typed, zero-row DuckDB relation for a table that produced no parts."""
-    return con.from_arrow(table.arrow_schema().empty_table())
-
-
 def read_parquet_sql(glob_uri):
     """SELECT over a glob, with hive `run_id=` partitioning surfaced as a column."""
     return f"SELECT * FROM read_parquet('{glob_uri}', hive_partitioning=true, union_by_name=true)"

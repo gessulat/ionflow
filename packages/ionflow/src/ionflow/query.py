@@ -16,10 +16,10 @@ _EMPTY_LEDGER_SQL = (
 def _empty_view_sql(table):
     """Typed, zero-row SELECT standing in for a table with nothing on S3 yet.
 
-    `run_id` goes last, matching its position in the catalog views.
+    `run_id` is the hive partition's, not the schema's, so it is appended here —
+    last, matching its position in the catalog views.
     """
-    cols = [f"NULL::{c.persisted_type()} AS {name}" for name, c in table.columns().items()]
-    return "SELECT " + ", ".join(cols + ["NULL::VARCHAR AS run_id"]) + " WHERE false"
+    return f"SELECT *, NULL::VARCHAR AS run_id FROM ({table.empty()})"
 
 
 def _view_or_empty(con, name, body, empty_table):

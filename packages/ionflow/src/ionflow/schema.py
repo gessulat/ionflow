@@ -9,17 +9,7 @@ try:  # numpy is optional in core; when installed, np scalar types work as annot
 except ModuleNotFoundError:  # pragma: no cover
     np = None  # ty: ignore[invalid-assignment]
 
-_DUCKDB: dict[type, str] = {
-    int: "BIGINT",
-    float: "DOUBLE",
-    str: "VARCHAR",
-    bool: "BOOLEAN",
-    bytes: "BLOB",
-    dt.datetime: "TIMESTAMP",
-    dt.date: "DATE",
-}
-
-_ARROW: dict[type, pa.DataType] = {
+_LEAF: dict[type, pa.DataType] = {
     int: pa.int64(),
     float: pa.float64(),
     str: pa.string(),
@@ -31,22 +21,33 @@ _ARROW: dict[type, pa.DataType] = {
 
 if np is not None:
     # Narrow numerics matter for measurement data: a float32 point cloud stored
-    # as DOUBLE doubles its size on S3 and in every downstream read.
-    _NUMPY = {
-        np.bool_: ("BOOLEAN", pa.bool_()),
-        np.int8: ("TINYINT", pa.int8()),
-        np.int16: ("SMALLINT", pa.int16()),
-        np.int32: ("INTEGER", pa.int32()),
-        np.int64: ("BIGINT", pa.int64()),
-        np.uint8: ("UTINYINT", pa.uint8()),
-        np.uint16: ("USMALLINT", pa.uint16()),
-        np.uint32: ("UINTEGER", pa.uint32()),
-        np.uint64: ("UBIGINT", pa.uint64()),
-        np.float32: ("FLOAT", pa.float32()),
-        np.float64: ("DOUBLE", pa.float64()),
-    }
-    _DUCKDB |= {t: d for t, (d, _) in _NUMPY.items()}
-    _ARROW |= {t: a for t, (_, a) in _NUMPY.items()}
+    # as DOUBLE doubles its size on S3 and in every downstream read. Listed
+    # explicitly, not scanned off numpy: np.float16 would arrive as arrow
+    # halffloat, which has no DuckDB spelling in _SQL.
+    _NUMPY = (np.bool_, np.float32, np.float64) + tuple(
+        getattr(np, f"{sign}int{bits}") for sign in ("", "u") for bits in (8, 16, 32, 64)
+    )
+    _LEAF |= {t: pa.from_numpy_dtype(t) for t in _NUMPY}
+
+# Arrow leaf -> DuckDB name. Keyed by arrow type, not by annotation, so the
+# numpy widths need no entries of their own (np.float32 -> pa.float32() -> FLOAT).
+_SQL: dict[pa.DataType, str] = {
+    pa.int64(): "BIGINT",
+    pa.float64(): "DOUBLE",
+    pa.string(): "VARCHAR",
+    pa.bool_(): "BOOLEAN",
+    pa.binary(): "BLOB",
+    pa.timestamp("us"): "TIMESTAMP",
+    pa.date32(): "DATE",
+    pa.int8(): "TINYINT",
+    pa.int16(): "SMALLINT",
+    pa.int32(): "INTEGER",
+    pa.uint8(): "UTINYINT",
+    pa.uint16(): "USMALLINT",
+    pa.uint32(): "UINTEGER",
+    pa.uint64(): "UBIGINT",
+    pa.float32(): "FLOAT",
+}
 
 
 class Shaped:
@@ -64,9 +65,9 @@ def shaped(dtype, *shape):
     Parquet has no fixed-size logical type — the shape is enforced at write,
     and reads (views, `.np()`) see an ordinary list column.
 
-    >>> _duckdb_type(shaped(float, 3))
+    >>> Column(shaped(float, 3)).duckdb_type()
     'DOUBLE[3]'
-    >>> _duckdb_type(shaped(float, 4, 3))  # cells are (4, 3) arrays
+    >>> Column(shaped(float, 4, 3)).duckdb_type()  # cells are (4, 3) arrays
     'DOUBLE[3][4]'
     """
     if not shape or not all(isinstance(n, int) and n > 0 for n in shape):
@@ -79,45 +80,52 @@ def _is_shaped(dtype):
     return isinstance(dtype, type) and issubclass(dtype, Shaped)
 
 
-def _duckdb_type(dtype):
-    """DuckDB type for a scalar, (nested) list, or fixed-shape annotation.
+def _arrow(dtype) -> pa.DataType:
+    """Arrow type for a scalar, (nested) list, or fixed-shape annotation.
 
-    List elements are always nullable (DuckDB/Arrow semantics), so
-    `list[T | None]` is unsupported rather than redundant.
-
-    >>> _duckdb_type(list[float])
-    'DOUBLE[]'
-    >>> _duckdb_type(list[list[int]])
-    'BIGINT[][]'
-    >>> import numpy as np
-    >>> _duckdb_type(list[np.float32])
-    'FLOAT[]'
+    The one recursion over the annotation grammar: every other rendering is a
+    walk over what this returns. List elements are always nullable
+    (DuckDB/Arrow semantics), so `list[T | None]` is unsupported rather than
+    redundant. Raises KeyError on an unknown leaf — `Column` turns that into a
+    TypeError naming the annotation.
     """
-    if _is_shaped(dtype):  # DuckDB array suffixes read inside-out: innermost first
-        return _duckdb_type(dtype.dtype) + "".join(f"[{n}]" for n in reversed(dtype.shape))
-    if typing.get_origin(dtype) is list:
-        return _duckdb_type(typing.get_args(dtype)[0]) + "[]"
-    return _DUCKDB[dtype]
-
-
-def _persisted_type(dtype):
-    """DuckDB type as parquet round-trips it: fixed arrays come back as plain lists."""
-    if _is_shaped(dtype):
-        return _persisted_type(dtype.dtype) + "[]" * len(dtype.shape)
-    if typing.get_origin(dtype) is list:
-        return _persisted_type(typing.get_args(dtype)[0]) + "[]"
-    return _DUCKDB[dtype]
-
-
-def _arrow_type(dtype):
-    if _is_shaped(dtype):
-        t = _arrow_type(dtype.dtype)
+    if _is_shaped(dtype):  # arrow nests innermost dimension first
+        t = _arrow(dtype.dtype)
         for n in reversed(dtype.shape):
             t = pa.list_(t, n)
         return t
     if typing.get_origin(dtype) is list:
-        return pa.list_(_arrow_type(typing.get_args(dtype)[0]))
-    return _ARROW[dtype]
+        return pa.list_(_arrow(typing.get_args(dtype)[0]))
+    return _LEAF[dtype]
+
+
+def _sql(t: pa.DataType) -> str:
+    """DuckDB type text for an arrow type; array suffixes read inside-out.
+
+    >>> _sql(_arrow(list[list[int]]))
+    'BIGINT[][]'
+    >>> _sql(_arrow(shaped(float, 4, 3)))
+    'DOUBLE[3][4]'
+    """
+    if pa.types.is_fixed_size_list(t):
+        return _sql(t.value_type) + f"[{t.list_size}]"
+    if pa.types.is_list(t):
+        return _sql(t.value_type) + "[]"
+    return _SQL[t]
+
+
+def _persist(t: pa.DataType) -> pa.DataType:
+    """Arrow type as parquet round-trips it: fixed-size lists come back plain.
+
+    Recurses through plain lists too, so a fixed size nested under one is
+    dropped as well.
+
+    >>> _sql(_persist(_arrow(list[shaped(float, 3)])))
+    'DOUBLE[][]'
+    """
+    if pa.types.is_list(t) or pa.types.is_fixed_size_list(t):
+        return pa.list_(_persist(t.value_type))
+    return t
 
 
 class _Field:
@@ -164,7 +172,7 @@ class Column:
 
     def __init__(self, dtype, *, nullable=False, primary_key=False, check=None, fanout_key=False):
         try:
-            _duckdb_type(dtype)
+            _arrow(dtype)  # validate now; the type itself stays derived from .dtype
         except KeyError:
             raise TypeError(f"unsupported column dtype: {dtype!r}") from None
         if fanout_key and not _is_key_dtype(dtype):
@@ -177,8 +185,13 @@ class Column:
         if fanout_key and self.nullable:
             raise TypeError("a fanout_key column cannot be nullable")
 
+    @property
+    def arrow_type(self):
+        """Declared arrow type — derived, never cached: the drift check mutates `.dtype`."""
+        return _arrow(self.dtype)
+
     def duckdb_type(self):
-        return _duckdb_type(self.dtype)
+        return _sql(self.arrow_type)
 
     def persisted_type(self):
         """Type as parquet round-trips it: fixed arrays come back as plain lists.
@@ -189,7 +202,7 @@ class Column:
         >>> Column(shaped(float, 3)).persisted_type()
         'DOUBLE[]'
         """
-        return _persisted_type(self.dtype)
+        return _sql(_persist(self.arrow_type))
 
     def is_vector(self):
         """True when cells are arrays (`list[T]` / `shaped(...)`), not scalars.
@@ -197,7 +210,8 @@ class Column:
         >>> Column(list[float]).is_vector(), Column(float).is_vector()
         (True, False)
         """
-        return typing.get_origin(self.dtype) is list or _is_shaped(self.dtype)
+        t = self.arrow_type
+        return pa.types.is_list(t) or pa.types.is_fixed_size_list(t)
 
     def ddl(self, name):
         parts = [name, self.duckdb_type()]
@@ -218,13 +232,6 @@ def _strip_optional(hint):
     return hint, False
 
 
-def _arrow_fields(columns, nullable=None):
-    return [
-        pa.field(n, _arrow_type(c.dtype), nullable=c.nullable if nullable is None else nullable)
-        for n, c in columns.items()
-    ]
-
-
 def _columns_of(cls, force_nullable=False):
     cols = {}
     for name, hint in typing.get_type_hints(cls).items():
@@ -243,7 +250,52 @@ def _columns_of(cls, force_nullable=False):
     return cols
 
 
-class Table:
+class _ColumnSet:
+    """An ordered set of typed columns declared as class annotations.
+
+    Shared by `Table` (a step's output schema) and the flow-level sets that
+    carry no table semantics (`LedgerColumns`, `FlowParams`) — hence the split:
+    a params class has columns, but no DDL, no constraints and no rows.
+    `base=True` marks the three intermediate classes, whose own bodies declare
+    nothing and must not be validated as a user's declaration.
+    """
+
+    # Subclass behaviour, read by __init_subclass__ and inherited (so `make`'s
+    # generated subclasses get it too). Underscored: these share a namespace
+    # with column names.
+    _columns: typing.ClassVar[dict] = {}
+    _force_nullable: typing.ClassVar[bool] = False  # LedgerColumns: every column nullable
+    _scalars_only: typing.ClassVar[bool] = False  # FlowParams: int/float/str/bool only
+    _require_columns: typing.ClassVar[bool] = True  # a step output with no columns is a typo
+
+    def __init_subclass__(cls, base=False, **kw):
+        super().__init_subclass__(**kw)
+        if base:
+            return
+        cls._columns = _columns_of(cls, force_nullable=cls._force_nullable)
+        if cls._require_columns and not cls._columns:
+            raise TypeError(f"{cls.__name__} declares no columns")
+        if len([n for n, c in cls._columns.items() if c.fanout_key]) > 1:
+            raise TypeError(f"{cls.__name__}: only one column may be the fanout_key")
+        if cls._scalars_only:
+            for name, col in cls._columns.items():
+                if col.dtype not in (int, float, str, bool):
+                    raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
+
+    @classmethod
+    def columns(cls):
+        return cls._columns
+
+    @classmethod
+    def arrow_fields(cls):
+        return [pa.field(n, c.arrow_type, nullable=c.nullable) for n, c in cls._columns.items()]
+
+    @classmethod
+    def arrow_schema(cls):
+        return pa.schema(cls.arrow_fields())
+
+
+class Table(_ColumnSet, base=True):
     """Declarative table schema; compiles to DuckDB DDL and a pyarrow schema.
 
     Columns are class annotations: a bare type is `NOT NULL`, `T | None` is
@@ -259,18 +311,6 @@ class Table:
     >>> T.arrow_schema().field("a").nullable
     False
     """
-
-    def __init_subclass__(cls, **kw):
-        super().__init_subclass__(**kw)
-        cls._columns = _columns_of(cls)
-        if not cls._columns:
-            raise TypeError(f"{cls.__name__} declares no columns")
-        if len([n for n, c in cls._columns.items() if c.fanout_key]) > 1:
-            raise TypeError(f"{cls.__name__}: only one column may be the fanout_key")
-
-    @classmethod
-    def columns(cls):
-        return cls._columns
 
     @classmethod
     def fanout_key_column(cls):
@@ -311,8 +351,21 @@ class Table:
         return f"CREATE {kw} {name} (\n{lines}\n)"
 
     @classmethod
-    def arrow_schema(cls):
-        return pa.schema(_arrow_fields(cls._columns))
+    def empty(cls, con=None):
+        """Typed, zero-row stand-in for a table with no parts: SQL text, or a relation on `con`.
+
+        Always the persisted flavour — parquet round-trips a fixed array as a
+        plain list — so an empty fan-out and an empty view agree on types with
+        each other and with every non-empty read.
+
+        >>> Table.make("T", {"x": int}).empty()
+        'SELECT NULL::BIGINT AS x WHERE false'
+        """
+        fields = [pa.field(n, _persist(c.arrow_type), nullable=c.nullable) for n, c in cls._columns.items()]
+        if con is not None:
+            return con.from_arrow(pa.schema(fields).empty_table())
+        cols = ", ".join(f"NULL::{_sql(f.type)} AS {f.name}" for f in fields)
+        return f"SELECT {cols} WHERE false"
 
     @classmethod
     def cast_sql(cls, source):
@@ -371,21 +424,7 @@ class Table:
         return type(name, (cls,), {"__annotations__": dict(cols), **constraints})
 
 
-class _ColumnSet:
-    """Shared accessors for annotation-declared column sets (LedgerColumns, FlowParams)."""
-
-    _columns: typing.ClassVar[dict] = {}
-
-    @classmethod
-    def columns(cls):
-        return cls._columns
-
-    @classmethod
-    def arrow_fields(cls):
-        return _arrow_fields(cls._columns)
-
-
-class LedgerColumns(_ColumnSet):
+class LedgerColumns(_ColumnSet, base=True):
     """Per-flow ledger columns, populated during a run (all nullable).
 
     >>> class L(LedgerColumns):
@@ -394,12 +433,11 @@ class LedgerColumns(_ColumnSet):
     'auc'
     """
 
-    def __init_subclass__(cls, **kw):
-        super().__init_subclass__(**kw)
-        cls._columns = _columns_of(cls, force_nullable=True)
+    _force_nullable: typing.ClassVar[bool] = True
+    _require_columns: typing.ClassVar[bool] = False  # an empty declaration is legal here
 
 
-class FlowParams(_ColumnSet):
+class FlowParams(_ColumnSet, base=True):
     """Typed run inputs: annotations declare types, class values are defaults.
 
     A bare type is required; a default (or `T | None`) makes it optional.
@@ -417,17 +455,17 @@ class FlowParams(_ColumnSet):
     ValueError: missing required param: dataset
     """
 
-    def __init_subclass__(cls, **kw):
-        super().__init_subclass__(**kw)
-        cls._columns = _columns_of(cls)
-        for name, col in cls._columns.items():
-            if col.dtype not in (int, float, str, bool):
-                raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
+    _scalars_only: typing.ClassVar[bool] = True
+    _require_columns: typing.ClassVar[bool] = False  # an empty declaration is legal here
 
     @classmethod
     def arrow_fields(cls):
-        """Ledger fields, all nullable: older runs predate any given param."""
-        return _arrow_fields(cls._columns, nullable=True)
+        """Ledger fields, all nullable: older runs predate any given param.
+
+        Column nullability stays honest (`resolve` reads it to reject a None
+        for a required param); only the ledger field is widened.
+        """
+        return [pa.field(n, c.arrow_type, nullable=True) for n, c in cls._columns.items()]
 
     @classmethod
     def resolve(cls, given=None):

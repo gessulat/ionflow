@@ -14,7 +14,6 @@ import re
 import uuid
 from dataclasses import replace
 
-from .arrow import empty_relation
 from .space import Space, utc_now
 from .store import Store, parse_dest
 
@@ -69,7 +68,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     out_table = flow_cls._dag.steps[step].output_table
     keys = space.part_keys(run_id, step)
     con = store.connect()
-    rel = space.relation(con, keys) if keys else empty_relation(con, out_table)
+    rel = space.relation(con, keys) if keys else out_table.empty(con)
     if where:
         rel = rel.filter(where)
     # stage the frozen artifact inside the lake's data path; unique name, so
