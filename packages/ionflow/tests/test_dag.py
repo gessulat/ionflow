@@ -29,7 +29,11 @@ class ETL:
 
 def test_order_topological():
     dag = build_dag(ETL)
-    assert dag.order == ["raw", "chunks", "scored", "result"]
+    assert dag._order == ["raw", "chunks", "scored", "result"]  # every step, deps first
+    assert dag.plan == ["raw", "chunks", "result"]  # the group contracted into its fan-out
+    assert dag.groups["chunks"].order == ["scored"]
+    assert dag.roots == {"scored": "chunks"}
+    assert dag.downstream("chunks") == {"chunks", "scored", "result"}
 
 
 def test_step_kinds():
@@ -59,7 +63,10 @@ class Chained:
 
 def test_chained_branch_shape():
     dag = build_dag(Chained)
-    assert dag.order == ["raw", "chunks", "scored", "polished", "result"]
+    assert dag.plan == ["raw", "chunks", "result"]
+    assert dag.groups["chunks"].order == ["scored", "polished"]
+    # branch identity is inherited: the chained step is named by the same fan-out (0014)
+    assert dag.roots == {"scored": "chunks", "polished": "chunks"}
     # a branch step's output is a plain table, so branching over it is just BRANCH again
     assert not dag.steps["scored"].is_fanout
     assert dag.steps["polished"].param_kinds == {"chunks": "BRANCH", "scored": "BRANCH"}

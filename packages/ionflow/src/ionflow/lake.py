@@ -124,6 +124,18 @@ class Catalog:
         self.space.store.delete(self.key)
 
 
+def _branch_order(tail):
+    """Sort key ordering part_2 before part_10 — a rebuilt catalog must register
+    a step's parts in the same order the runner did (`Progress.keys`), or a
+    reducer's `first()` would see a different row after a backfill.
+
+    >>> sorted(["part_10.parquet", "part_2.parquet"], key=_branch_order)
+    ['part_2.parquet', 'part_10.parquet']
+    """
+    name = tail.removeprefix("part_").removesuffix(".parquet")
+    return (0, int(name)) if name.isdigit() else (1, 0)
+
+
 def backfill(flow_cls, space, replace=False):
     """Rebuild a flow's catalog from its run folders — the recovery path for a
     lost or corrupt register. One LIST, genesis, one registration commit.
@@ -142,8 +154,8 @@ def backfill(flow_cls, space, replace=False):
     for key in space.store.list(space.root + "/runs/run_id="):
         parsed = space.parse_part(key)
         if parsed and parsed[0] in complete and parsed[1] in steps:
-            by_step.setdefault(parsed[1], []).append(key)
-    cat.register_parts({step: sorted(by_step[step]) for step in sorted(by_step)})
+            by_step.setdefault(parsed[1], []).append((parsed[0], _branch_order(parsed[2]), key))
+    cat.register_parts({step: [k for *_, k in sorted(by_step[step])] for step in sorted(by_step)})
     return len(complete)
 
 

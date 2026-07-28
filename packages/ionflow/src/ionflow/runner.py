@@ -16,24 +16,12 @@ from .arrow import StepInput
 from .config import Config
 from .git import require_clean
 from .space import Space, utc_now
+from .state import Progress, RunRecord, Slot
 from .store import Store
 
 
 def _new_run_id(now):
     return f"{int(now.timestamp() * 1000):013d}-{uuid.uuid4().hex[:8]}"
-
-
-def _key(step, branch):
-    return f"{step}/{branch}"
-
-
-def _split(key):
-    step, branch = key.rsplit("/", 1)
-    return step, int(branch)
-
-
-def _count_of(completed, step):
-    return sum(1 for k in completed if _split(k)[0] == step)
 
 
 def _keyed_fanouts(dag):
@@ -42,26 +30,6 @@ def _keyed_fanouts(dag):
     for name, step in dag.steps.items():
         if step.is_fanout and step.output_table.fanout_key_column():
             out[name] = step.output_table.fanout_key_column()
-    return out
-
-
-def _key_roots(dag, keyed):
-    """Per-item step -> the keyed fan-out whose item keys name its branches.
-
-    Branch identity travels down a chain of branch steps: branch i of a step
-    branching over a branch step is still the fan-out's i-th item, so a chained
-    step's parts are reusable by item key exactly like the first one's. Steps
-    of an unkeyed fan-out's group have no such name and stay out.
-    """
-    return {m: g.fanout for g in dag.groups.values() if g.fanout in keyed for m in g.order}
-
-
-def _downstream(dag, root):
-    """`root` plus every step reachable from it through dependency edges."""
-    out = {root}
-    for name in dag.order:  # topo order: a step appears after all its deps
-        if any(d in out for d in dag.steps[name].deps):
-            out.add(name)
     return out
 
 
@@ -323,7 +291,7 @@ def run(
     ledger_cols = flow_cls.ledger_columns()
     custom_fields = flow_cls.custom_ledger_fields()
 
-    completed = set()
+    progress = Progress()
     keyed = _keyed_fanouts(dag)
     fanout_keys = {}  # keyed fan-out -> [item key per branch index]; recorded in meta
     origin_completed, origin_fanout_keys = set(), {}
@@ -331,9 +299,11 @@ def run(
     # re-runs first (the work-list may have changed), branch parts are then
     # matched by item key, and everything else downstream is reused only when
     # the key set is unchanged.
-    keyed_downstream = {f: _downstream(dag, f) for f in keyed} if origin_run_id else {}
+    keyed_downstream = {f: dag.downstream(f) for f in keyed} if origin_run_id else {}
     deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
-    key_roots = _key_roots(dag, keyed) if origin_run_id else {}
+    # Branch identity travels down a chain (0014), so every step of a keyed
+    # fan-out's group is named by that fan-out's item keys, not just the first.
+    key_roots = {m: r for m, r in dag.roots.items() if r in keyed} if origin_run_id else {}
     # Positional reuse is only safe where branch position carries no meaning:
     # everything the fan-out's item keys name is matched by key instead, however
     # deep in a branch chain it sits (positions shift when the work-list does).
@@ -343,12 +313,16 @@ def run(
         return (
             space.part(origin_run_id, name, src_branch),
             space.part(run_id, name, dst_branch),
-            _key(name, dst_branch),
+            Slot(name, dst_branch),
         )
 
-    def copy_same(k):
-        name, br = _split(k)
-        return copy_part(name, br, br)
+    def copy_same(slot):
+        return copy_part(slot.step, slot.branch, slot.branch)
+
+    def record_copies(items):
+        """Record each copy as it lands — a failure mid-iteration keeps the prefix."""
+        for slot in space.copy_parts(items):
+            progress.add(slot, space.part(run_id, *slot))
 
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
@@ -360,8 +334,8 @@ def run(
 
     def reuse_step(name):
         """Copy all of the origin's parts for `name` (positional reuse, deferred)."""
-        if parts := [k for k in origin_completed if _split(k)[0] == name]:
-            completed.update(space.copy_parts([copy_same(k) for k in parts]))
+        if parts := [s for s in origin_completed if s.step == name]:
+            record_copies([copy_same(s) for s in parts])
 
     def reuse_matching_branches(name, root, todo):
         """Copy origin branch parts whose item key matches; return what's left to compute.
@@ -376,11 +350,11 @@ def run(
                 stacklevel=3,
             )
         hits = [
-            (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and _key(name, src[k]) in origin_completed
+            (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and Slot(name, src[k]) in origin_completed
         ]
         if hits:
-            completed.update(space.copy_parts([copy_part(name, j, i) for i, j in hits]))
-        return [i for i in todo if _key(name, i) not in completed]
+            record_copies([copy_part(name, j, i) for i, j in hits])
+        return [i for i in todo if Slot(name, i) not in progress]
 
     if origin_run_id:
         origin = space.read_meta(origin_run_id)
@@ -395,11 +369,10 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        origin_completed = set(origin.get("steps_complete", []))
+        origin_completed = {Slot.parse(k) for k in origin.get("steps_complete", [])}
         origin_fanout_keys = origin.get("fanout_keys") or {}
-        completed.update(  # server-side copies, IO-bound
-            space.copy_parts([copy_same(k) for k in origin_completed if _split(k)[0] not in deferred])
-        )
+        # server-side copies, IO-bound: one batch, one pool
+        record_copies([copy_same(s) for s in origin_completed if s.step not in deferred])
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin.get("params") or {}
@@ -411,40 +384,21 @@ def run(
     for k, v in params.items():
         setattr(flow, k, v)
 
-    def flush(finished=None, custom=None):
-        meta = {
-            "run_id": run_id,
-            "started": started.isoformat(),
-            "finished": finished.isoformat() if finished else None,
-            "commit": commit,
-            "origin_run_id": origin_run_id,
-            "steps_complete": sorted(completed),
-            "fanout_keys": fanout_keys,
-            "params": params,
-            "custom": custom or {},
-        }
-        space.write_meta(run_id, meta)
-
-    def upsert(status, finished=None, custom=None):
-        space.upsert_runs(
-            [
-                {
-                    "run_id": run_id,
-                    "status": status,
-                    "started": started,
-                    "finished": finished,
-                    "commit": commit,
-                    "origin_run_id": origin_run_id,
-                    **params,
-                    **(custom or {}),
-                }
-            ],
-            custom_fields,
-        )
+    record = RunRecord(
+        run_id=run_id,
+        status="running",
+        started=started,
+        finished=None,
+        commit=commit,
+        origin_run_id=origin_run_id,
+        params=params,
+        custom={},
+        fanout_keys=fanout_keys,  # the same dict the fan-out loop fills
+        custom_fields=custom_fields,
+    )
 
     cat.ensure_tables(flow_cls)  # before any run object exists: a run implies a catalog
-    flush()
-    upsert("running")
+    record.persist(space, progress.to_list(), "running")
 
     def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
         metrics.write_parquet(space, space.metrics(run_id), rows)
@@ -458,7 +412,7 @@ def run(
             pass
 
     def register(name):
-        cat.register_parts({name: [space.part(run_id, name, i) for i in range(_count_of(completed, name))]})
+        cat.register_parts({name: progress.keys(name)})
 
     def run_group(group):
         """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.
@@ -466,9 +420,9 @@ def run(
         No barrier between sub-steps: item A can be in the last one while item B
         is still in the first, so only `workers` items are ever in flight.
         """
-        n = _count_of(completed, group.fanout)
+        n = progress.width(group.fanout)
         for member in group.order:  # key-matched copies first: they shrink every item's work
-            left = [i for i in range(n) if _key(member, i) not in completed]
+            left = [i for i in range(n) if Slot(member, i) not in progress]
             # key-matched reuse also needs the step's OTHER inputs identical
             # to the origin's — any other keyed ancestor's change taints them
             root = key_roots.get(member)
@@ -476,7 +430,7 @@ def run(
                 reuse_matching_branches(member, root, left)
         items = {}
         for i in range(n):
-            if pending := [m for m in group.order if _key(m, i) not in completed]:
+            if pending := [m for m in group.order if Slot(m, i) not in progress]:
                 items[i] = pending
         error = None
         if items:
@@ -497,9 +451,10 @@ def run(
                 params,
             )
             for i, members in done.items():  # only the sub-steps that succeeded
-                completed.update(_key(m, i) for m in members)
+                for m in members:
+                    progress.add(Slot(m, i), space.part(run_id, m, i))
         for member in group.order:
-            if _count_of(completed, member) == n:  # sub-steps done for every item stay
+            if progress.width(member) == n:  # sub-steps done for every item stay
                 register(member)  # queryable even when a later one killed the run
         if error:
             raise error
@@ -511,17 +466,13 @@ def run(
                 reuse_step(name)
             group = dag.groups.get(name)
             if step.is_fanout:
-                if not _count_of(completed, name):  # skip if a prior run already produced it
+                if not progress.width(name):  # skip if a prior run already produced it
                     sampler.mark(name)
                     key_col = keyed.get(name)
-                    keys, item_keys, seen = [], [], set()
+                    parts, item_keys, seen = [], [], set()
                     for i, item in enumerate(_call(con, space, flow, step, run_id, None)):
-                        value = space.write_part(
-                            space.part(run_id, name, i),
-                            item,
-                            step.output_table,
-                            fanout_key=key_col,
-                        )
+                        key = space.part(run_id, name, i)
+                        value = space.write_part(key, item, step.output_table, fanout_key=key_col)
                         if key_col:
                             if value in seen:
                                 raise RuntimeError(
@@ -530,34 +481,36 @@ def run(
                                 )
                             seen.add(value)
                             item_keys.append(value)
-                        keys.append(_key(name, i))
+                        parts.append((Slot(name, i), key))
                     if key_col:
                         fanout_keys[name] = item_keys
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
-                    completed.update(keys)
+                    for slot, key in parts:
+                        progress.add(slot, key)
                 register(name)  # before its items run: a failing item leaves the fan-out queryable
                 if group:
                     run_group(group)  # registers its own members, complete ones even on failure
             else:
-                if _key(name, 0) not in completed:
+                if Slot(name, 0) not in progress:
                     sampler.mark(name)
                     result = _call(con, space, flow, step, run_id, None)
-                    space.write_part(space.part(run_id, name, 0), result, step.output_table)
-                    completed.add(_key(name, 0))
+                    key = space.part(run_id, name, 0)
+                    space.write_part(key, result, step.output_table)
+                    progress.add(Slot(name, 0), key)
                 register(name)
-            flush()
+            space.write_meta(run_id, record.meta(progress.to_list()))
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]
         if missing:
             raise RuntimeError(f"ledger columns not populated during run: {missing}")
-        custom = {c: getattr(flow, c) for c in ledger_cols}
-        finished = utc_now()
-        flush(finished, custom)
-        upsert("complete", finished, custom)
+        record.custom = {c: getattr(flow, c) for c in ledger_cols}
+        record.finished = utc_now()
+        record.persist(space, progress.to_list(), "complete")
     except Exception:
-        flush()  # persist partial progress so resume can reuse completed branches
-        upsert("failed", finished=utc_now())
+        # persist partial progress so resume can reuse completed branches
+        record.finished = utc_now()
+        record.persist(space, progress.to_list(), "failed")
         raise
     finally:
         write_metrics()  # success AND failure — failed runs need perf data most

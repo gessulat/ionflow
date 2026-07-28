@@ -33,6 +33,10 @@ them is ever positionally reused. Positional reuse stays for steps whose branch
 position means nothing (collectors, plain steps) and for chains rooted at an
 unkeyed fan-out, which have no names to match by.
 
+> NOTE (2026-07-28): the mapping is now `Dag.roots`, computed once at class
+> definition (it is the same walk `_roots` already did to build the groups); the
+> runner only filters it down to the keyed fan-outs. `runner._key_roots` is gone.
+
 The existing taint rule is unchanged and does the rest: a key-matched part is
 only reused when every *other* keyed ancestor's work-list is also unchanged.
 

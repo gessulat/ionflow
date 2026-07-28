@@ -47,9 +47,18 @@ class Group:
 @dataclass
 class Dag:
     steps: dict[str, Step]
-    order: list[str]
+    _order: list[str]  # global topological order; groups/plan/roots are the public views of it
     groups: dict[str, Group]  # fan-out name -> its per-item sub-DAG (absent if it has none)
     plan: list[str]  # execution order; a fan-out node stands for its whole group
+    roots: dict[str, str]  # branch step -> the fan-out at the root of its chain (0014)
+
+    def downstream(self, root):
+        """`root` plus every step reachable from it through dependency edges."""
+        out = {root}
+        for name in self._order:  # topo order: a step appears after all its deps
+            if any(d in out for d in self.steps[name].deps):
+                out.add(name)
+        return out
 
 
 def branch_dep(step):
@@ -181,4 +190,10 @@ def build_dag(cls) -> Dag:
         raise ValueError(f"cycle detected among steps: {' -> '.join(e.args[1])}") from None
     roots = _roots(steps, order)
     _check_item_inputs(steps, roots)
-    return Dag(steps=steps, order=order, groups=_groups(steps, order, roots), plan=_plan(steps, roots))
+    return Dag(
+        steps=steps,
+        _order=order,
+        groups=_groups(steps, order, roots),
+        plan=_plan(steps, roots),
+        roots=roots,
+    )

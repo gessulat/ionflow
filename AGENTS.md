@@ -111,7 +111,9 @@ ionflow query myproj.flows:Training \
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition. Every branch step belongs to the
   `Group` of the fan-out rooting its chain (0015); `dag.plan` is the step order with
-  each group contracted into its fan-out node, and `group.deps` the intra-item edges.
+  each group contracted into its fan-out node, `dag.roots` maps a branch step to that
+  fan-out (0014), and `group.deps` are the intra-item edges. The global topological
+  order is internal — `dag.downstream(step)` is the one thing that reads it.
   Refused here: a fan-out inside a branch, a per-item step reading a sibling per-item
   step whole (`Collect`/plain instead of `Branch`), a `Branch[...]` over a step that is
   neither, and a fan-in feeding back into its own fan-out (a cycle once contracted).
@@ -154,6 +156,12 @@ ionflow query myproj.flows:Training \
   key-matched too, never positionally reused.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
+- `state.py`   — the run's state as types, orchestrator-side only (nothing here crosses
+  the process boundary). `Slot(step, branch)` names one written part and parses the
+  `"step/branch"` on-disk form; `Progress` maps Slot -> its part key (O(1) membership
+  and `width`, `keys(step)` in NUMERIC branch order — that is the catalog's registration
+  order, so insertion order would make reducers nondeterministic); `RunRecord.persist`
+  writes `_meta.json` and the ledger row from one state.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode item workers each flush their own
