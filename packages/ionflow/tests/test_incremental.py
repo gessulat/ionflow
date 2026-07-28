@@ -4,16 +4,17 @@ import pyarrow as pa
 import pytest
 from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, exec_counts
 
-from ionflow import ConstraintViolation, ledger
-from ionflow.storage import Layout, s3_client, write_part
+from ionflow import ConstraintViolation
+from ionflow.space import Space
+from ionflow.store import Store
 
 
 def _put_n(cfg, n):
-    s3_client(cfg).put_object(Bucket=cfg.bucket, Key="side/n", Body=str(n).encode())
+    Store.of(cfg).put("side/n", str(n).encode())
 
 
 def _put_order(cfg, order):
-    s3_client(cfg).put_object(Bucket=cfg.bucket, Key="side/order", Body=order.encode())
+    Store.of(cfg).put("side/order", order.encode())
 
 
 def _tokens(con, run_id):
@@ -73,11 +74,10 @@ def test_resume_from_origin_without_fanout_keys_recomputes(s3cfg, repo):
     _put_n(s3cfg, 2)
     origin = KeyedFlow.run(s3cfg, repo=repo, use_processes=False)
     # simulate an origin written before fanout keys existed
-    layout = Layout.for_flow(s3cfg, KeyedFlow)
-    client = s3_client(s3cfg)
-    meta = ledger.read_meta(client, s3cfg.bucket, layout.meta(origin))
+    space = Space.for_flow(Store.of(s3cfg), KeyedFlow)
+    meta = space.read_meta(origin)
     del meta["fanout_keys"]
-    ledger.write_meta(client, s3cfg.bucket, layout.meta(origin), meta)
+    space.write_meta(origin, meta)
 
     with pytest.warns(UserWarning, match="no fanout keys"):
         resumed = KeyedFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
@@ -185,14 +185,14 @@ def test_duplicate_fanout_keys_refused(s3cfg, repo):
 
 
 def test_write_part_extracts_and_validates_fanout_key(s3cfg):
-    client = s3_client(s3cfg)
+    space = Space.for_flow(Store.of(s3cfg), KeyedFlow)
     one = pa.table({"g": [0, 0], "item": ["a", "a"]})
-    assert write_part(client, s3cfg.bucket, "k1", one, KeyedItem, fanout_key="item") == "a"
-    assert write_part(client, s3cfg.bucket, "k2", one, KeyedItem) is None
+    assert space.write_part("k1", one, KeyedItem, fanout_key="item") == "a"
+    assert space.write_part("k2", one, KeyedItem) is None
 
     two = pa.table({"g": [0, 1], "item": ["a", "b"]})
     with pytest.raises(ConstraintViolation, match="exactly one distinct"):
-        write_part(client, s3cfg.bucket, "k3", two, KeyedItem, fanout_key="item")
+        space.write_part("k3", two, KeyedItem, fanout_key="item")
     empty = pa.table({"g": pa.array([], pa.int64()), "item": pa.array([], pa.string())})
     with pytest.raises(ConstraintViolation, match="empty"):
-        write_part(client, s3cfg.bucket, "k4", empty, KeyedItem, fanout_key="item")
+        space.write_part("k4", empty, KeyedItem, fanout_key="item")

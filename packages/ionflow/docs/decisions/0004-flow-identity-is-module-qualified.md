@@ -30,3 +30,7 @@ there.
   live in importable modules (already required by process-mode fan-out).
 - Textual widget ids forbid dots, so the TUI slugs flow_ids ("." → "-";
   injective since neither module nor class names may contain "-").
+
+Note (2026-07-28): `Layout.for_flow` is now `Space.for_flow` (`space.py`),
+and a flow_id string can build a Space directly (`Store.space(flow_id)`) —
+which is what branch workers use, for the reason given above.

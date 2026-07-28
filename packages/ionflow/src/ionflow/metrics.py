@@ -5,7 +5,6 @@ import time
 import psutil
 import pyarrow as pa
 
-from . import storage
 from .schema import Table
 
 BASE_INTERVAL = 1.0  # seconds between samples at run start
@@ -150,7 +149,7 @@ def to_table(rows):
     return pa.Table.from_arrays([ts, *rest], schema=SCHEMA)
 
 
-def write_parquet(client, bucket, key, rows):
+def write_parquet(space, key, rows):
     """Upload sample rows as one parquet object (no-op for empty rows)."""
     if rows:
-        client.put_object(Bucket=bucket, Key=key, Body=storage.parquet_bytes(to_table(rows)))
+        space.put(key, to_table(rows))

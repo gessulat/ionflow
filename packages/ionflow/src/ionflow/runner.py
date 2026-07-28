@@ -11,20 +11,12 @@ from multiprocessing import get_context
 
 import psutil
 
-from . import catalog, ledger, metrics
+from . import catalog, metrics
+from .arrow import StepInput, empty_relation
 from .config import Config
 from .git import require_clean
-from .storage import (
-    Layout,
-    StepInput,
-    connect,
-    empty_relation,
-    input_relation,
-    make_client,
-    part_keys,
-    utc_now,
-    write_part,
-)
+from .space import Space, utc_now
+from .store import Store
 
 
 def _new_run_id(now):
@@ -73,13 +65,13 @@ def _downstream(dag, root):
     return out
 
 
-def _latest_complete(client, config, layout):
+def _latest_complete(space):
     """run_id of the newest complete run, or None (ledger rows sort by start time).
 
     Complete only — resuming must never chain onto a failed or running origin.
     `stats`' default "latest" is the looser newest-by-start-time of any status.
     """
-    rows = ledger.read_all(client, config.bucket, layout.ledger)
+    rows = space.read_rows(space.ledger)
     return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
 
 
@@ -90,32 +82,20 @@ def _fair_share(workers):
     return max(1, cores // workers), memory_mb
 
 
-def _step_input(con, client, cfg, layout, run_id, dep, kind, branch, dep_table):
+def _step_input(con, space, run_id, dep, kind, branch, dep_table):
     if kind == "COLLECT":
-        keys = part_keys(client, cfg.bucket, layout, run_id, dep)
+        keys = space.part_keys(run_id, dep)
         if not keys:  # empty fan-out: hand the reducer a typed empty table
             return empty_relation(con, dep_table)
     else:
-        keys = [layout.part(run_id, dep, branch if kind == "BRANCH" else 0)]
-    return input_relation(con, cfg, keys)
+        keys = [space.part(run_id, dep, branch if kind == "BRANCH" else 0)]
+    return space.relation(con, keys)
 
 
-def _call(con, client, cfg, layout, flow, step, run_id, branch):
+def _call(con, space, flow, step, run_id, branch):
     dag = flow.__class__._dag
     kwargs = {
-        dep: StepInput(
-            _step_input(
-                con,
-                client,
-                cfg,
-                layout,
-                run_id,
-                dep,
-                kind,
-                branch,
-                dag.steps[dep].output_table,
-            )
-        )
+        dep: StepInput(_step_input(con, space, run_id, dep, kind, branch, dag.steps[dep].output_table))
         for dep, kind in step.param_kinds.items()
     }
     return step.method(flow, **kwargs)
@@ -139,12 +119,12 @@ def _branch_worker(payload):
             os.environ.setdefault(var, str(threads))
     cfg = Config(**payload["config"])
     flow_cls = _import(payload["file"], payload["flow"])
+    store = Store.of(cfg)
     # identity travels in the payload, never derived here: the re-imported
     # class's __module__ is the loader's ("_mf_flow"), so its own flow_id()
     # is wrong
-    layout = Layout(cfg.prefix, payload["flow_id"])
-    con = connect(cfg, threads=threads, memory_mb=memory_mb)
-    client = make_client(cfg)
+    space = store.space(payload["flow_id"])
+    con = store.connect(threads=threads, memory_mb=memory_mb)
     flow = flow_cls()
     flow.config = cfg
     for k, v in payload["params"].items():
@@ -163,10 +143,10 @@ def _branch_worker(payload):
             sampler.mark("+".join(sorted(active)) or None, branch)
 
     if payload["sample"]:
-        metrics_key = layout.metrics_branch(run_id, group.fanout, branch)
+        metrics_key = space.metrics_branch(run_id, group.fanout, branch)
 
         def flush_metrics(rows):
-            metrics.write_parquet(client, cfg.bucket, metrics_key, rows)
+            metrics.write_parquet(space, metrics_key, rows)
 
         sampler = metrics.Sampler(flush=flush_metrics).start()
     retries = payload["retries"]
@@ -182,11 +162,9 @@ def _branch_worker(payload):
             for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
                 # transient step errors count too, and boto3 already retries at the HTTP layer
                 try:
-                    result = _call(cur, client, cfg, layout, flow, step, run_id, branch)
-                    write_part(
-                        client,
-                        cfg.bucket,
-                        layout.part(run_id, name, branch),
+                    result = _call(cur, space, flow, step, run_id, branch)
+                    space.write_part(
+                        space.part(run_id, name, branch),
                         result,
                         step.output_table,
                         threads=threads,
@@ -271,7 +249,7 @@ def _run_items(flow_cls, cfg, run_id, group, items, max_workers, use_processes, 
         "config": asdict(cfg),
         "file": inspect.getfile(flow_cls),
         "flow": flow_cls.__name__,  # for getattr after the file import
-        "flow_id": flow_cls.flow_id(),  # for the Layout; see _branch_worker
+        "flow_id": flow_cls.flow_id(),  # for the Space; see _branch_worker
         "group": group.fanout,
         "run_id": run_id,
         "sample": use_processes,
@@ -332,13 +310,13 @@ def run(
     commit = require_clean(repo)
     started = utc_now()
     run_id = _new_run_id(started)
-    layout = Layout.for_flow(config, flow_cls)
-    client = make_client(config)
-    origin_run_id = _latest_complete(client, config, layout) if resume == "latest" else resume
+    store = Store.of(config)
+    space = Space.for_flow(store, flow_cls)
+    origin_run_id = _latest_complete(space) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
-    con = connect(config)
-    cat = catalog.Catalog(config, flow_cls)
+    con = store.connect()
+    cat = catalog.Catalog(space)
     flow = flow_cls()
     flow.config = config
     dag = flow_cls._dag
@@ -362,12 +340,11 @@ def run(
     lazy_reuse = {s for s in deferred if s not in keyed and s not in key_roots}
 
     def copy_part(name, src_branch, dst_branch):
-        client.copy_object(
-            Bucket=config.bucket,
-            CopySource={"Bucket": config.bucket, "Key": layout.part(origin_run_id, name, src_branch)},
-            Key=layout.part(run_id, name, dst_branch),
+        return (
+            space.part(origin_run_id, name, src_branch),
+            space.part(run_id, name, dst_branch),
+            _key(name, dst_branch),
         )
-        return _key(name, dst_branch)
 
     def copy_same(k):
         name, br = _split(k)
@@ -384,8 +361,7 @@ def run(
     def reuse_step(name):
         """Copy all of the origin's parts for `name` (positional reuse, deferred)."""
         if parts := [k for k in origin_completed if _split(k)[0] == name]:
-            with ThreadPoolExecutor(max_workers=16) as ex:
-                completed.update(ex.map(copy_same, parts))
+            completed.update(space.copy_parts([copy_same(k) for k in parts]))
 
     def reuse_matching_branches(name, root, todo):
         """Copy origin branch parts whose item key matches; return what's left to compute.
@@ -403,12 +379,11 @@ def run(
             (i, src[k]) for i in todo if (k := fanout_keys[root][i]) in src and _key(name, src[k]) in origin_completed
         ]
         if hits:
-            with ThreadPoolExecutor(max_workers=16) as ex:
-                completed.update(ex.map(lambda ij: copy_part(name, ij[1], ij[0]), hits))
+            completed.update(space.copy_parts([copy_part(name, j, i) for i, j in hits]))
         return [i for i in todo if _key(name, i) not in completed]
 
     if origin_run_id:
-        origin = ledger.read_meta(client, config.bucket, layout.meta(origin_run_id))
+        origin = space.read_meta(origin_run_id)
         if origin is None:
             raise RuntimeError(f"origin run not found: {origin_run_id}")
         if origin.get("commit") != commit:
@@ -422,13 +397,9 @@ def run(
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
         origin_completed = set(origin.get("steps_complete", []))
         origin_fanout_keys = origin.get("fanout_keys") or {}
-        with ThreadPoolExecutor(max_workers=16) as ex:  # server-side copies, IO-bound
-            completed.update(
-                ex.map(
-                    copy_same,
-                    [k for k in origin_completed if _split(k)[0] not in deferred],
-                )
-            )
+        completed.update(  # server-side copies, IO-bound
+            space.copy_parts([copy_same(k) for k in origin_completed if _split(k)[0] not in deferred])
+        )
         for k, v in (origin.get("custom") or {}).items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin.get("params") or {}
@@ -452,23 +423,22 @@ def run(
             "params": params,
             "custom": custom or {},
         }
-        ledger.write_meta(client, config.bucket, layout.meta(run_id), meta)
+        space.write_meta(run_id, meta)
 
     def upsert(status, finished=None, custom=None):
-        ledger.upsert_run(
-            client,
-            config.bucket,
-            layout.ledger,
-            {
-                "run_id": run_id,
-                "status": status,
-                "started": started,
-                "finished": finished,
-                "commit": commit,
-                "origin_run_id": origin_run_id,
-                **params,
-                **(custom or {}),
-            },
+        space.upsert_runs(
+            [
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "started": started,
+                    "finished": finished,
+                    "commit": commit,
+                    "origin_run_id": origin_run_id,
+                    **params,
+                    **(custom or {}),
+                }
+            ],
             custom_fields,
         )
 
@@ -477,7 +447,7 @@ def run(
     upsert("running")
 
     def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
-        metrics.write_parquet(client, config.bucket, layout.metrics(run_id), rows)
+        metrics.write_parquet(space, space.metrics(run_id), rows)
 
     sampler = metrics.Sampler(flush=flush_metrics).start()
 
@@ -488,7 +458,7 @@ def run(
             pass
 
     def register(name):
-        cat.register_step(name, [layout.part(run_id, name, i) for i in range(_count_of(completed, name))])
+        cat.register_step(name, [space.part(run_id, name, i) for i in range(_count_of(completed, name))])
 
     def run_group(group):
         """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.
@@ -545,11 +515,9 @@ def run(
                     sampler.mark(name)
                     key_col = keyed.get(name)
                     keys, item_keys, seen = [], [], set()
-                    for i, item in enumerate(_call(con, client, config, layout, flow, step, run_id, None)):
-                        value = write_part(
-                            client,
-                            config.bucket,
-                            layout.part(run_id, name, i),
+                    for i, item in enumerate(_call(con, space, flow, step, run_id, None)):
+                        value = space.write_part(
+                            space.part(run_id, name, i),
                             item,
                             step.output_table,
                             fanout_key=key_col,
@@ -574,8 +542,8 @@ def run(
             else:
                 if _key(name, 0) not in completed:
                     sampler.mark(name)
-                    result = _call(con, client, config, layout, flow, step, run_id, None)
-                    write_part(client, config.bucket, layout.part(run_id, name, 0), result, step.output_table)
+                    result = _call(con, space, flow, step, run_id, None)
+                    space.write_part(space.part(run_id, name, 0), result, step.output_table)
                     completed.add(_key(name, 0))
                 register(name)
             flush()

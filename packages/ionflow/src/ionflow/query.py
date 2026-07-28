@@ -1,15 +1,9 @@
 import duckdb
 
 from . import catalog, metrics
-from .storage import (
-    Layout,
-    connect,
-    make_client,
-    object_age,
-    read_parquet_sql,
-    uri,
-    utc_now,
-)
+from .arrow import read_parquet_sql
+from .space import Space, utc_now
+from .store import Store
 
 # a flow with no runs has no ledger object; the view must still exist and type
 _EMPTY_LEDGER_SQL = (
@@ -69,7 +63,7 @@ def step_stats(con, run_id):
     """)
 
 
-def is_stale(client, config, layout, run_id, started):
+def is_stale(space, run_id, started):
     """True if a run's heartbeat (metrics flush) has been quiet for STALE_AFTER.
 
     Skew-free on the primary path (the object's LastModified vs S3's own
@@ -77,16 +71,16 @@ def is_stale(client, config, layout, run_id, started):
     or predating heartbeats — fall back to comparing `started` against the
     local clock, a best-effort cross-machine comparison.
     """
-    age = object_age(client, config.bucket, layout.metrics(run_id))
+    age = space.store.age(space.metrics(run_id))
     if age is None:
         age = (utc_now() - started).total_seconds()
     return age > metrics.STALE_AFTER
 
 
-def _stale_running(con, client, config, layout):
+def _stale_running(con, space):
     """run_ids stuck in `running` whose heartbeat went quiet."""
     rows = con.sql("SELECT run_id, started FROM ledger WHERE status = 'running'").fetchall()
-    return [r for r, s in rows if is_stale(client, config, layout, r, s)]
+    return [r for r, s in rows if is_stale(space, r, s)]
 
 
 def ledger_with_liveness(flow_cls, config, con=None):
@@ -95,16 +89,12 @@ def ledger_with_liveness(flow_cls, config, con=None):
     A SIGKILL'd run stays `running` in the ledger forever; this derives the
     honest display state at read time (one HEAD per running run).
     """
+    store = Store.of(config)
+    space = Space.for_flow(store, flow_cls)
     if con is None:  # ledger-only callers (ls) skip the catalog attach entirely
-        con = connect(config)
-        _view_or_empty(
-            con,
-            "ledger",
-            f"SELECT * FROM read_parquet('{uri(config, Layout.for_flow(config, flow_cls).ledger)}')",
-            None,
-        )
-    layout = Layout.for_flow(config, flow_cls)
-    stale = _stale_running(con, make_client(config), config, layout)
+        con = store.connect()
+        _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{space.uri(space.ledger)}')", None)
+    stale = _stale_running(con, space)
     if not stale:
         return con.sql("SELECT * FROM ledger")
     ids = ", ".join(f"'{r}'" for r in stale)
@@ -123,13 +113,14 @@ def duck(flow_cls, config):
     `ledger` and `metrics` keep their own plumbing: run bookkeeping and
     telemetry are not lake data.
     """
-    con = connect(config)
-    layout = Layout.for_flow(config, flow_cls)
-    if catalog.Catalog(config, flow_cls).attach_readonly(con):
+    store = Store.of(config)
+    con = store.connect()
+    space = Space.for_flow(store, flow_cls)
+    if catalog.Catalog(space).attach_readonly(con):
         for name in flow_cls._dag.steps:
             # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
-    elif object_age(make_client(config), config.bucket, layout.ledger) is not None:
+    elif store.age(space.ledger) is not None:
         # runs happened (genesis precedes the first run object) but the register is gone
         raise RuntimeError(
             f"{flow_cls.flow_id()}: runs exist but no catalog does; "
@@ -138,6 +129,6 @@ def duck(flow_cls, config):
     else:  # never ran
         for name, step in flow_cls._dag.steps.items():
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
-    _view_or_empty(con, "metrics", read_parquet_sql(uri(config, layout.metrics_glob)), metrics.Sample)
-    _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{uri(config, layout.ledger)}')", None)
+    _view_or_empty(con, "metrics", read_parquet_sql(space.uri(space.metrics_glob)), metrics.Sample)
+    _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{space.uri(space.ledger)}')", None)
     return con

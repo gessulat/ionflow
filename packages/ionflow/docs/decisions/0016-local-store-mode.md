@@ -51,3 +51,19 @@ rebuild is already a supported, tested path).
   the local entry point (the form points at it).
 - `sync` does not carry the publish lake; re-publish from the synced runs if
   consumers need it on the bucket.
+
+## Note (2026-07-28) — the seams moved into `Store`
+
+The three seams named above are no longer module-level functions in
+`storage.py`. `storage.uri()`, `storage.secret_sql()`, `storage.connect()`,
+`storage.make_client()` and `storage.ducklake_at()` were replaced by
+`store.Store` with two subclasses, `S3Store` and `DirStore` (`store.py`);
+`Store.of(config)` is the single dispatch, and `uri()`, `connect()`,
+`lake()` and `verify()` are the methods that differ between them.
+`storage.py` retains only the documented `s3_client` escape hatch.
+
+This strengthens the decision rather than changing it: the claim that
+"nothing branches on the mode beyond one constructor" had decayed to nine
+mode branches across five modules, and is now enforced by construction —
+no store dispatch exists outside the two subclasses. The migration clause
+below is unchanged, except that `sync.py` is now `Space.sync_to`.

@@ -14,19 +14,9 @@ import re
 import uuid
 from dataclasses import replace
 
-from . import ledger, storage
-from .storage import (
-    Layout,
-    connect,
-    empty_relation,
-    input_relation,
-    make_client,
-    parse_dest,
-    part_keys,
-    uri,
-    utc_now,
-    write_part,
-)
+from .arrow import empty_relation
+from .space import Space, utc_now
+from .store import Store, parse_dest
 
 PUBLISH_PREFIX = "published"  # default lake: s3://<bucket>/<config.prefix>/published/
 PROVENANCE = "publications"  # per-lake provenance table, appended on every publish
@@ -39,20 +29,21 @@ _PROVENANCE_DDL = (
 
 def publish_lake(config, dest=None):
     """The publish DuckLake at `dest` ('s3://bucket/prefix') or the project
-    default; returns (lake, target config).
+    default; returns (lake, target store).
 
     A custom `dest` supports publishing across buckets: consumers need read
     access to that location only, never to the pipeline bucket. The target
-    config is `config` with the bucket swapped, so everything downstream flows
-    through the ordinary make_client/uri seams.
+    store is built from `config` with the bucket swapped, so everything
+    downstream flows through the ordinary Store seams.
     """
     if dest:
         if config.local_dir:
             raise ValueError("cannot publish from a local store to s3://…; `ionflow sync` the flow to a bucket first")
         bucket, prefix = parse_dest(dest, require_prefix=True)
-        target = replace(config, bucket=bucket)
-        return storage.ducklake_at(target, prefix), target
-    return storage.ducklake_at(config, f"{config.prefix}/{PUBLISH_PREFIX}"), config
+        target = Store.of(replace(config, bucket=bucket))
+        return target.lake(prefix), target
+    store = Store.of(config)
+    return store.lake(f"{store.prefix}/{PUBLISH_PREFIX}"), store
 
 
 def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
@@ -66,9 +57,9 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         raise ValueError(f"unknown step '{step}' (steps: {', '.join(flow_cls._dag.steps)})")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or table == PROVENANCE:
         raise ValueError(f"invalid published table name '{table}'")
-    layout = Layout.for_flow(config, flow_cls)
-    client = make_client(config)
-    meta = ledger.read_meta(client, config.bucket, layout.meta(run_id))
+    store = Store.of(config)
+    space = Space.for_flow(store, flow_cls)
+    meta = space.read_meta(run_id)
     if meta is None:
         raise RuntimeError(f"run not found: {run_id}")
     if not meta.get("finished"):
@@ -76,18 +67,19 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
 
     lake, target = publish_lake(config, dest)
     out_table = flow_cls._dag.steps[step].output_table
-    keys = part_keys(client, config.bucket, layout, run_id, step)
-    con = connect(config)
-    rel = input_relation(con, config, keys) if keys else empty_relation(con, out_table)
+    keys = space.part_keys(run_id, step)
+    con = store.connect()
+    rel = space.relation(con, keys) if keys else empty_relation(con, out_table)
     if where:
         rel = rel.filter(where)
     # stage the frozen artifact inside the lake's data path; unique name, so
     # snapshots referencing an earlier publish keep their (immutable) file.
-    # data_path is built from uri() by ducklake_at, so the store key is just
-    # the path with the target's root stripped — no mode branch needed
+    # data_path is built from the target store's uri(), so key_for_uri() inverts
+    # it; the relation stays on the source connection, which is what makes a
+    # cross-bucket publish work
     staged_uri = f"{lake.data_path}{table}/{run_id}-{uuid.uuid4().hex}.parquet"
-    staged = staged_uri.removeprefix(uri(target, ""))
-    write_part(make_client(target), target.bucket, staged, rel, out_table)
+    staged = target.key_for_uri(staged_uri)
+    target.space(flow_cls.flow_id()).write_part(staged, rel, out_table)
 
     ddl_cols = out_table.persisted_ddl()
     row = {

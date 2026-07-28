@@ -12,7 +12,7 @@ runner = CliRunner()
 def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # the CLI treats cwd as the git repo
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
-    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: True)
+    monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: True))
 
     r = runner.invoke(cli.app, ["run", "examples.embed:EmbedDocs"])
     assert r.exit_code == 0, r.output
@@ -37,7 +37,7 @@ def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
 def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
     """run passes the resume/sizing knobs through to runner.run (no flow executed)."""
     monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
-    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: True)
+    monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: True))
     seen = {}
     monkeypatch.setattr(
         "ionflow.runner.run",
@@ -72,7 +72,7 @@ def test_cli_forwards_worker_knobs(s3cfg, monkeypatch):
 
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: setup writes .ionflow/ + .gitignore
-    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: False)
+    monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: False))
 
     # bucket, prefix, endpoint(blank), region, flows(blank), gitignore? -> yes
     r = runner.invoke(cli.app, ["setup"], input="mybucket\nionflow\n\nus-east-1\n\ny\n")
@@ -87,7 +87,7 @@ def test_cli_setup_writes_config(clean_repo, monkeypatch):
 
 def test_cli_setup_local_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)
-    monkeypatch.setattr("ionflow.storage.aws_credentials_available", lambda: False)  # irrelevant locally
+    monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: False))  # irrelevant locally
 
     # local dir (default), flows(blank), gitignore? -> yes
     r = runner.invoke(cli.app, ["setup", "--local"], input="\n\ny\n")

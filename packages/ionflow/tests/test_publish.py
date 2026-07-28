@@ -9,7 +9,7 @@ from flows import EmptyFanFlow, FlakyFlow
 from schrein.ducklake import load_ducklake
 
 from ionflow.publish import publish_lake
-from ionflow.storage import s3_client, secret_sql
+from ionflow.store import Store, secret_sql
 
 
 def _vanilla(cfg, dest=None):
@@ -53,7 +53,7 @@ def test_publish_blesses_replaces_and_records_provenance(s3cfg, repo):
 def test_publish_to_another_bucket(s3cfg, repo):
     run_id = EmptyFanFlow.run(s3cfg, repo=repo, use_processes=False)
     other = f"{s3cfg.bucket}-pub"
-    s3_client(s3cfg).create_bucket(Bucket=other)
+    Store.of(s3cfg).client.create_bucket(Bucket=other)
     dest = f"s3://{other}/consumers/stable"
     EmptyFanFlow.publish(run_id, "agg", "agg", config=s3cfg, dest=dest)
     con = _vanilla(s3cfg, dest)

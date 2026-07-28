@@ -11,7 +11,8 @@ from schrein.ducklake import load_ducklake
 from ionflow import Collect, Fanout, Flow, Table, fanout_key
 from ionflow import catalog as catmod
 from ionflow.query import duck
-from ionflow.storage import Layout, secret_sql
+from ionflow.space import Space
+from ionflow.store import Store, secret_sql
 
 
 class CSrc(Table):
@@ -51,7 +52,7 @@ def test_run_registers_and_vanilla_reader_sees_it(s3cfg, repo):
     v.execute("INSTALL httpfs; LOAD httpfs")
     v.execute(secret_sql(s3cfg))
     load_ducklake(v)
-    root = Layout.for_flow(s3cfg, CatFlow).root
+    root = Space.for_flow(Store.of(s3cfg), CatFlow).root
     v.execute(f"ATTACH 'ducklake:s3://{s3cfg.bucket}/{root}/catalog.ducklake' AS lake (READ_ONLY)")
     assert v.sql("SELECT sum(v) FROM lake.items").fetchone()[0] == 3
     assert v.sql("SELECT count(*) FROM lake.source").fetchone()[0] == 3
@@ -60,21 +61,20 @@ def test_run_registers_and_vanilla_reader_sees_it(s3cfg, repo):
 
 def test_backfill_restores_a_lost_catalog(s3cfg, repo):
     run_id = CatFlow.run(s3cfg, repo=repo, use_processes=False)
-    layout = Layout.for_flow(s3cfg, CatFlow)
-    client = catmod.storage.s3_client(s3cfg)
+    space = Space.for_flow(Store.of(s3cfg), CatFlow)
 
     # simulate a clobbered/lost catalog: runs exist, register object gone
-    client.delete_object(Bucket=s3cfg.bucket, Key=f"{layout.root}/{catmod.CATALOG_KEY}")
+    space.store.delete(f"{space.root}/{catmod.CATALOG_KEY}")
     with pytest.raises(RuntimeError, match="catalog-backfill"):
         duck(CatFlow, s3cfg)
 
-    assert catmod.backfill(CatFlow, s3cfg) == 1
+    assert catmod.backfill(CatFlow, space) == 1
     con = duck(CatFlow, s3cfg)
     assert con.sql("SELECT run_id, total FROM agg").fetchall() == [(run_id, 3)]
 
     with pytest.raises(FileExistsError, match="--replace"):
-        catmod.backfill(CatFlow, s3cfg)
-    assert catmod.backfill(CatFlow, s3cfg, replace=True) == 1
+        catmod.backfill(CatFlow, space)
+    assert catmod.backfill(CatFlow, space, replace=True) == 1
 
 
 @pytest.mark.slow

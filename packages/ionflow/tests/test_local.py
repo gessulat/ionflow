@@ -9,7 +9,14 @@ from schrein.ducklake import load_ducklake
 from examples.embed import EmbedDocs
 from ionflow import discovery, query
 from ionflow.publish import publish_lake
-from ionflow.sync import sync_flow
+from ionflow.space import Space
+from ionflow.store import Store
+
+
+def _sync(flow_cls, src_cfg, dst_cfg):
+    """What `ionflow sync` does: one space per side, then Space.sync_to."""
+    src = Space.for_flow(Store.of(src_cfg), flow_cls)
+    return src.sync_to(Space.for_flow(Store.of(dst_cfg), flow_cls), flow_cls)
 
 
 def test_run_end_to_end_local(localcfg, repo):
@@ -32,8 +39,9 @@ def test_run_end_to_end_local(localcfg, repo):
     assert len(stats) == 4 and all(r[2] > 0 for r in stats)
 
     # discovery sees the flow; the catalog schema matches the declarations
-    assert discovery.scan_runs(localcfg) == {EmbedDocs.flow_id()}
-    assert discovery.schema_drift(EmbedDocs, localcfg) == []
+    store = Store.of(localcfg)
+    assert discovery.scan_runs(store) == {EmbedDocs.flow_id()}
+    assert discovery.schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
 
 
 def test_local_publish_and_vanilla_read(localcfg, repo):
@@ -80,7 +88,7 @@ def test_local_resume_reuses_completed_branches(localcfg, clean_repo, tmp_path, 
 def test_sync_local_history_to_bucket(localcfg, s3cfg, repo):
     first = EmbedDocs.run(localcfg, repo=repo, use_processes=False)
 
-    n = sync_flow(EmbedDocs, localcfg, s3cfg)
+    n = _sync(EmbedDocs, localcfg, s3cfg)
     assert n["runs"] == 1 and n["copied"] > 0
 
     con = EmbedDocs.duck(s3cfg)  # plain S3-mode read of the synced flow
@@ -90,7 +98,7 @@ def test_sync_local_history_to_bucket(localcfg, s3cfg, repo):
 
     # more local history accumulates; re-sync is incremental and idempotent
     second = EmbedDocs.run(localcfg, repo=repo, use_processes=False)
-    n = sync_flow(EmbedDocs, localcfg, s3cfg)
+    n = _sync(EmbedDocs, localcfg, s3cfg)
     assert n["runs"] == 2
     con = EmbedDocs.duck(s3cfg)
     runs = {r[0] for r in con.sql("SELECT DISTINCT run_id FROM summary").fetchall()}
@@ -100,4 +108,4 @@ def test_sync_local_history_to_bucket(localcfg, s3cfg, repo):
 
 def test_sync_requires_local_source(s3cfg):
     with pytest.raises(ValueError, match="local"):
-        sync_flow(EmbedDocs, s3cfg, s3cfg)
+        _sync(EmbedDocs, s3cfg, s3cfg)

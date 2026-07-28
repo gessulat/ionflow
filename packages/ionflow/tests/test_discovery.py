@@ -36,21 +36,26 @@ def test_discover_flows_isolated_by_package(tmp_path, monkeypatch):
 
 
 def test_scan_runs(s3cfg):
-    from ionflow import storage
+    from ionflow.store import Store
 
-    assert discovery.scan_runs(s3cfg) == set()
+    store = Store.of(s3cfg)
+    assert discovery.scan_runs(store) == set()
     # key presence is all that matters here; no need for a full flow run
-    storage.s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key=f"{s3cfg.prefix}/Alpha/ledger.parquet", Body=b"")
-    assert discovery.scan_runs(s3cfg) == {"Alpha"}
+    store.put(f"{s3cfg.prefix}/Alpha/ledger.parquet", b"")
+    assert discovery.scan_runs(store) == {"Alpha"}
 
 
 def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
     from tui_flows.pipeline import Alpha
 
+    from ionflow.space import Space
+    from ionflow.store import Store
+
     Alpha.run(s3cfg, repo=repo, use_processes=False)
-    assert discovery.schema_drift(Alpha, s3cfg) == []
+    space = Space.for_flow(Store.of(s3cfg), Alpha)
+    assert discovery.schema_drift(Alpha, space) == []
 
     # pretend the code now declares `x` as text instead of the stored bigint
     monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = discovery.schema_drift(Alpha, s3cfg)
+    issues = discovery.schema_drift(Alpha, space)
     assert any("data" in i and "x" in i for i in issues)

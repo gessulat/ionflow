@@ -1,8 +1,9 @@
 import importlib
 import pkgutil
 
-from . import catalog, storage
+from . import catalog
 from .flow import Flow
+from .space import Space, flow_id_of_ledger_key
 
 
 def discover_flows(package):
@@ -23,19 +24,13 @@ def discover_flows(package):
     }
 
 
-def scan_runs(config):
+def scan_runs(store):
     """Flow names with a ledger in the store — one LIST of the prefix."""
-    client = storage.make_client(config)
-    prefix = config.prefix + "/"
-    suffix = "/ledger.parquet"
-    return {
-        key[len(prefix) : -len(suffix)]
-        for key in storage.list_keys(client, config.bucket, prefix)
-        if key.endswith(suffix) and "/" not in key[len(prefix) : -len(suffix)]
-    }
+    prefix = store.prefix + "/"
+    return {name for key in store.list(prefix) if (name := flow_id_of_ledger_key(prefix, key)) is not None}
 
 
-def schema_drift(flow_cls, config, client=None):
+def schema_drift(flow_cls, space):
     """Messages where a step's declared schema differs from its catalog table.
 
     One catalog read covers every step. No catalog (flow never ran) means no
@@ -43,7 +38,7 @@ def schema_drift(flow_cls, config, client=None):
     the next run — also not drift.
     """
     issues = []
-    tables = catalog.Catalog(config, flow_cls, client=client).tables()
+    tables = catalog.Catalog(space).tables()
     for name, step in flow_cls._dag.steps.items():
         if name not in tables:
             continue
@@ -60,17 +55,16 @@ def schema_drift(flow_cls, config, client=None):
     return issues
 
 
-def startup_warnings(flows, config, with_data):
+def startup_warnings(flows, store, with_data):
     """Health check: orphaned S3 data + schema drift, as human-readable lines."""
     warnings = []
     for name in sorted(with_data - set(flows)):
         warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
-    client = storage.make_client(config)  # one client serves every flow's check
-    for name, cls in flows.items():
+    for name, cls in flows.items():  # one store serves every flow's check
         if name not in with_data:
             continue
         try:
-            warnings += schema_drift(cls, config, client=client)
+            warnings += schema_drift(cls, Space.for_flow(store, cls))
         except Exception as e:  # noqa: BLE001
             warnings.append(f"{name}: schema check failed: {e}")
     return warnings

@@ -9,3 +9,6 @@ network `INSTALL` (schrein decision 0002). One loader means every
 environment story — seeded cache, wheel fallback for proxied sandboxes and
 offline CI, plain INSTALL elsewhere — is written once, for every
 extension either package ever needs.
+
+Note (2026-07-28): `storage.connect` is now `S3Store.connect`
+(`store.py`); the loader it calls is unchanged.

@@ -2,7 +2,9 @@ import pytest
 import typer
 from flows import EmptyFanFlow, ParamFlow, Src
 
-from ionflow import Flow, FlowParams, cli, ledger, storage
+from ionflow import Flow, FlowParams, cli
+from ionflow.space import Space
+from ionflow.store import Store
 
 
 def test_params_bind_and_land_in_ledger(s3cfg, repo):
@@ -26,10 +28,9 @@ def test_resume_reuses_origin_params(s3cfg, repo):
 def test_resume_ignores_dropped_origin_params(s3cfg, repo):
     origin = EmptyFanFlow.run(s3cfg, repo=repo, use_processes=False)
     # simulate a param recorded by older code, since removed from the declaration
-    client = storage.s3_client(s3cfg)
-    key = storage.Layout.for_flow(s3cfg, EmptyFanFlow).meta(origin)
-    meta = ledger.read_meta(client, s3cfg.bucket, key)
-    ledger.write_meta(client, s3cfg.bucket, key, {**meta, "params": {"gone": 1}})
+    space = Space.for_flow(Store.of(s3cfg), EmptyFanFlow)
+    meta = space.read_meta(origin)
+    space.write_meta(origin, {**meta, "params": {"gone": 1}})
 
     with pytest.warns(UserWarning, match="no longer declared"):
         EmptyFanFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)

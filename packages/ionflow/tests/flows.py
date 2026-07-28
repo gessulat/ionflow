@@ -12,7 +12,8 @@ import uuid
 import pyarrow as pa
 
 from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, fanout_key
-from ionflow.storage import get_bytes_or_none, s3_client
+from ionflow.storage import s3_client
+from ionflow.store import Store
 
 
 class Src(Table):
@@ -100,7 +101,7 @@ def _side_n(config):
 
 def _side_order(config):
     """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
-    blob = get_bytes_or_none(s3_client(config), config.bucket, "side/order")
+    blob = Store.of(config).get("side/order")
     return blob.decode() if blob else "fwd"
 
 

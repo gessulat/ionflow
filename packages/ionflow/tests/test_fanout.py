@@ -54,16 +54,17 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         FlakyFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=3)
 
-    from ionflow import storage
+    from ionflow.space import Space
+    from ionflow.store import Store
 
     con = FlakyFlow.duck(s3cfg)
     run_id = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
 
-    layout = storage.Layout.for_flow(s3cfg, FlakyFlow)
-    keys = storage.list_keys(storage.s3_client(s3cfg), s3cfg.bucket, layout.root + "/runs/")
+    space = Space.for_flow(Store.of(s3cfg), FlakyFlow)
+    keys = space.store.list(space.root + "/runs/")
     # branch 1 raised, yet its worker's final (finally) write landed; one object
     # per item, named for the fan-out — a worker covers the item's whole sub-DAG
-    assert layout.metrics_branch(run_id, "parts", 1) in keys
+    assert space.metrics_branch(run_id, "parts", 1) in keys
     branches = {
         r[0]
         for r in con.sql(
@@ -83,9 +84,9 @@ def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkey
 
 
 def test_steps_read_side_inputs_via_config(s3cfg, repo):
-    from ionflow.storage import s3_client
+    from ionflow.store import Store
 
-    s3_client(s3cfg).put_object(Bucket=s3cfg.bucket, Key="side/n", Body=b"3")
+    Store.of(s3cfg).put("side/n", b"3")
     run_id = SideInputFlow.run(s3cfg, repo=repo, use_processes=False)
 
     con = SideInputFlow.duck(s3cfg)

@@ -2,8 +2,10 @@ import datetime as dt
 
 import pytest
 
-from ionflow import ledger, metrics, query, storage
+from ionflow import metrics, query
+from ionflow.arrow import table_from_bytes
 from ionflow.dag import build_dag
+from ionflow.store import Store
 
 
 def test_mark_labels_samples():
@@ -80,22 +82,17 @@ def test_stop_joins_the_thread():
 
 
 def test_stale_running_detection(s3cfg):
-    client = storage.s3_client(s3cfg)
-    layout = storage.Layout(s3cfg.prefix, "F")
+    store = Store.of(s3cfg)
+    space = store.space("F")
     old = dt.datetime(2020, 1, 1)
     for run_id in ("dead", "alive"):
-        ledger.upsert_run(
-            client,
-            s3cfg.bucket,
-            layout.ledger,
-            {"run_id": run_id, "status": "running", "started": old},
-        )
+        space.upsert_runs([{"run_id": run_id, "status": "running", "started": old}])
     # a fresh metrics flush is the heartbeat; "dead" never wrote one
-    metrics.write_parquet(client, s3cfg.bucket, layout.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)])
+    metrics.write_parquet(space, space.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)])
 
-    con = storage.connect(s3cfg)
-    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{storage.uri(s3cfg, layout.ledger)}')")
-    stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the layout above
+    con = store.connect()
+    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{space.uri(space.ledger)}')")
+    stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the space above
     rel = query.ledger_with_liveness(stub, s3cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())
     assert statuses == {"dead": "running (stale?)", "alive": "running"}
@@ -103,10 +100,11 @@ def test_stale_running_detection(s3cfg):
 
 def test_write_parquet_roundtrip(s3cfg):
     rows = [(1000.0, "load", None, 512, 4, 0.5, 0.1), (1001.0, "score", 2, 1024, 8, 1.5, 0.2)]
-    client = storage.s3_client(s3cfg)
-    metrics.write_parquet(client, s3cfg.bucket, "mf/F/runs/run_id=r1/_metrics.parquet", rows)
-    blob = storage.get_bytes_or_none(client, s3cfg.bucket, "mf/F/runs/run_id=r1/_metrics.parquet")
-    table = storage.table_from_bytes(blob)
+    store = Store.of(s3cfg)
+    space = store.space("F")
+    metrics.write_parquet(space, space.metrics("r1"), rows)
+    blob = store.get("mf/F/runs/run_id=r1/_metrics.parquet")
+    table = table_from_bytes(blob)
     assert table.schema.equals(metrics.SCHEMA)
     assert table.column("rss").to_pylist() == [512, 1024]
     assert table.column("branch").to_pylist() == [None, 2]

@@ -22,6 +22,7 @@ from textual.widgets import (
 
 from . import discovery, git, query
 from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
+from .store import Store
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
 
@@ -226,8 +227,9 @@ class IonflowTUI(App):
         except Exception as e:  # noqa: BLE001
             flows, import_warnings = {}, [f"could not import flows '{cfg.flows}': {e}"]
         try:
-            with_ledger = discovery.scan_runs(cfg)
-            warnings = import_warnings + discovery.startup_warnings(flows, cfg, with_ledger)
+            store = Store.of(cfg)
+            with_ledger = discovery.scan_runs(store)
+            warnings = import_warnings + discovery.startup_warnings(flows, store, with_ledger)
             with_data = set(flows) & with_ledger
         except Exception as e:  # noqa: BLE001
             with_data, warnings = set(), import_warnings + [f"could not read S3: {e}"]

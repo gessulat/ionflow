@@ -165,25 +165,42 @@ ionflow query myproj.flows:Training \
   them. Sub-steps running concurrently in one worker share one label
   (`upload_db+search`) and NULL means the worker is between sub-steps; in thread
   mode the group answers to the fan-out's name (one process interleaves items).
-- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections.
-  `make_client(cfg)` is the one client factory (boto3 or `LocalClient`);
-  `uri()`/`connect()`/`ducklake_at()` are the only spots that know local vs S3. **Writes go through boto3, never DuckDB `COPY TO s3://`**
-  (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0010).
+- `store.py`   — one object store: bytes by key plus the DuckDB wiring to read them.
+  `Store.of(cfg)` is **the only place local-vs-S3 is decided** (`S3Store` /
+  `DirStore` over boto3 or schrein's `LocalClient`); it holds the one client,
+  mints fresh connections (`connect`/`local_connection`, never memoized), and
+  builds CAS registers (`cas`) and DuckLakes (`lake`). `uri()`/`key_for_uri()`
+  are the key<->URI pair; `copy_many` is a **generator** (a failed copy leaves
+  the already-yielded prefix as real resume progress). `s3_client` stays
+  module-level — the documented side-input hatch, re-exported by the
+  `storage.py` shim, which is all that module still is.
+- `space.py`   — `Space`: one flow's region of a store — the key scheme both ways
+  (`part`/`meta`/`metrics`/`ledger` <-> `parse_part`) and the verbs over those keys.
+  Identity is the **`flow_id` string, never a class** (branch workers re-import the
+  flow module under a loader name). Frozen dataclass, no I/O to construct, so build
+  one wherever; the *store* is the per-command/per-worker object.
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
-  scan (NOT NULL / CHECK / PK) of that file, then `upload_file` (multipart —
-  parts may exceed S3's 5GB single-PUT cap). A COPY pipeline must NEVER read
+  scan (NOT NULL / CHECK / PK) of that file, then `Store.upload` (multipart above
+  8MB — parts may exceed S3's 5GB single-PUT cap). **Writes go through boto3,
+  never DuckDB `COPY TO s3://`** (a failed httpfs write finalizes anyway, leaving
+  a corrupt part visible — 0010). A COPY pipeline must NEVER read
   httpfs (deadlocks on partially consumed sources); relations are drained
   through `to_arrow_reader` instead. Violations raise `ConstraintViolation`.
+  Also the ledger (append-only `ledger.parquet` via `upsert_runs`/`amend`, whose
+  closure rebuilds the whole parquet from `old` on every CAS attempt — 0011, roles
+  stay separate: the ledger is run bookkeeping, never a catalog), per-run
+  `_meta.json` (`read_meta`/`write_meta`), and `sync_to` (local -> S3 migration:
+  copy immutable run folders, MERGE ledger rows idempotently by run_id, rebuild
+  the target catalog via `catalog.backfill` — a DuckLake catalog holds absolute
+  paths, so it is re-derived, never copied). Timestamps are naive UTC (`utc_now`;
+  tz-aware parquet needs pytz in DuckDB).
+- `arrow.py`   — pure marshalling, no store knowledge.
   `to_arrow` auto-converts numpy step returns (dict of ndarrays — 2D+ nest as
   fixed-size lists — structured arrays, bare arrays mapped onto declared columns;
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `ledger.py`  — append-only `ledger.parquet`; the CAS loop is `schrein.CasRegister`
-  (0011 — roles stay separate: the ledger is run bookkeeping, never a catalog).
-  Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
-  in DuckDB).
 - `catalog.py` — every flow's DuckLake catalog (0012 — the only
   read/registration mode; no config flag): at the flow root, one table per
   step, run_id inferred from the parts' hive paths at registration (parts
@@ -201,9 +218,6 @@ ionflow query myproj.flows:Training \
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
   Exactly one of `bucket` / `local_dir` (relative `local_dir` anchors at the repo root).
-- `sync.py`    — local -> S3 migration: copy immutable run folders, MERGE ledger rows
-  (CAS, idempotent by run_id), rebuild the target catalog via `catalog.backfill`
-  (a DuckLake catalog holds absolute paths, so it is re-derived, never copied).
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
 
 ## Conventions & gotchas
