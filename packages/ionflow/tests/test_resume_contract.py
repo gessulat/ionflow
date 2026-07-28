@@ -13,7 +13,16 @@ import tempfile
 
 import duckdb
 import pytest
-from flows import ORDER_ITEMS, FlakyFlow, IntKeyFlow, OrderFlow, PartialFanFlow, PipelineFlow, ProbeFlow
+from flows import (
+    ORDER_ITEMS,
+    FlakyFlow,
+    IntKeyFlow,
+    OrderFlow,
+    PartialFanFlow,
+    PipelineFlow,
+    ProbeFlow,
+    exec_counts,
+)
 from schrein.ducklake import CATALOG_KEY
 
 from examples.embed import EmbedDocs
@@ -154,8 +163,8 @@ def test_resume_reads_a_hand_written_origin_meta(s3cfg, repo, tmp_path, monkeypa
     )
     resumed = FlakyFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    per_branch = {g: sum(1 for f in tmp_path.iterdir() if f.name.startswith(f"exec_{g}_")) for g in (0, 1, 2)}
-    assert per_branch == {0: 1, 1: 2, 2: 1}  # only the branch the meta omitted re-ran
+    # only the branch the meta omitted re-ran
+    assert exec_counts(tmp_path, "work") == {"0": 1, "1": 2, "2": 1}
 
     con = FlakyFlow.duck(s3cfg)
     assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)

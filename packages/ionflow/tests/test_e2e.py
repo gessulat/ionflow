@@ -1,3 +1,5 @@
+import pathlib
+
 import pytest
 
 from examples.embed import EmbedDocs
@@ -5,9 +7,9 @@ from ionflow import runner
 from ionflow.git import DirtyRepoError
 
 
-def test_run_end_to_end(s3cfg, repo):
-    run_id = EmbedDocs.run(s3cfg, repo=repo, use_processes=False)
-    con = EmbedDocs.duck(s3cfg)
+def test_run_end_to_end(anycfg, repo):
+    run_id = EmbedDocs.run(anycfg, repo=repo, use_processes=False)
+    con = EmbedDocs.duck(anycfg)
 
     # fan-out produced one part per source, aggregated back to a summary
     summary = con.sql(f"SELECT * FROM summary WHERE run_id = '{run_id}'").fetchall()
@@ -40,6 +42,16 @@ def test_run_end_to_end(s3cfg, repo):
     assert len(stats) == 4
     assert all(r[2] > 0 for r in stats)  # peak_rss_mb
 
+    # a launch sees the flow; the catalog schema matches the declarations
+    from ionflow.lake import schema_drift
+    from ionflow.space import Space
+    from ionflow.store import Store
+    from ionflow.tui import scan_runs
+
+    store = Store.of(anycfg)
+    assert scan_runs(store) == {EmbedDocs.flow_id()}
+    assert schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
+
 
 @pytest.mark.slow
 def test_run_with_processes(s3cfg, repo):
@@ -60,23 +72,18 @@ def test_run_with_processes(s3cfg, repo):
     assert totals[5] == 2  # processes
 
 
-def test_dirty_git_refused(s3cfg, tmp_path):
-    import subprocess
-
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    (tmp_path / "dirty.txt").write_text("x")  # untracked -> dirty
+def test_dirty_git_refused(s3cfg, clean_repo):
+    pathlib.Path(clean_repo, "dirty.txt").write_text("x")  # untracked -> dirty
     with pytest.raises(DirtyRepoError):
-        EmbedDocs.run(s3cfg, repo=str(tmp_path))
+        EmbedDocs.run(s3cfg, repo=clean_repo)
 
 
 def test_resume_refuses_commit_drift(s3cfg, clean_repo):
-    from pathlib import Path
-
     from conftest import _git
     from flows import EmptyFanFlow
 
     origin = EmptyFanFlow.run(s3cfg, repo=clean_repo, use_processes=False)
-    Path(clean_repo, "flow.py").write_text("# changed\n")
+    pathlib.Path(clean_repo, "flow.py").write_text("# changed\n")
     _git(clean_repo, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix")
 
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):

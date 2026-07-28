@@ -22,10 +22,6 @@ class Src(Table):
     g: int
 
 
-class Part(Table):
-    g: int
-
-
 class Out(Table):
     g: int
     doubled: int
@@ -42,12 +38,12 @@ class FlakyFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1, 2)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         g = parts.project("g").fetchone()[0]
-        pathlib.Path(os.environ["FLAKY_DIR"], f"exec_{g}_{uuid.uuid4().hex}").touch()
+        _mark("work", g)
         if g == 1 and os.environ.get("FLAKY_FAIL") == "1":
             raise RuntimeError("boom on g=1")
         return parts.project("g, g * 2 AS doubled")
@@ -62,10 +58,10 @@ class RetryFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         g = parts.project("g").fetchone()[0]
         marker = pathlib.Path(os.environ["RETRY_DIR"], f"tried_{g}")
         if not marker.exists():
@@ -86,10 +82,10 @@ class ParamFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         return parts.project(f"g, g * {self.mult} AS doubled")  # param read in a branch
 
     def agg(self, work: Collect[Out]) -> Agg:
@@ -110,10 +106,10 @@ def _side_order(config):
 class SideInputFlow(Flow):
     """Reads a side object via self.config — in a root step and inside a branch."""
 
-    def items(self) -> Fanout[Part]:
+    def items(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(_side_n(self.config))]
 
-    def work(self, items: Branch[Part]) -> Out:
+    def work(self, items: Branch[Src]) -> Out:
         n = _side_n(self.config)  # branch workers bind config on their own flow instance
         return items.project(f"g, g * {n} AS doubled")
 
@@ -132,19 +128,19 @@ class TwoGroupFlow(Flow):
     def side_a(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(2)]
 
-    def side_b(self) -> Fanout[Part]:
+    def side_b(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(5)]
 
-    def items_a(self) -> Fanout[Part]:
+    def items_a(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(2)]
 
-    def items_b(self) -> Fanout[Part]:
+    def items_b(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(2)]
 
-    def work_a(self, items_a: Branch[Part], side_a: Collect[Src]) -> Out:
+    def work_a(self, items_a: Branch[Src], side_a: Collect[Src]) -> Out:
         return items_a.project(f"g, {side_a.aggregate('count(*)').fetchone()[0]} AS doubled")
 
-    def work_b(self, items_b: Branch[Part], side_b: Collect[Part]) -> Out:
+    def work_b(self, items_b: Branch[Src], side_b: Collect[Src]) -> Out:
         return items_b.project(f"g, {side_b.aggregate('count(*)').fetchone()[0]} AS doubled")
 
 
@@ -209,9 +205,12 @@ class Refined(Table):
     quadrupled: int
 
 
+_MARK_DIRS = ("CHAIN_DIR", "PIPE_DIR", "FLAKY_DIR")  # one per flow family; never set together
+
+
 def _mark(step, item):
     """Record one execution of `step` for `item`, if a marker dir is configured."""
-    if d := os.environ.get("CHAIN_DIR") or os.environ.get("PIPE_DIR"):
+    if d := next((v for n in _MARK_DIRS if (v := os.environ.get(n))), None):
         pathlib.Path(d, f"exec|{step}|{item}|{uuid.uuid4().hex}").touch()
 
 
@@ -235,17 +234,17 @@ class ChainFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return [source.filter(f"g = {g}") for g in (0, 1, 2)]
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         g = parts.project("g").fetchone()[0]
         _mark("work", g)
         if os.environ.get("CHAIN_FAIL") == f"work:{g}":
             raise RuntimeError(f"boom on work g={g}")
         return parts.project("g, g * 2 AS doubled")
 
-    def refine(self, parts: Branch[Part], work: Branch[Out]) -> Refined:
+    def refine(self, parts: Branch[Src], work: Branch[Out]) -> Refined:
         """Two branch inputs at the same index: the fan-out item and `work`'s output."""
         g = parts.project("g").fetchone()[0]
         _mark("refine", g)
@@ -417,10 +416,10 @@ class EmptyFanFlow(Flow):
     def source(self) -> Src:
         return pa.table({"g": [0, 1, 2]})
 
-    def parts(self, source: Src) -> Fanout[Part]:
+    def parts(self, source: Src) -> Fanout[Src]:
         return []
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         return parts.project("g, g * 2 AS doubled")
 
     def agg(self, work: Collect[Out]) -> Agg:
@@ -442,10 +441,10 @@ class OrderFlow(Flow):
     the order parts are registered in observable. ORDER_DIR holds the markers.
     """
 
-    def parts(self) -> Fanout[Part]:
+    def parts(self) -> Fanout[Src]:
         return [pa.table({"g": [g]}) for g in range(ORDER_ITEMS)]
 
-    def work(self, parts: Branch[Part]) -> Timed:
+    def work(self, parts: Branch[Src]) -> Timed:
         g = parts.project("g").fetchone()[0]
         d = pathlib.Path(os.environ["ORDER_DIR"])
         if g + 1 < ORDER_ITEMS:  # the last item goes first, the rest queue behind it
@@ -460,13 +459,13 @@ class OrderFlow(Flow):
 class PartialFanFlow(Flow):
     """The fan-out itself dies partway: the items it already yielded are on S3."""
 
-    def parts(self) -> Fanout[Part]:
+    def parts(self) -> Fanout[Src]:
         for g in range(3):
             if g == 2:
                 raise RuntimeError("fan-out died on item 2")
             yield pa.table({"g": [g]})
 
-    def work(self, parts: Branch[Part]) -> Out:
+    def work(self, parts: Branch[Src]) -> Out:
         return parts.project("g, g * 2 AS doubled")
 
 

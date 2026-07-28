@@ -36,27 +36,6 @@ def test_resume_ignores_dropped_origin_params(s3cfg, repo):
         EmptyFanFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
 
-def test_resolve_validates_types():
-    class P(FlowParams):
-        lr: float = 0.1
-        name: str | None = None
-
-    assert P.resolve({"lr": 1}) == {"lr": 1.0, "name": None}  # int coerced for a float param
-    with pytest.raises(TypeError, match="expected float"):
-        P.resolve({"lr": "fast"})
-    with pytest.raises(TypeError, match="may not be None"):
-        P.resolve({"lr": None})
-
-
-def test_param_types_restricted():
-    import datetime as dt
-
-    with pytest.raises(TypeError, match="int/float/str/bool"):
-
-        class P(FlowParams):
-            ts: dt.datetime
-
-
 def test_param_name_collision_rejected():
     with pytest.raises(TypeError, match="collide"):
 

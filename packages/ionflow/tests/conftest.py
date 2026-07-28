@@ -108,3 +108,9 @@ def localcfg(tmp_path):
     from ionflow.config import Config
 
     return Config(local_dir=str(tmp_path / "store"), prefix="mf")
+
+
+@pytest.fixture(params=["s3", "local"])
+def anycfg(request):
+    """Both storage modes: the mode is one dispatch (Store.of), so most tests want both."""
+    return request.getfixturevalue("s3cfg" if request.param == "s3" else "localcfg")

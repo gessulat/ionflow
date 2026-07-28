@@ -2,43 +2,37 @@ import pytest
 from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow, TwoGroupFlow, exec_counts
 
 
-def _exec_counts(d):
-    counts = {0: 0, 1: 0, 2: 0}
-    for f in d.iterdir():
-        counts[int(f.name.split("_")[1])] += 1
-    return counts
-
-
-def _chain_counts(d, step):
+def _counts(d, step):
+    """`flows.exec_counts` keyed by the branch index the three-item flows use."""
     return {g: exec_counts(d, step).get(str(g), 0) for g in (0, 1, 2)}
 
 
 @pytest.mark.slow
-def test_partial_fanout_resume_reruns_only_failed_branch(s3cfg, repo, tmp_path, monkeypatch):
+def test_partial_fanout_resume_reruns_only_failed_branch(anycfg, repo, tmp_path, monkeypatch):
     d = tmp_path / "exec"
     d.mkdir()
     monkeypatch.setenv("FLAKY_DIR", str(d))
     monkeypatch.setenv("FLAKY_FAIL", "1")
 
     with pytest.raises(RuntimeError):
-        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+        FlakyFlow.run(anycfg, repo=repo, use_processes=False)
 
-    con = FlakyFlow.duck(s3cfg)
+    con = FlakyFlow.duck(anycfg)
     origin_id, status = con.sql("SELECT run_id, status FROM ledger").fetchone()
     assert status == "failed"
-    assert _exec_counts(d) == {0: 1, 1: 1, 2: 1}  # every branch attempted once
+    assert _counts(d, "work") == {0: 1, 1: 1, 2: 1}  # every branch attempted once
     # failed runs keep their metrics — that's when perf data matters most
     n = con.sql(f"SELECT count(*) FROM metrics WHERE run_id = '{origin_id}'").fetchone()[0]
     assert n > 0
 
     # resume with the fault cleared
     monkeypatch.setenv("FLAKY_FAIL", "0")
-    resumed = FlakyFlow.run(s3cfg, repo=repo, resume=origin_id, use_processes=False)
+    resumed = FlakyFlow.run(anycfg, repo=repo, resume=origin_id, use_processes=False)
 
     # branches 0 and 2 were reused (server-side copied), only branch 1 re-ran
-    assert _exec_counts(d) == {0: 1, 1: 2, 2: 1}
+    assert _counts(d, "work") == {0: 1, 1: 2, 2: 1}
 
-    con = FlakyFlow.duck(s3cfg)
+    con = FlakyFlow.duck(anycfg)
     row = con.sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone()
     assert row == (3, 6)
     st = con.sql(f"SELECT status FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
@@ -126,8 +120,8 @@ def test_chained_branch_in_process_mode(s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
     run_id = ChainFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=3)
 
-    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
-    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}
+    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
+    assert _counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}
 
     con = ChainFlow.duck(s3cfg)
     assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{run_id}'").fetchone() == (3, 12)
@@ -152,13 +146,13 @@ def test_chained_branch_resume_reruns_only_the_failed_branch(s3cfg, repo, tmp_pa
 
     con = ChainFlow.duck(s3cfg)
     origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
-    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
+    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}
 
     monkeypatch.delenv("CHAIN_FAIL")
     resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}  # copied, never re-run
-    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 2, 2: 1}  # only branch 1 re-ran
+    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}  # copied, never re-run
+    assert _counts(tmp_path, "refine") == {0: 1, 1: 2, 2: 1}  # only branch 1 re-ran
 
     con = ChainFlow.duck(s3cfg)
     rows = con.sql(f"SELECT g, seen, quadrupled FROM refine WHERE run_id = '{resumed}' ORDER BY g").fetchall()
@@ -178,13 +172,13 @@ def test_chained_branch_resume_after_upstream_branch_failure(s3cfg, repo, tmp_pa
     con = ChainFlow.duck(s3cfg)
     origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
     # no stage barrier: items 0 and 1 reached `refine` although item 2 never got past `work`
-    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 0}
+    assert _counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 0}
 
     monkeypatch.delenv("CHAIN_FAIL")
     resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    assert _chain_counts(tmp_path, "work") == {0: 1, 1: 1, 2: 2}
-    assert _chain_counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}  # only item 2 resumed
+    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 2}
+    assert _counts(tmp_path, "refine") == {0: 1, 1: 1, 2: 1}  # only item 2 resumed
     con = ChainFlow.duck(s3cfg)
     assert con.sql(f"SELECT n, total FROM total WHERE run_id = '{resumed}'").fetchone() == (3, 12)
 

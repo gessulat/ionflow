@@ -1,10 +1,11 @@
-"""What a launch does before any flow runs: find flows in code, find flows with
-data, compare declarations against the catalog."""
+"""What a launch does before any flow runs: find flows in code, find flows with data.
+
+The declaration-vs-catalog comparison (`schema_drift`) lives in test_lake_contract.
+"""
 
 import textwrap
 
 from ionflow.flow import discover_flows
-from ionflow.lake import schema_drift
 from ionflow.tui import scan_runs
 
 
@@ -48,19 +49,3 @@ def test_scan_runs(s3cfg):
     # key presence is all that matters here; no need for a full flow run
     store.put(f"{s3cfg.prefix}/Alpha/ledger.parquet", b"")
     assert scan_runs(store) == {"Alpha"}
-
-
-def test_schema_drift_detects_change(s3cfg, repo, monkeypatch):
-    from tui_flows.pipeline import Alpha
-
-    from ionflow.space import Space
-    from ionflow.store import Store
-
-    Alpha.run(s3cfg, repo=repo, use_processes=False)
-    space = Space.for_flow(Store.of(s3cfg), Alpha)
-    assert schema_drift(Alpha, space) == []
-
-    # pretend the code now declares `x` as text instead of the stored bigint
-    monkeypatch.setattr(Alpha._dag.steps["data"].output_table.columns()["x"], "dtype", str)
-    issues = schema_drift(Alpha, space)
-    assert any("data" in i and "x" in i for i in issues)

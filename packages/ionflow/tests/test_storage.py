@@ -88,12 +88,11 @@ def test_not_null_rejects(s3cfg):
         space.write_part(space.part("r3", "features"), bad, Features)
 
 
-def test_key_for_uri_inverts_uri(s3cfg, localcfg):
-    for cfg in (s3cfg, localcfg):
-        store = Store.of(cfg)
-        assert store.key_for_uri(store.uri("mf/ETL/x.parquet")) == "mf/ETL/x.parquet"
-        with pytest.raises(ValueError, match="is not under"):
-            store.key_for_uri("s3://elsewhere/mf/ETL/x.parquet")
+def test_key_for_uri_inverts_uri(anycfg):
+    store = Store.of(anycfg)
+    assert store.key_for_uri(store.uri("mf/ETL/x.parquet")) == "mf/ETL/x.parquet"
+    with pytest.raises(ValueError, match="is not under"):
+        store.key_for_uri("s3://elsewhere/mf/ETL/x.parquet")
 
 
 @pytest.mark.slow

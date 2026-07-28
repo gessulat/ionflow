@@ -219,10 +219,12 @@ def test_flow_params_reject_non_scalar_types(annotation):
 
 
 def test_make_carries_constraints():
-    Wide = Table.make("Wide", {"id": int, "v": shaped(np.float32, 2), "s": str | None}, id=primary_key)
-    assert list(Wide.columns()) == ["id", "v", "s"]
+    cols = {"id": int, "v": shaped(np.float32, 2), "s": str | None, "tags": list[str] | None}
+    Wide = Table.make("Wide", cols, id=primary_key)
+    assert list(Wide.columns()) == ["id", "v", "s", "tags"]
     assert Wide.columns()["id"].primary_key and not Wide.columns()["id"].nullable
-    assert Wide.persisted_ddl() == "id BIGINT NOT NULL, v FLOAT[] NOT NULL, s VARCHAR"
+    # NOT NULL is orthogonal to the type: an array can be either
+    assert Wide.persisted_ddl() == "id BIGINT NOT NULL, v FLOAT[] NOT NULL, s VARCHAR, tags VARCHAR[]"
     with pytest.raises(TypeError, match="unknown columns"):
         Table.make("Bad", {"a": int}, typo=primary_key)
 
@@ -237,12 +239,28 @@ def test_fanout_key_column():
     assert Table.make("Keyed", {"a": np.int32}, a=fanout_key).fanout_key_column() == "a"
 
 
-def test_only_one_fanout_key():
-    with pytest.raises(TypeError, match="only one column may be the fanout_key"):
+@pytest.mark.parametrize(
+    ("cols", "keys", "match"),
+    [
+        ({"a": str, "b": int}, ("a", "b"), "only one column may be the fanout_key"),
+        ({"a": float}, ("a",), "str or an integer"),
+        ({"a": str | None}, ("a",), "nullable"),
+    ],
+    ids=["two-keys", "float-key", "nullable-key"],
+)
+def test_fanout_key_rejections(cols, keys, match):
+    with pytest.raises(TypeError, match=match):
+        Table.make("K", cols, **{k: field(fanout_key=True) for k in keys})
 
-        class Two(Table):
-            a: str = field(fanout_key=True)
-            b: int = field(fanout_key=True)
+
+def test_field_combines_nullability_with_a_check():
+    """`field(check=...)` is the spelling that survives an optional annotation."""
+
+    class T(Table):
+        d: int | None = field(check="d >= 0")
+
+    col = T.columns()["d"]
+    assert col.nullable and col.check == "d >= 0"
 
 
 def test_table_with_no_columns_rejected():
