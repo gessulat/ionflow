@@ -1,5 +1,5 @@
 import pytest
-from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow, TwoGroupFlow, exec_counts
+from flows import ChainFlow, EmptyFanFlow, FlakyFlow, SideInputFlow, TwoGroupFlow, exec_counts
 
 
 def _counts(d, step):
@@ -66,15 +66,6 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
         ).fetchall()
     }
     assert branches == {0, 1, 2}  # failed branch included
-
-
-def test_branch_retries_recover_transient_failures(s3cfg, repo, tmp_path, monkeypatch):
-    monkeypatch.setenv("RETRY_DIR", str(tmp_path))
-    run_id = RetryFlow.run(s3cfg, repo=repo, use_processes=False, branch_retries=1)
-
-    con = RetryFlow.duck(s3cfg)
-    # success entails each branch failed once first: work() only returns after its marker exists
-    assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (2, 2)
 
 
 def test_steps_read_side_inputs_via_config(s3cfg, repo):

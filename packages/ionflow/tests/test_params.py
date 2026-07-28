@@ -46,7 +46,7 @@ def test_param_name_collision_rejected():
             def data(self) -> Src: ...
 
 
-def test_params_on_flow_without_params_rejected():
+def test_flow_without_params_refuses_params():
     with pytest.raises(ValueError, match="declares no Params"):
         EmptyFanFlow.resolve_params({"x": 1})
 

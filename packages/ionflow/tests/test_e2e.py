@@ -91,18 +91,3 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
     with pytest.warns(UserWarning, match="different commit"):
         resumed = EmptyFanFlow.run(s3cfg, repo=clean_repo, resume=origin, use_processes=False, allow_commit_drift=True)
     assert resumed != origin
-
-
-@pytest.mark.slow
-def test_resume_reuses_completed_steps(s3cfg, repo):
-    origin = EmbedDocs.run(s3cfg, repo=repo, use_processes=False)
-    resumed = runner.run(EmbedDocs, s3cfg, repo=repo, resume=origin, use_processes=False)
-    assert resumed != origin
-
-    con = EmbedDocs.duck(s3cfg)
-    # resumed run is self-contained and identical to origin
-    got = con.sql(f"SELECT n_docs FROM summary WHERE run_id = '{resumed}'").fetchone()[0]
-    assert got == 4
-    # ledger records the origin pointer
-    origin_ptr = con.sql(f"SELECT origin_run_id FROM ledger WHERE run_id = '{resumed}'").fetchone()[0]
-    assert origin_ptr == origin

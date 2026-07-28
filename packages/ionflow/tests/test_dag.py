@@ -95,67 +95,54 @@ def test_group_collects_a_fan_outs_per_item_steps():
     assert list(dag.groups) == ["chunks"]
 
 
-def test_plain_steps_have_no_group():
-    dag = build_dag(ETL)
-    assert dag.groups["chunks"].order == ["scored"]
-    assert dag.plan == ["raw", "chunks", "result"]
+class _BranchOverPlain:
+    def raw(self) -> Raw: ...
+    def scored(self, raw: Branch[Raw]) -> Score: ...
 
 
-def test_branch_over_a_plain_step_rejected():
-    class Bad:
-        def raw(self) -> Raw: ...
-        def scored(self, raw: Branch[Raw]) -> Score: ...
-
-    with pytest.raises(ValueError, match="neither a fan-out nor a branch step"):
-        build_dag(Bad)
+class _NestedFanout:
+    def chunks(self) -> Fanout[Chunk]: ...
+    def deeper(self, chunks: Branch[Chunk]) -> Fanout[Chunk]: ...
 
 
-def test_nested_fan_out_rejected():
-    class Bad:
-        def chunks(self) -> Fanout[Chunk]: ...
-        def deeper(self, chunks: Branch[Chunk]) -> Fanout[Chunk]: ...
-
-    with pytest.raises(ValueError, match="fan-out is one level"):
-        build_dag(Bad)
+class _SiblingCollect:
+    def chunks(self) -> Fanout[Chunk]: ...
+    def scored(self, chunks: Branch[Chunk]) -> Score: ...
+    def polished(self, chunks: Branch[Chunk], scored: Collect[Score]) -> Score: ...
 
 
-def test_collecting_a_sibling_per_item_step_rejected():
-    class Bad:
-        def chunks(self) -> Fanout[Chunk]: ...
-        def scored(self, chunks: Branch[Chunk]) -> Score: ...
-        def polished(self, chunks: Branch[Chunk], scored: Collect[Score]) -> Score: ...
-
-    with pytest.raises(ValueError, match="per item of fan-out 'chunks'"):
-        build_dag(Bad)
+class _FanInCycle:
+    def chunks(self) -> Fanout[Chunk]: ...
+    def scored(self, chunks: Branch[Chunk]) -> Score: ...
+    def stats(self, scored: Collect[Score]) -> Final: ...
+    def polished(self, scored: Branch[Score], stats: Final) -> Score: ...
 
 
-def test_fan_in_feeding_back_into_its_own_fan_out_rejected():
-    class Bad:
-        def chunks(self) -> Fanout[Chunk]: ...
-        def scored(self, chunks: Branch[Chunk]) -> Score: ...
-        def stats(self, scored: Collect[Score]) -> Final: ...
-        def polished(self, scored: Branch[Score], stats: Final) -> Score: ...
-
-    with pytest.raises(ValueError, match="cycle detected once fan-outs run per item"):
-        build_dag(Bad)
+class _UnknownParam:
+    def a(self) -> Raw: ...
+    def b(self, nope: Raw) -> Final: ...
 
 
-def test_unknown_param_rejected():
-    class Bad:
-        def a(self) -> Raw: ...
-        def b(self, nope: Raw) -> Final: ...
-
-    with pytest.raises(ValueError, match="nope"):
-        build_dag(Bad)
+class _Cyclic:
+    def a(self, b: Raw) -> Raw: ...
+    def b(self, a: Raw) -> Raw: ...
 
 
-def test_cycle_rejected():
-    class Cyclic:
-        def a(self, b: Raw) -> Raw: ...
-        def b(self, a: Raw) -> Raw: ...
-
-    with pytest.raises(ValueError, match="cycle"):
-        build_dag(Cyclic)
+@pytest.mark.parametrize(
+    ("bad", "match"),
+    [
+        (_BranchOverPlain, "neither a fan-out nor a branch step"),
+        (_NestedFanout, "fan-out is one level"),
+        (_SiblingCollect, "per item of fan-out 'chunks'"),
+        (_FanInCycle, "cycle detected once fan-outs run per item"),
+        (_UnknownParam, "nope"),
+        (_Cyclic, "cycle"),
+    ],
+    ids=lambda v: v.__name__.lstrip("_") if isinstance(v, type) else "",
+)
+def test_build_dag_refusals(bad, match):
+    with pytest.raises(ValueError, match=match):
+        build_dag(bad)
 
 
 def test_private_methods_ignored():

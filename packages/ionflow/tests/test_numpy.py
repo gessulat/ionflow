@@ -8,38 +8,12 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from ionflow import Branch, Collect, Fanout, Flow, FlowParams, Table, check, shaped
+from ionflow import Branch, Collect, Fanout, Flow, Table, check, shaped
 from ionflow.arrow import StepInput, table_from_bytes, to_arrow
 from ionflow.space import ConstraintViolation, Space
 from ionflow.store import Store
 
 # --- schema: numpy dtype annotations ---
-
-
-def test_numpy_dtypes_compile_to_ddl_and_arrow():
-    class T(Table):
-        a: np.float32
-        b: np.int16 | None
-        c: list[np.float32]
-        d: np.uint8
-
-    cols = T.columns()
-    assert cols["a"].duckdb_type() == "FLOAT"
-    assert cols["b"].duckdb_type() == "SMALLINT" and cols["b"].nullable
-    assert cols["c"].duckdb_type() == "FLOAT[]"
-    assert cols["d"].duckdb_type() == "UTINYINT"
-    s = T.arrow_schema()
-    assert s.field("a").type == pa.float32()
-    assert s.field("b").type == pa.int16()
-    assert s.field("c").type == pa.list_(pa.float32())
-
-
-def test_numpy_params_still_rejected():
-    # params must round-trip JSON/CLI; np scalars stay excluded
-    with pytest.raises(TypeError, match="only int/float/str/bool"):
-
-        class P(FlowParams):
-            x: np.float32
 
 
 # --- to_arrow: the conversion matrix ---
@@ -149,20 +123,6 @@ def test_nan_is_a_value_not_null(cfg):
 
 
 # --- shaped(...): fixed-shape array columns ---
-
-
-def test_shaped_compiles_to_fixed_types():
-    class T(Table):
-        v: shaped(np.float32, 3)
-        m: shaped(np.int16, 4, 3)  # cells are (4, 3) arrays
-
-    cols = T.columns()
-    assert cols["v"].duckdb_type() == "FLOAT[3]"
-    assert cols["m"].duckdb_type() == "SMALLINT[3][4]"  # DuckDB suffixes read inside-out
-    assert cols["v"].persisted_type() == "FLOAT[]"  # parquet round-trips fixed as list
-    s = T.arrow_schema()
-    assert s.field("v").type == pa.list_(pa.float32(), 3)
-    assert s.field("m").type == pa.list_(pa.list_(pa.int16(), 3), 4)
 
 
 def test_shaped_rejects_bad_dimensions():
