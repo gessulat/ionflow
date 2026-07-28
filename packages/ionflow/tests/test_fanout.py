@@ -1,5 +1,5 @@
 import pytest
-from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow, exec_counts
+from flows import ChainFlow, EmptyFanFlow, FlakyFlow, RetryFlow, SideInputFlow, TwoGroupFlow, exec_counts
 
 
 def _exec_counts(d):
@@ -92,6 +92,19 @@ def test_steps_read_side_inputs_via_config(s3cfg, repo):
     con = SideInputFlow.duck(s3cfg)
     # 3 branches (fan-out sized by the side read), each doubled by n=3 (branch-side read)
     assert con.sql(f"SELECT n, total FROM agg WHERE run_id = '{run_id}'").fetchone() == (3, 9)
+
+
+def test_each_group_collects_its_own_widths(s3cfg, repo):
+    """Two groups in one thread-mode process: the second must not inherit the first's widths."""
+    run_id = TwoGroupFlow.run(s3cfg, repo=repo, use_processes=False, max_workers=2)
+
+    con = TwoGroupFlow.duck(s3cfg)
+
+    def widths(step):
+        return con.sql(f"SELECT DISTINCT doubled FROM {step} WHERE run_id = '{run_id}'").fetchall()
+
+    assert widths("work_a") == [(2,)]  # side_a's width
+    assert widths("work_b") == [(5,)]  # side_b's, not side_a's
 
 
 def test_chained_branch_steps_stay_aligned(s3cfg, repo):

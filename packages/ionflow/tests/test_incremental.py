@@ -120,6 +120,17 @@ def test_branch_reuse_tainted_by_other_keyed_ancestor(s3cfg, repo):
     assert items == {"fixed-0@2", "fixed-1@2"}  # recomputed against the new collect input
 
 
+@pytest.mark.slow
+def test_branch_collects_a_non_sibling_fanout_in_a_worker(s3cfg, repo):
+    """A spawned worker resolves a Collect of another fan-out from the payload's widths."""
+    _put_n(s3cfg, 3)
+    run_id = TwoKeyFlow.run(s3cfg, repo=repo, use_processes=True)
+
+    con = TwoKeyFlow.duck(s3cfg)
+    items = {r[0] for r in con.sql(f"SELECT item FROM work WHERE run_id = '{run_id}'").fetchall()}
+    assert items == {"fixed-0@3", "fixed-1@3"}
+
+
 def _chain(con, run_id):
     """item -> (work token, refine token, the work token refine actually read)."""
     rows = con.sql(

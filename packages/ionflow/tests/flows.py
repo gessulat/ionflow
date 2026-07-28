@@ -121,6 +121,33 @@ class SideInputFlow(Flow):
         return work.aggregate("count(*) AS n, sum(doubled) AS total")
 
 
+class TwoGroupFlow(Flow):
+    """Two fan-out groups in one run, each collecting a fan-out of its own width.
+
+    Thread mode is the only place one process runs both groups, so it is the only
+    place a worker binding cached for the first group could still be around for
+    the second — with the first group's collect widths.
+    """
+
+    def side_a(self) -> Fanout[Src]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def side_b(self) -> Fanout[Part]:
+        return [pa.table({"g": [g]}) for g in range(5)]
+
+    def items_a(self) -> Fanout[Part]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def items_b(self) -> Fanout[Part]:
+        return [pa.table({"g": [g]}) for g in range(2)]
+
+    def work_a(self, items_a: Branch[Part], side_a: Collect[Src]) -> Out:
+        return items_a.project(f"g, {side_a.aggregate('count(*)').fetchone()[0]} AS doubled")
+
+    def work_b(self, items_b: Branch[Part], side_b: Collect[Part]) -> Out:
+        return items_b.project(f"g, {side_b.aggregate('count(*)').fetchone()[0]} AS doubled")
+
+
 class KeyedItem(Table):
     g: int
     item: str = fanout_key
