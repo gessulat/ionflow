@@ -50,6 +50,12 @@ uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debu
 - `repo` fixture = session-scoped git repo, for tests that only *read* git.
   Use `clean_repo` (function-scoped) if the test mutates the repo or its cwd.
 - The TUI has no automated tests (deliberate — human-tested). Don't add TUI tests.
+- **Never poll for the suite with `pgrep -f`.** The waiting shell's own command line
+  contains the pattern, so `until ! pgrep -f "bin/pytest"; do sleep 15; done` matches
+  ITSELF and spins forever — this has already burned hours. Wait on the harness's
+  completion notification for the backgrounded command, or match a string a waiter
+  cannot contain (`\.venv/bin/pytest`). Never hand-roll a poll loop over something
+  the harness already reports.
 - **Never test what the library guarantees.** Writer and reader both derive from the
   same `Table`, so a write-then-read-back assertion tests pyarrow/DuckDB, not ionflow.
   Test only where ionflow's own mapping DIFFERS from the pass-through — `_persist`
