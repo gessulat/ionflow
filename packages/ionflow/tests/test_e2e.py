@@ -1,10 +1,13 @@
 import pathlib
 
 import pytest
+from flows import FlakyFlow
 
 from examples.embed import EmbedDocs
 from ionflow import runner
 from ionflow.git import DirtyRepoError
+from ionflow.space import Space
+from ionflow.store import Store
 
 
 def test_run_end_to_end(anycfg, repo):
@@ -91,3 +94,26 @@ def test_resume_refuses_commit_drift(s3cfg, clean_repo):
     with pytest.warns(UserWarning, match="different commit"):
         resumed = EmptyFanFlow.run(s3cfg, repo=clean_repo, resume=origin, use_processes=False, allow_commit_drift=True)
     assert resumed != origin
+
+
+def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
+    """`_meta.json`'s shape is what a LATER release reads to resume an older run."""
+    space = Space.for_flow(Store.of(cfg), FlakyFlow)
+    run_id = FlakyFlow.run(cfg, repo=repo, use_processes=False)
+    meta = space.read_meta(run_id)
+    assert list(meta) == ["run_id", "started", "finished", "commit", "origin_run_id",
+                          "steps_complete", "fanout_keys", "params", "custom"]
+    assert meta["steps_complete"] == ["agg/0", "parts/0", "parts/1", "parts/2",
+                                      "source/0", "work/0", "work/1", "work/2"]
+
+    # an origin written by hand in today's format must still drive a resume: `work/1`
+    # is absent, so exactly that branch recomputes and the rest are copied forward
+    origin = dict(meta, run_id="hand-written", origin_run_id=None,
+                  steps_complete=[s for s in meta["steps_complete"] if s not in ("work/1", "agg/0")])
+    for key in space.store.list(space.run_dir(run_id) + "/"):
+        space.store.client.copy_object(
+            Bucket=space.store.bucket, CopySource={"Bucket": space.store.bucket, "Key": key},
+            Key=key.replace(f"run_id={run_id}", "run_id=hand-written"))
+    space.write_meta("hand-written", origin)
+    resumed = FlakyFlow.run(cfg, repo=repo, resume="hand-written", use_processes=False)
+    assert FlakyFlow.duck(cfg).sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)
