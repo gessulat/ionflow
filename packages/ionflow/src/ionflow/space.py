@@ -10,6 +10,7 @@ import pyarrow as pa
 from schrein.ducklake import CATALOG_KEY
 
 from .arrow import BATCH_ROWS, parquet_bytes, table_from_bytes, to_arrow
+from .schema import _q
 from .store import COPY_WORKERS, Store
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
@@ -59,9 +60,10 @@ def _validate_part(con, table, path, key):
 
 def _extract_fanout_key(con, column, path, key):
     """The single distinct value of a fan-out item's key column — its identity."""
+    col = _q(column)
     rows, nulls, distinct, value = con.execute(
-        f"SELECT count(*), count(*) FILTER (WHERE {column} IS NULL), "
-        f"count(DISTINCT {column}), any_value({column}) FROM read_parquet('{path}')"
+        f"SELECT count(*), count(*) FILTER (WHERE {col} IS NULL), "
+        f"count(DISTINCT {col}), any_value({col}) FROM read_parquet('{path}')"
     ).fetchone()
     if rows == 0:
         raise ConstraintViolation(f"{key}: keyed fan-out item is empty; every item needs one '{column}' value")
