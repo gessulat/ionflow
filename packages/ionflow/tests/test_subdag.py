@@ -97,7 +97,7 @@ def test_resume_restarts_an_item_at_its_first_incomplete_sub_step(s3cfg, repo, t
     monkeypatch.delenv("PIPE_FAIL")
     resumed = PipelineFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    # the 40-minute convert and the finished upload are copied; only the search re-runs
+    # the 40-minute convert and the finished upload are reused; only the search re-runs
     assert exec_counts(tmp_path, "convert") == {"raw-0": 1, "raw-1": 1}
     assert exec_counts(tmp_path, "upload_db") == {"raw-0": 1, "raw-1": 1}
     assert exec_counts(tmp_path, "search") == {"raw-0": 1, "raw-1": 2}

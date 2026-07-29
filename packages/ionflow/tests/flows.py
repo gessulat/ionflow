@@ -159,7 +159,7 @@ class KeyedAgg(Table):
 
 
 class KeyedFlow(Flow):
-    """Keyed fan-out sized by the side object; uuid tokens expose copy vs recompute."""
+    """Keyed fan-out sized by the side object; uuid tokens expose reuse vs recompute."""
 
     def items(self) -> Fanout[KeyedItem]:
         return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in range(_side_n(self.config))]

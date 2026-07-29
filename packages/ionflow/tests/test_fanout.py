@@ -29,7 +29,7 @@ def test_partial_fanout_resume_reruns_only_failed_branch(anycfg, repo, tmp_path,
     monkeypatch.setenv("FLAKY_FAIL", "0")
     resumed = FlakyFlow.run(anycfg, repo=repo, resume=origin_id, use_processes=False)
 
-    # branches 0 and 2 were reused (server-side copied), only branch 1 re-ran
+    # items 0 and 2 were reused (referenced, not copied), only item 1 re-ran
     assert _counts(d, "work") == {0: 1, 1: 2, 2: 1}
 
     con = FlakyFlow.duck(anycfg)
@@ -142,7 +142,7 @@ def test_chained_branch_resume_reruns_only_the_failed_branch(s3cfg, repo, tmp_pa
     monkeypatch.delenv("CHAIN_FAIL")
     resumed = ChainFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}  # copied, never re-run
+    assert _counts(tmp_path, "work") == {0: 1, 1: 1, 2: 1}  # reused, never re-run
     assert _counts(tmp_path, "refine") == {0: 1, 1: 2, 2: 1}  # only branch 1 re-ran
 
     con = ChainFlow.duck(s3cfg)

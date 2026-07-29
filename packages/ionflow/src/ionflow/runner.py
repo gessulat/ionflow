@@ -384,7 +384,8 @@ def run(
     `resume` is the one resume spelling: an origin run_id reuses that run's
     completed steps; the string "latest" resumes the newest complete run and
     falls through to a fresh full run when there is none (so cron jobs can
-    always pass it). Resume always produces a NEW, self-contained run.
+    always pass it). Resume always produces a NEW run — its manifest
+    references the origin's completed parts, and it computes only the rest.
     """
     if allow_commit_drift and not resume:
         raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
@@ -431,14 +432,12 @@ def run(
         manifest.add(slot, path)
         pending.append((slot.step, slot.key, path))
 
-    def copy_slots(slots):
-        """Server-side copy origin parts into this run, recorded as each copy
-        lands — a failure mid-iteration keeps the prefix as real progress."""
-        if not slots:
-            return
-        triples = [(origin.get(s.step, s.key), space.part(run_id, s.step, s.key), s) for s in slots]
-        for slot in space.copy_parts(triples):
-            note(slot, space.part(run_id, slot.step, slot.key))
+    def reuse_slots(slots):
+        """Reference origin parts in this run's manifest — no copies (0020):
+        a part is immutable, written and registered once by the run that
+        computed it; reuse is manifest rows pointing at the origin's objects."""
+        for s in slots:
+            note(s, origin.get(s.step, s.key))
 
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
@@ -458,8 +457,7 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        # server-side copies, IO-bound: one batch, one pool
-        copy_slots([s for s, _ in origin.slots() if s.step not in deferred])
+        reuse_slots([s for s, _ in origin.slots() if s.step not in deferred])
         for k, v in origin_row["custom"].items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin_row["params"]
@@ -548,7 +546,7 @@ def run(
             # to the origin's — any other keyed ancestor's change taints them
             if root is None or not work_lists_unchanged(member, excluding=root):
                 continue
-            copy_slots(
+            reuse_slots(
                 [
                     Slot(member, k)
                     for k in keys
@@ -588,7 +586,7 @@ def run(
         for name in dag.plan:  # a fan-out node covers its group; members never stand alone
             step = dag.steps[name]
             if name in lazy_reuse and work_lists_unchanged(name):
-                copy_slots([Slot(name, k) for k in origin.keys(name) if Slot(name, k) not in manifest])
+                reuse_slots([Slot(name, k) for k in origin.keys(name) if Slot(name, k) not in manifest])
             group = dag.groups.get(name)
             if step.is_fanout:
                 if not manifest.width(name):  # skip if a prior run already produced it

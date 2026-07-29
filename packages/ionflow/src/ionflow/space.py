@@ -160,10 +160,6 @@ class Space:
         """
         return con.read_parquet([self.uri(k) for k in keys], hive_partitioning=False)
 
-    def part_keys(self, run_id, step):
-        """A step's part keys for one run, sorted — the one registration/read order."""
-        return sorted(self.store.list(self.step_dir(run_id, step) + "/"))
-
     def lake(self, data_subdir=LAKE_SUBDIR):
         """The flow's catalog DuckLake at its root (catalog-written files only)."""
         return self.store.lake(self.root, data_subdir=data_subdir)
@@ -178,13 +174,6 @@ class Space:
     def read_meta(self, run_id):
         blob = self.store.get(self.meta(run_id))
         return None if blob is None else json.loads(blob)
-
-    def copy_parts(self, items):
-        """Server-side copies of (src_key, dst_key, tag) triples; yields each tag as
-        its copy lands, in submission order (consume it as `Store.copy_many` says).
-        """
-        tag_of = {dst: tag for _, dst, tag in items}
-        return (tag_of[dst] for dst in self.store.copy_many([(s, d) for s, d, _ in items]))
 
     def write_part(self, dest, data, table, threads=None, memory_mb=None, fanout_key=None):
         """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.

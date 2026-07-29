@@ -24,6 +24,7 @@ from schrein.ducklake import CATALOG_KEY
 
 from .schema import Table
 from .space import Space, utc_now
+from .state import Manifest
 from .store import Store, parse_dest
 
 PUBLISH_PREFIX = "published"  # default lake: s3://<bucket>/<config.prefix>/published/
@@ -214,8 +215,6 @@ def backfill(flow_cls, space, replace=False):
     the target-side catalog. Returns the number of runs restored; steps no
     longer in the flow's code are dropped.
     """
-    from .state import Manifest  # state builds on Space; local import breaks the cycle
-
     cat = Catalog(space)
     if cat._blob() is not None:
         if not replace:
@@ -306,7 +305,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         raise ValueError(f"invalid published table name '{table}'")
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
-    row, _ = Catalog(space).run_state(run_id)
+    row, triples = Catalog(space).run_state(run_id)
     if row is None:
         raise RuntimeError(f"run not found: {run_id}")
     if row["status"] != "complete":
@@ -314,7 +313,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
 
     lake, target = publish_lake(config, dest)
     out_table = flow_cls._dag.steps[step].output_table
-    keys = space.part_keys(run_id, step)
+    keys = Manifest.from_rows(triples).paths(step)  # the run's parts, wherever they live (0020)
     con = store.connect()
     rel = space.relation(con, keys) if keys else out_table.empty(con)
     if where:

@@ -28,7 +28,7 @@ def test_keyed_resume_grow_shrink_unchanged(cfg, repo):
     con = KeyedFlow.duck(cfg)
     old, new = _tokens(con, origin), _tokens(con, grown)
     assert set(new) == {f"file-{g}" for g in range(5)}
-    for item in old:  # matched items were server-side copied, not recomputed
+    for item in old:  # matched items were referenced, not recomputed
         assert new[item] == old[item]
     # the collect step reflects the grown work-list, so it was recomputed
     assert _agg(con, grown)[0] == 5
@@ -45,7 +45,7 @@ def test_keyed_resume_grow_shrink_unchanged(cfg, repo):
     same = KeyedFlow.run(cfg, repo=repo, resume=shrunk, use_processes=False)
     con = KeyedFlow.duck(cfg)
     assert _tokens(con, same) == kept
-    assert _agg(con, same) == _agg(con, shrunk)  # unchanged key set: collect copied, not recomputed
+    assert _agg(con, same) == _agg(con, shrunk)  # unchanged key set: collect reused, not recomputed
 
 
 @pytest.mark.slow
@@ -123,7 +123,7 @@ def test_keyed_resume_chained_branch_matches_new_items(cfg, repo):
     con = KeyedChainFlow.duck(cfg)
     old = _assert_aligned(con, origin, {"file-0", "file-1"})
     new = _assert_aligned(con, resumed, {"file-0", "file-1", "file-2"})
-    for item in old:  # matched items copied through both branch steps, not recomputed
+    for item in old:  # matched items reused through both branch steps, not recomputed
         assert new[item] == old[item]
 
 
@@ -146,7 +146,7 @@ def test_keyed_resume_chained_branch_survives_reordered_worklist(cfg, repo, tmp_
     con = KeyedChainFlow.duck(cfg)
     new = _assert_aligned(con, resumed, {"file-0", "file-1"})
     assert {item: t for item, (t, _, _) in new.items()} == old_work  # work matched by key
-    # file-0's refine completed in the origin and was copied despite moving branch;
+    # file-0's refine completed in the origin and was reused despite moving position;
     # only file-1, which had failed, ran again
     assert exec_counts(tmp_path, "refine") == {"file-0": 1, "file-1": 2}
 

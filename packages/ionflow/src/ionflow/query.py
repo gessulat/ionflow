@@ -2,6 +2,7 @@ import duckdb
 
 from . import lake, metrics
 from .arrow import read_parquet_sql
+from .dag import PATH_COL
 from .space import Space, utc_now
 from .store import Store
 
@@ -34,6 +35,22 @@ def _empty_view_sql(table):
     last, matching its position in the real views.
     """
     return f"SELECT *, NULL::VARCHAR AS run_id FROM ({table.empty()})"
+
+
+def _step_view_sql(space, entries):
+    """One step's view: the manifest's part objects, each row labeled with the
+    run referencing its part (0020). A part shared by N runs appears once per
+    run — exactly what the per-run copies used to materialize, at zero storage.
+    `hive_partitioning` stays off: a part path's `run_id=` names its CREATOR,
+    the join supplies the referencing run.
+    """
+    uris = ", ".join(f"'{space.uri(p)}'" for p in sorted({p for p, _ in entries}))
+    values = ", ".join(f"('{space.uri(p)}', '{r}')" for p, r in entries)
+    return (
+        f"SELECT d.* EXCLUDE ({PATH_COL}), m.run_id "
+        f"FROM read_parquet([{uris}], filename='{PATH_COL}', hive_partitioning=false) d "
+        f"JOIN (VALUES {values}) m({PATH_COL}, run_id) ON d.{PATH_COL} = m.{PATH_COL}"
+    )
 
 
 def _ledger_view(con, flow_cls, attached):
@@ -107,19 +124,26 @@ def ledger_with_liveness(flow_cls, config, con=None):
 
 
 def duck(flow_cls, config):
-    """DuckDB connection with a view per step table + `ledger` and `metrics` views.
+    """DuckDB connection with a view per step + `ledger` and `metrics` views.
 
-    Step and ledger views sit over the flow's DuckLake catalog, attached
-    read-only (one consistent snapshot). `metrics` keeps its own plumbing:
-    telemetry objects are not lake data.
+    All views derive from the flow's DuckLake catalog, attached read-only (one
+    consistent snapshot): a step's view reads the parts its manifest rows name
+    (per-run membership — `lake.<step>` itself is the corpus, each part once
+    under its creating run). `metrics` keeps its own plumbing: telemetry
+    objects are not lake data.
     """
     store = Store.of(config)
     con = store.connect()
     space = Space.for_flow(store, flow_cls)
     if attached := lake.Catalog(space).attach_readonly(con):
-        for name in flow_cls._dag.steps:
-            # run_id last: keeps one column order between real and empty views
-            con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
+        by_step = {}
+        for run_id, step, path in con.sql("SELECT run_id, step, path FROM lake.manifest").fetchall():
+            by_step.setdefault(step, []).append((path, run_id))
+        for name, step in flow_cls._dag.steps.items():
+            entries = by_step.get(name)
+            # run_id last either way: one column order between real and empty views
+            body = _step_view_sql(space, entries) if entries else _empty_view_sql(step.output_table)
+            con.execute(f"CREATE VIEW {name} AS {body}")
     elif space.run_ids():
         # runs happened (genesis precedes the first run object) but the register is gone
         raise RuntimeError(

@@ -152,6 +152,11 @@ def _plan(steps, roots):
 
 
 RESERVED_STEP_NAMES = {"ledger", "metrics", "runs", "manifest"}  # duck()'s views + the lake's system tables
+PATH_COL = "__ionflow_path"  # the step views' filename join column (query.py)
+RESERVED_COLUMNS = {
+    "run_id": "the catalog's partition column",
+    PATH_COL: "the step views' filename column",
+}
 
 
 def build_dag(cls) -> Dag:
@@ -173,8 +178,9 @@ def build_dag(cls) -> Dag:
         table = typing.get_args(ret)[0] if is_fanout else ret
         if table is None:
             raise ValueError(f"step '{name}' has no output table annotation")
-        if "run_id" in table.columns():
-            raise ValueError(f"step '{name}': column 'run_id' is reserved (the catalog's partition column)")
+        for col, why in RESERVED_COLUMNS.items():
+            if col in table.columns():
+                raise ValueError(f"step '{name}': column '{col}' is reserved ({why})")
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():
