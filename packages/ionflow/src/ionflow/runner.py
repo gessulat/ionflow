@@ -16,6 +16,7 @@ from . import lake, metrics
 from .arrow import StepInput
 from .config import Config
 from .git import require_clean
+from .plan import Planner
 from .space import Space, key_slug, utc_now
 from .state import Manifest, RunRecord, Slot
 from .store import Store
@@ -23,15 +24,6 @@ from .store import Store
 
 def _new_run_id(now):
     return f"{int(now.timestamp() * 1000):013d}-{uuid.uuid4().hex[:8]}"
-
-
-def _keyed_fanouts(dag):
-    """Fan-out step name -> its output table's fanout_key column, keyed steps only."""
-    out = {}
-    for name, step in dag.steps.items():
-        if step.is_fanout and step.output_table.fanout_key_column():
-            out[name] = step.output_table.fanout_key_column()
-    return out
 
 
 def _fair_share(workers):
@@ -368,6 +360,16 @@ class CommitDriftError(RuntimeError):
     """Resume refused: HEAD differs from the origin run's commit."""
 
 
+def preview(flow_cls, config, resume):
+    """(origin run_id, {step: (reused, computed)}) for a would-be `resume`,
+    assuming unchanged keyed work-lists — see `Planner.preview`. Runs nothing."""
+    cat = lake.Catalog(Space.for_flow(Store.of(config), flow_cls))
+    row, rows = cat.run_state(resume)
+    if row is None:
+        raise RuntimeError("no complete run to resume" if resume == "latest" else f"origin run not found: {resume}")
+    return row["run_id"], Planner(flow_cls._dag, Manifest.from_rows(rows)).preview()
+
+
 def run(
     flow_cls,
     config,
@@ -413,19 +415,8 @@ def run(
 
     manifest = Manifest()
     origin = Manifest.from_rows(origin_rows)  # the origin run's parts, empty on a fresh run
+    planner = Planner(dag, origin)  # ALL reuse decisions; inert on a fresh run
     pending = []  # manifest triples written since the last catalog commit
-    keyed = _keyed_fanouts(dag)
-    # Steps downstream of a keyed fan-out can't be reused upfront: the fan-out
-    # re-runs first (the work-list may have changed), branch parts are then
-    # matched by item key, and everything else downstream is reused only when
-    # the key set is unchanged.
-    keyed_downstream = {f: dag.downstream(f) for f in keyed} if origin_run_id else {}
-    deferred = set().union(*keyed_downstream.values()) if keyed_downstream else set()
-    # Branch identity travels down a chain (0014), so every step of a keyed
-    # fan-out's group is named by that fan-out's item keys, however deep in a
-    # branch chain it sits — reuse is a key lookup, never positional (0018).
-    key_roots = {m: r for m, r in dag.roots.items() if r in keyed} if origin_run_id else {}
-    lazy_reuse = {s for s in deferred if s not in keyed and s not in key_roots}
 
     def note(slot, path):
         """Record one part: in the live manifest and in the next catalog commit."""
@@ -439,14 +430,6 @@ def run(
         for s in slots:
             note(s, origin.get(s.step, s.key))
 
-    def work_lists_unchanged(name, excluding=None):
-        """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
-        return all(
-            set(manifest.keys(f)) == set(origin.keys(f))
-            for f, ds in keyed_downstream.items()
-            if f != excluding and name in ds
-        )
-
     if origin_row:
         if origin_row["commit"] != commit:
             # a mixed-commit run must be a visible, deliberate choice
@@ -457,13 +440,13 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        reuse_slots([s for s, _ in origin.slots() if s.step not in deferred])
         for k, v in origin_row["custom"].items():  # reused steps won't reset these
             setattr(flow, k, v)
         params = origin_row["params"]
         if dropped := set(params) - set(flow_cls.params_columns()):
             warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}", stacklevel=2)
             params = {k: v for k, v in params.items() if k not in dropped}
+    reuse_slots(planner.upfront())
 
     params = flow_cls.resolve_params(params)
     for k, v in params.items():
@@ -539,20 +522,8 @@ def run(
         No barrier between sub-steps: item A can be in the last one while item B
         is still in the first, so only `workers` items are ever in flight.
         """
+        reuse_slots(planner.member_reuse(manifest, group))  # first: reuse shrinks every item's work
         keys = manifest.keys(group.fanout)
-        for member in group.order:  # key-matched reuse first: it shrinks every item's work
-            root = key_roots.get(member)
-            # key-matched reuse also needs the step's OTHER inputs identical
-            # to the origin's — any other keyed ancestor's change taints them
-            if root is None or not work_lists_unchanged(member, excluding=root):
-                continue
-            reuse_slots(
-                [
-                    Slot(member, k)
-                    for k in keys
-                    if Slot(member, k) not in manifest and origin.get(member, k) is not None
-                ]
-            )
         items = {}
         for k in keys:
             if pending := [m for m in group.order if Slot(m, k) not in manifest]:
@@ -585,8 +556,7 @@ def run(
     try:
         for name in dag.plan:  # a fan-out node covers its group; members never stand alone
             step = dag.steps[name]
-            if name in lazy_reuse and work_lists_unchanged(name):
-                reuse_slots([Slot(name, k) for k in origin.keys(name) if Slot(name, k) not in manifest])
+            reuse_slots(planner.node_reuse(manifest, name))
             group = dag.groups.get(name)
             if step.is_fanout:
                 if not manifest.width(name):  # skip if a prior run already produced it

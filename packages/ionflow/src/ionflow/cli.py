@@ -149,6 +149,11 @@ def run(
         "--allow-commit-drift",
         help="Resume even though HEAD differs from the origin run's commit (reused steps keep their old-code outputs)",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="With --resume: report what each step would reuse vs compute (assuming unchanged work-lists), then exit",
+    ),
     max_workers: int = typer.Option(
         None, "--max-workers", help="Parallel item workers, one per fan-out item (default: CPU count)"
     ),
@@ -158,7 +163,17 @@ def run(
     branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch sub-step"),
 ):
     """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
+    from . import runner as _runner
+
     cls = _load(flow)
+    if dry_run:
+        if not resume:
+            raise typer.BadParameter("--dry-run previews a resume; pass --resume as well")
+        origin, table = _runner.preview(cls, _config_or_setup(), resume)
+        typer.echo(f"resume from {origin} (assuming unchanged work-lists):")
+        for step, (reused, computed) in table.items():
+            typer.echo(f"  {step}: reuse {reused}, compute {'?' if computed < 0 else computed}")
+        raise typer.Exit(0)
     params = _parse_params(cls.params_columns(), param)
     typer.echo(
         cls.run(
