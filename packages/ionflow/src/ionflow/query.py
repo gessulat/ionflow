@@ -3,6 +3,7 @@ import duckdb
 from . import lake, metrics
 from .arrow import read_parquet_sql
 from .dag import PATH_COL
+from .schema import _q
 from .space import Space, utc_now
 from .store import Store
 
@@ -21,10 +22,10 @@ def ledger_sql(flow_cls, src="lake.runs"):
     """
     cols = ['run_id, status, started, finished, "commit", origin_run_id']
     for n, c in flow_cls.params_columns().items():
-        cols.append(f"CAST(params->>'{n}' AS {c.duckdb_type()}) AS {n}")
+        cols.append(f"CAST(params->>'{n}' AS {c.duckdb_type()}) AS {_q(n)}")
     for n, c in flow_cls.ledger_columns().items():
         op = "->" if c.is_vector() else "->>"  # -> keeps JSON arrays castable to DuckDB arrays
-        cols.append(f"CAST(custom{op}'{n}' AS {c.persisted_type()}) AS {n}")
+        cols.append(f"CAST(custom{op}'{n}' AS {c.persisted_type()}) AS {_q(n)}")
     return f"SELECT {', '.join(cols)} FROM {src}"
 
 

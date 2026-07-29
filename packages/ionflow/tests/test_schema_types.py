@@ -87,34 +87,52 @@ def test_golden_renderings():
     """Every rendering of one table carrying all four constraint kinds."""
     assert Golden.ddl("golden") == (
         "CREATE TABLE golden (\n"
-        "  id BIGINT NOT NULL PRIMARY KEY,\n"
-        "  label VARCHAR,\n"
-        "  score DOUBLE NOT NULL CHECK (score >= 0),\n"
-        "  spectrum FLOAT[3] NOT NULL\n"
+        '  "id" BIGINT NOT NULL PRIMARY KEY,\n'
+        '  "label" VARCHAR,\n'
+        '  "score" DOUBLE NOT NULL CHECK (score >= 0),\n'
+        '  "spectrum" FLOAT[3] NOT NULL\n'
         ")"
     )
     assert Golden.ddl("golden", temp=True).startswith("CREATE TEMP TABLE golden (")
     # what the lakes are created from: persisted types (FLOAT[], not FLOAT[3]) and
     # NOT NULL only — PK/CHECK stay ionflow-side
     assert Golden.persisted_ddl() == (
-        "id BIGINT NOT NULL, label VARCHAR, score DOUBLE NOT NULL, spectrum FLOAT[] NOT NULL"
+        '"id" BIGINT NOT NULL, "label" VARCHAR, "score" DOUBLE NOT NULL, "spectrum" FLOAT[] NOT NULL'
     )
     # the FIXED flavour: this cast is the only place a shaped column's width is enforced
     assert Golden.cast_sql("_src") == (
-        "SELECT CAST(id AS BIGINT) AS id, CAST(label AS VARCHAR) AS label, "
-        "CAST(score AS DOUBLE) AS score, CAST(spectrum AS FLOAT[3]) AS spectrum FROM _src"
+        'SELECT CAST("id" AS BIGINT) AS "id", CAST("label" AS VARCHAR) AS "label", '
+        'CAST("score" AS DOUBLE) AS "score", CAST("spectrum" AS FLOAT[3]) AS "spectrum" FROM _src'
     )
     assert Golden.violation_scans() == [
-        ("id NOT NULL", "count(*) FILTER (WHERE id IS NULL)"),
-        ("score NOT NULL", "count(*) FILTER (WHERE score IS NULL)"),
+        ("id NOT NULL", 'count(*) FILTER (WHERE "id" IS NULL)'),
+        ("score NOT NULL", 'count(*) FILTER (WHERE "score" IS NULL)'),
         ("CHECK (score >= 0)", "count(*) FILTER (WHERE (score >= 0) IS FALSE)"),
-        ("spectrum NOT NULL", "count(*) FILTER (WHERE spectrum IS NULL)"),
-        ("PRIMARY KEY (id)", "count(*) - count(DISTINCT (id))"),
+        ("spectrum NOT NULL", 'count(*) FILTER (WHERE "spectrum" IS NULL)'),
+        ("PRIMARY KEY (id)", 'count(*) - count(DISTINCT ("id"))'),
     ]
     s = Golden.arrow_schema()
     assert s.names == ["id", "label", "score", "spectrum"]
     assert s.types == [pa.int64(), pa.string(), pa.float64(), pa.list_(pa.float32(), 3)]
     assert [f.nullable for f in s] == [False, True, False, False]
+
+
+def test_column_names_needing_quotes():
+    """Scientific schemas carry names SQL cannot take bare: 'b 1 +1', 'z* 5 +1'."""
+    Ions = Table.make(
+        "Ions",
+        {"scan": int, "b 1 +1": float | None, "z* 5 +1": float | None, 'we"ird': float | None},
+    )
+    con = duckdb.connect()
+    con.execute(Ions.ddl("ions"))  # the whole point: it parses
+    con.sql(Ions.empty())  # and so does the typed empty stand-in
+
+    assert '"b 1 +1" DOUBLE' in Ions.ddl("ions")
+    assert 'CAST("b 1 +1" AS DOUBLE) AS "b 1 +1"' in Ions.cast_sql("_src")
+    assert '"we""ird"' in Ions.ddl("ions")  # embedded quote doubled
+    assert '"scan" BIGINT NOT NULL' in Ions.persisted_ddl()
+    labels = [label for label, _ in Ions.violation_scans()]
+    assert labels == ["scan NOT NULL"]  # labels stay human-readable, unquoted
 
 
 # --- 3. the other column-set classes ---
@@ -170,7 +188,7 @@ def test_make_carries_constraints():
     assert list(Wide.columns()) == ["id", "v", "s", "tags"]
     assert Wide.columns()["id"].primary_key and not Wide.columns()["id"].nullable
     # NOT NULL is orthogonal to the type: an array can be either
-    assert Wide.persisted_ddl() == "id BIGINT NOT NULL, v FLOAT[] NOT NULL, s VARCHAR, tags VARCHAR[]"
+    assert Wide.persisted_ddl() == '"id" BIGINT NOT NULL, "v" FLOAT[] NOT NULL, "s" VARCHAR, "tags" VARCHAR[]'
     with pytest.raises(TypeError, match="unknown columns"):
         Table.make("Bad", {"a": int}, typo=primary_key)
 
