@@ -36,5 +36,5 @@ def test_upsert_replaces_by_run_id_and_appends_others(cfg):
 def test_meta_is_absent_until_written(cfg):
     s = Store.of(cfg).space("ETL")
     assert s.read_meta("r1") is None
-    s.write_meta("r1", {"run_id": "r1", "steps_complete": ["raw/0"]})
-    assert s.read_meta("r1")["steps_complete"] == ["raw/0"]
+    s.write_meta("r1", {"run_id": "r1", "manifest": {"raw": [[0, "some/key"]]}})
+    assert s.read_meta("r1")["manifest"] == {"raw": [[0, "some/key"]]}

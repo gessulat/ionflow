@@ -110,21 +110,13 @@ class Catalog:
         self.space.store.delete(self.key)
 
 
-def _branch_order(tail):
-    """Sort key ordering part_2 before part_10 — a rebuilt catalog must register
-    a step's parts in the runner's order, for the reason `Progress.keys` gives.
-
-    >>> sorted(["part_10.parquet", "part_2.parquet"], key=_branch_order)
-    ['part_2.parquet', 'part_10.parquet']
-    """
-    name = tail.removeprefix("part_").removesuffix(".parquet")
-    return (0, int(name)) if name.isdigit() else (1, 0)
-
-
 def backfill(flow_cls, space, replace=False):
-    """Rebuild a flow's catalog from its run folders — the recovery path for a
-    lost or corrupt register; returns the number of complete runs registered.
+    """Rebuild a flow's catalog from the run folders' `_meta.json` recovery
+    records — the path for a lost or corrupt register; returns the number of
+    complete runs registered. Steps no longer in the flow's code are dropped.
     """
+    from .state import Manifest  # state builds on Space; local import breaks the cycle
+
     cat = Catalog(space)
     if cat._blob() is not None:
         if not replace:
@@ -134,11 +126,11 @@ def backfill(flow_cls, space, replace=False):
     complete = {r["run_id"] for r in space.read_rows(space.ledger) if r["status"] == "complete"}
     steps = set(flow_cls._dag.steps)
     by_step = {}
-    for key in space.store.list(space.root + "/runs/run_id="):
-        parsed = space.parse_part(key)
-        if parsed and parsed[0] in complete and parsed[1] in steps:
-            by_step.setdefault(parsed[1], []).append((parsed[0], _branch_order(parsed[2]), key))
-    cat.register_parts({step: [k for *_, k in sorted(by_step[step])] for step in sorted(by_step)})
+    for run_id in sorted(complete):
+        manifest = Manifest.from_meta((space.read_meta(run_id) or {}).get("manifest"))
+        for step in steps:
+            by_step.setdefault(step, []).extend(manifest.paths(step))
+    cat.register_parts({step: by_step[step] for step in sorted(by_step)})
     return len(complete)
 
 

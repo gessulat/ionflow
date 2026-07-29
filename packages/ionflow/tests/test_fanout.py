@@ -56,7 +56,7 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
 
     space = Space.for_flow(Store.of(s3cfg), FlakyFlow)
     keys = space.store.list(space.root + "/runs/")
-    # branch 1 raised, yet its worker's final (finally) write landed; one object
+    # item 1 raised, yet its worker's final (finally) write landed; one object
     # per item, named for the fan-out — a worker covers the item's whole sub-DAG
     assert space.metrics_branch(run_id, "parts", 1) in keys
     branches = {
@@ -65,7 +65,7 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
             f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' AND branch IS NOT NULL"
         ).fetchall()
     }
-    assert branches == {0, 1, 2}  # failed branch included
+    assert branches == {"0", "1", "2"}  # failed item included; labels are item keys
 
 
 def test_steps_read_side_inputs_via_config(s3cfg, repo):
@@ -123,7 +123,7 @@ def test_chained_branch_in_process_mode(s3cfg, repo, tmp_path, monkeypatch):
         ).fetchall()
     }
     # every sub-step of every item is measured; NULL labels are the worker between them
-    assert measured >= {(s, b) for s in ("work", "refine") for b in (0, 1, 2)}
+    assert measured >= {(s, b) for s in ("work", "refine") for b in ("0", "1", "2")}
 
 
 @pytest.mark.slow

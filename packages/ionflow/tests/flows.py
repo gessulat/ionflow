@@ -121,7 +121,7 @@ class TwoGroupFlow(Flow):
 
     Thread mode is the only place one process runs both groups, so it is the only
     place a worker binding cached for the first group could still be around for
-    the second — with the first group's collect widths.
+    the second — with the first group's collect inputs.
     """
 
     def side_a(self) -> Fanout[Src]:

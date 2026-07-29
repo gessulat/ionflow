@@ -1,7 +1,9 @@
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
+import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -36,6 +38,24 @@ class ConstraintViolation(RuntimeError):
 def utc_now():
     """Naive UTC now — the project's single timestamp convention."""
     return dt.datetime.now(dt.UTC).replace(tzinfo=None)
+
+
+_SLUG_BAD = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def key_slug(key):
+    """Filename-safe form of an item key: exact when already clean, else
+    sanitized + content-hashed. The manifest, not the filename, is the
+    authoritative key -> part mapping; the slug only keeps run folders legible.
+
+    >>> key_slug(3), key_slug("file-7")
+    ('3', 'file-7')
+    >>> key_slug("data/a.raw")
+    'data-a.raw-7ffc3f78'
+    """
+    s = str(key)
+    clean = _SLUG_BAD.sub("-", s)[:80]
+    return clean if clean == s else f"{clean}-{hashlib.sha1(s.encode()).hexdigest()[:8]}"
 
 
 def flow_id_of_ledger_key(prefix, key):
@@ -85,8 +105,8 @@ class Space:
     'mf/ETL/ledger.parquet'
     >>> s.part("r1", "raw")
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
-    >>> s.parse_part(s.part("r1", "raw"))
-    ('r1', 'raw', 'part_0.parquet')
+    >>> s.part("r1", "work", "file-7")
+    'mf/ETL/runs/run_id=r1/work/part_file-7.parquet'
     """
 
     store: Store
@@ -126,19 +146,9 @@ class Space:
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
 
-    def part(self, run_id, step, branch=0):
-        return f"{self.step_dir(run_id, step)}/part_{branch}.parquet"
-
-    def parse_part(self, key):
-        """Inverse of part(): (run_id, step, tail) for a key under this space's run
-        folders, else None. `tail` is everything after the step segment, so nested
-        keys parse like the flat ones the layout writes."""
-        prefix = f"{self.root}/runs/run_id="
-        if not key.startswith(prefix):
-            return None
-        run_id, _, rest = key[len(prefix) :].partition("/")
-        step, _, tail = rest.partition("/")
-        return (run_id, step, tail) if tail else None
+    def part(self, run_id, step, key=0):
+        """The part key for one (step, item key) — see `key_slug` for the naming."""
+        return f"{self.step_dir(run_id, step)}/part_{key_slug(key)}.parquet"
 
     def is_internal(self, key):
         """True for the flow's catalog register or its catalog-written data files."""
@@ -213,7 +223,7 @@ class Space:
         tag_of = {dst: tag for _, dst, tag in items}
         return (tag_of[dst] for dst in self.store.copy_many([(s, d) for s, d, _ in items]))
 
-    def write_part(self, key, data, table, threads=None, memory_mb=None, fanout_key=None):
+    def write_part(self, dest, data, table, threads=None, memory_mb=None, fanout_key=None):
         """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.
 
         The COPY runs on a fresh local connection fed by an arrow batch reader —
@@ -221,23 +231,27 @@ class Space:
         source deadlocks), and the write itself goes through boto3, never httpfs
         (a failed `COPY TO s3://` leaves a corrupt part visible, ADR 0010).
         Nothing touches S3 until the staged file is complete and validated, so a
-        part object's existence implies the part is whole. Returns the item's
-        `fanout_key` value when a key column is given, else None.
+        part object's existence implies the part is whole. `dest` is the target
+        key, or — for keyed fan-out items, whose name derives from the data — a
+        callable mapping the extracted key value to it (raising there, e.g. on a
+        duplicate key, still uploads nothing). Returns the item's `fanout_key`
+        value when a key column is given, else None.
         """
         # capability dispatch: covers relations and StepInput (which delegates
         # to_arrow_reader to its relation) without per-wrapper unwrap branches
         src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
+        label = dest if isinstance(dest, str) else "step output"
         if missing := set(table.columns()) - set(src.schema.names):
-            raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
+            raise ConstraintViolation(f"{label}: step output missing declared columns: {sorted(missing)}")
         con = self.store.local_connection(threads, memory_mb)
         con.register("_src", src)
         select = table.cast_sql("_src")
         with tempfile.TemporaryDirectory(prefix="ionflow-part-") as tmp_dir:
             path = os.path.join(tmp_dir, "part.parquet")
             con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
-            _validate_part(con, table, path, key)
-            key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
-            self.store.upload(key, path)
+            _validate_part(con, table, path, label)
+            key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, label)
+            self.store.upload(dest(key_value) if callable(dest) else dest, path)
         return key_value
 
     def sync_to(self, other, flow_cls):

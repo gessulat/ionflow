@@ -49,24 +49,6 @@ def test_keyed_resume_grow_shrink_unchanged(cfg, repo):
 
 
 @pytest.mark.slow
-def test_resume_from_origin_without_fanout_keys_recomputes(cfg, repo):
-    put_n(cfg, 2)
-    origin = KeyedFlow.run(cfg, repo=repo, use_processes=False)
-    # simulate an origin written before fanout keys existed
-    space = Space.for_flow(Store.of(cfg), KeyedFlow)
-    meta = space.read_meta(origin)
-    del meta["fanout_keys"]
-    space.write_meta(origin, meta)
-
-    with pytest.warns(UserWarning, match="no fanout keys"):
-        resumed = KeyedFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
-    con = KeyedFlow.duck(cfg)
-    old, new = _tokens(con, origin), _tokens(con, resumed)
-    assert set(new) == set(old)
-    assert all(new[k] != old[k] for k in new)  # nothing reusable -> recomputed
-
-
-@pytest.mark.slow
 def test_resume_latest_uses_newest_complete_run(cfg, repo):
     put_n(cfg, 2)
     first = KeyedFlow.run(cfg, repo=repo, use_processes=False, resume="latest")  # no prior: fresh
@@ -101,7 +83,7 @@ def test_branch_reuse_tainted_by_other_keyed_ancestor(cfg, repo):
 
 @pytest.mark.slow
 def test_branch_collects_a_non_sibling_fanout_in_a_worker(cfg, repo):
-    """A spawned worker resolves a Collect of another fan-out from the payload's widths."""
+    """A spawned worker resolves a Collect of another fan-out from the payload's dep paths."""
     put_n(cfg, 3)
     run_id = TwoKeyFlow.run(cfg, repo=repo, use_processes=True)
 

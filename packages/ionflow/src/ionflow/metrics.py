@@ -21,7 +21,7 @@ class Sample(Table):
 
     ts: dt.datetime  # naive UTC, like the ledger
     step: str | None  # active step (NULL = orchestrator idle / pool-wait)
-    branch: int | None  # set only by process-mode branch workers
+    branch: str | None  # the item key, set only by process-mode branch workers
     rss: int  # bytes
     threads: int  # native threads (includes DuckDB's)
     cpu_user: float  # cumulative process seconds
@@ -41,9 +41,9 @@ class Sampler:
     are swallowed, since S3 flakiness must kill neither this thread nor the run.
 
     >>> s = Sampler()
-    >>> s.mark("load"); s.mark("load", 3)
+    >>> s.mark("load"); s.mark("load", "file-3")
     >>> [(r[1], r[2]) for r in s.stop()][:2]
-    [('load', None), ('load', 3)]
+    [('load', None), ('load', 'file-3')]
     """
 
     def __init__(self, flush=None):
