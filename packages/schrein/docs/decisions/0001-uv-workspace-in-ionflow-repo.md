@@ -11,7 +11,7 @@ are instead developed here, as an independent uv workspace member under
 Why:
 
 - The spec's origin, its companion exploration
-  (`docs/specs/ionflow-on-schrein.md`), and the proven patterns being
+  (`ionflow-on-schrein.md`, since retired), and the proven patterns being
   extracted (the CAS loop from `ledger.py`, the moto subprocess harness from
   `tests/conftest.py`) all live in this repo — co-locating keeps spec and
   implementation evolving together while the design is young.

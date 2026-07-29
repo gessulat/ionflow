@@ -19,9 +19,10 @@ Mechanics, and the invariants they carry:
   per-run membership is the `manifest` table's job.
 - **Genesis precedes the first run object.** `CREATE TABLE IF NOT EXISTS`
   per step (persisted types — the read-side rule; NOT NULL only, all
-  DuckLake enforces; PK/CHECK stay ionflow-side per 0003) commits before
-  `_meta.json` or the ledger row exist. Invariant: a run implies a
-  catalog, so "runs but no catalog" always means a lost register.
+  DuckLake enforces; PK/CHECK stay ionflow-side per 0003) commits — since
+  0019, atomically with the run's ledger row — before any part object
+  exists. Invariant: a run implies a catalog, so "runs but no catalog"
+  always means a lost register.
   `run_id` is reserved as a column name, checked at class definition.
 - **One CAS commit per completed step**, by the orchestrator only, at the
   step's completion point — a fan-out's parts land atomically, so lake

@@ -28,10 +28,10 @@ dialect.
 **Migration = `ionflow sync`, per flow, and the catalog is re-derived.** A
 DuckLake catalog records absolute data-file locations, so the local catalog
 object is meaningless on S3. `sync` therefore copies the immutable run
-folders byte-for-byte, MERGES ledger rows through the target's CAS ledger
-(bucket-side runs survive; re-sync is idempotent because rows key by
-`run_id`), and rebuilds the target catalog with `catalog.backfill` — the
-same recovery path 0012 established, now doing double duty. The local store
+folders byte-for-byte and rebuilds the whole target catalog — ledger rows,
+manifests, registrations — with `lake.backfill` from the copied
+`_meta.json` records (re-sync is idempotent: backfill rebuilds from all of
+them) — the same recovery path 0012/0019 established, doing double duty. The local store
 is never mutated by sync; cutover is an explicit `ionflow setup` re-run.
 
 Rejected alternatives: auto-running a local S3 server (infrastructure in

@@ -5,11 +5,10 @@ Status: accepted (2026-07-26)
 ## Context
 
 Fan-out branches run user code that typically imports numpy/torch. The
-orchestrator is multi-threaded (metrics sampler, DuckDB workers) and has
-already run user code in-process for non-branch steps, so `fork`ed children
-would inherit OpenMP/BLAS/CUDA state mid-flight — hangs, "cannot re-initialize
-CUDA". On Linux the stdlib `ProcessPoolExecutor` default is still fork
-(Python 3.12/3.13).
+orchestrator is multi-threaded (metrics sampler, DuckDB in the catalog
+commits), so `fork`ed children would inherit that state mid-flight — hangs,
+"cannot re-initialize CUDA". On Linux the stdlib `ProcessPoolExecutor`
+default is still fork (Python 3.12/3.13).
 
 Separately, the sizing knobs are the operational bottleneck: peak RAM ≈
 workers × one branch's working set, and users cron or script runs from the
@@ -18,8 +17,8 @@ CLI — so the execution-mode choice has to be reachable wherever
 
 ## Decision
 
-- Process-mode fan-out **always uses `get_context("spawn")`**, on every
-  platform (`runner.py`, `_run_branches`). Never fork.
+- Process mode **always uses `get_context("spawn")`**, on every platform
+  (`runner.py`). Never fork.
 - Spawn is load-bearing beyond safety: each worker sets
   `OMP/OPENBLAS/MKL_NUM_THREADS` to its fair share *before* the flow module
   imports numpy — only possible in a fresh interpreter — and runs its own
@@ -44,7 +43,11 @@ CLI — so the execution-mode choice has to be reachable wherever
   with heavy deps); acceptable for production runs, which is why tests opt out.
 - Users can pick thread mode in production and hit its accepted limits; the
   default stays process mode, so this is opt-in.
-- The two modes share `_branch_worker` entirely; the only forks are which
+- The two modes share `_task_worker` entirely; the only forks are which
   executor is built and the `sample` flag (sampler + env caps). Removing
   thread mode was considered and rejected — it would delete ~15 lines and
   slow the suite several-fold.
+
+> NOTE (2026-07-29): since 0021 the pool runs EVERY task (plain steps and
+> fan-out emissions included, one pool per run), so the mode choice and the
+> spawn rule now cover the whole run, not just fan-out branches.

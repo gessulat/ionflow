@@ -164,7 +164,7 @@ class DuckLake:
         """Delete (or with dry_run just list) data-path objects that are BOTH
         unneeded by every retained snapshot AND older than the grace TTL — so an
         in-flight writer's just-uploaded files can never be reaped before its commit
-        lands (spec §5.5). Reads the catalog, never commits; returns the object keys.
+        lands (spec §4.5). Reads the catalog, never commits; returns the object keys.
         """
         live = self._live_files()
         bucket, _, prefix = self.data_path.removeprefix("s3://").partition("/")
