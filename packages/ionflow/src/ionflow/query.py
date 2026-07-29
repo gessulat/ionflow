@@ -7,9 +7,7 @@ from .space import LEDGER_FIELDS, Space, utc_now
 from .store import Store
 
 # a flow with no runs has no ledger object; the view must still exist and type
-_EMPTY_LEDGER_SQL = (
-    "SELECT " + ", ".join(f'NULL::{_sql(f.type)} AS "{f.name}"' for f in LEDGER_FIELDS) + " WHERE false"
-)
+_EMPTY_LEDGER_SQL = "SELECT " + ", ".join(f'NULL::{_sql(f.type)} AS "{f.name}"' for f in LEDGER_FIELDS) + " WHERE false"
 
 
 def _empty_view_sql(table):
