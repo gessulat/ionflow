@@ -1,0 +1,263 @@
+from pathlib import Path
+from typing import cast
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.screen import Screen
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+    TabbedContent,
+    TabPane,
+    Tabs,
+)
+
+from . import git, lake, query
+from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
+from .flow import discover_flows
+from .space import Space, flow_id_of_ledger_key
+from .store import Store
+
+LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
+
+
+def _slug(flow_id):
+    """Widget-id-safe form of a flow_id (Textual ids forbid the dots).
+
+    Injective: "-" cannot appear in a module or class name, so distinct
+    flow_ids never collide.
+    """
+    return flow_id.replace(".", "-")
+
+
+def _fill(table, relation, columns=None):
+    """Fill a DataTable from a DuckDB relation (all columns, or a named subset)."""
+    pairs = [(c, relation.columns.index(c)) for c in (columns or relation.columns) if c in relation.columns]
+    table.clear(columns=True)
+    table.add_columns(*[c for c, _ in pairs])
+    for row in relation.fetchall():
+        table.add_row(*["" if row[i] is None else str(row[i]) for _, i in pairs])
+
+
+class FlowTable(DataTable):
+    BINDINGS = [Binding("j", "cursor_down", "Down"), Binding("k", "cursor_up", "Up")]
+
+
+class RunDetailScreen(Screen):
+    """Per-step output preview + resource stats for one run; Esc goes back."""
+
+    BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
+    CSS = "#steps { width: 24; border-right: solid $primary; } #preview { width: 1fr; }"
+    STATS = "__stats__"  # synthetic list entry; can't collide (steps never start with _)
+
+    def __init__(self, flow_cls, run_id, con):
+        super().__init__()
+        self.flow_cls = flow_cls
+        self.run_id = run_id
+        self.con = con
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Label(f"{self.flow_cls.flow_id()} · run {self.run_id}")
+        yield Horizontal(
+            ListView(
+                ListItem(Label("▸ stats"), id=f"step-{self.STATS}"),
+                *[ListItem(Label(s), id=f"step-{s}") for s in self.flow_cls._dag.steps],
+                id="steps",
+            ),
+            DataTable(id="preview", cursor_type="row"),
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._show(self.STATS)
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.item is not None:
+            self._show(event.item.id.removeprefix("step-"))
+
+    def _show(self, step) -> None:
+        if step == self.STATS:
+            rel = query.step_stats(self.con, self.run_id)
+        else:
+            rel = query.step_rows(self.con, step, self.run_id)
+        _fill(self.query_one("#preview", DataTable), rel)
+
+
+class OverviewScreen(Screen):
+    """One tab per flow, each a table of that flow's runs (ledger + custom cols)."""
+
+    BINDINGS = [
+        Binding("tab", "next_flow", "Next flow", priority=True),
+        Binding("shift+tab", "prev_flow", "Prev flow", priority=True),
+    ]
+    CSS = "#banner { color: $warning; }"
+
+    def __init__(self, config, flows, warnings, with_data):
+        super().__init__()
+        self.config = config
+        self.flows = flows
+        self.warnings = warnings
+        self.with_data = with_data
+        self._cons = {}
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        if self.warnings:
+            yield Static("\n".join("⚠ " + w for w in self.warnings), id="banner")
+        if not self.flows:
+            yield Static("No flows found. Set `flows` in .ionflow/config to your flows package.")
+        with TabbedContent():
+            for name in self.flows:
+                with TabPane(name, id=f"flow-{_slug(name)}"):
+                    yield FlowTable(cursor_type="row", id=f"table-{_slug(name)}")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        for name, cls in self.flows.items():
+            table = self.query_one(f"#table-{_slug(name)}", FlowTable)
+            if name not in self.with_data:
+                table.add_columns("info")
+                table.add_row("no runs yet")
+                continue
+            try:
+                con = cls.duck(self.config)
+                self._cons[name] = con
+                rel = query.ledger_with_liveness(cls, self.config, con).order("started DESC")
+                _fill(table, rel, LEDGER_COLS + list(cls.params_columns()) + list(cls.ledger_columns()))
+            except Exception as e:  # noqa: BLE001 — show the failure in the tab, don't crash
+                table.add_columns("error")
+                table.add_row(str(e))
+        self._focus_active_table()
+
+    def _active_flow(self):
+        """flow_id of the active tab — inverts _slug ("-" never occurs in a flow_id)."""
+        return self.query_one(TabbedContent).active.removeprefix("flow-").replace("-", ".")
+
+    def _focus_active_table(self) -> None:
+        if not self.flows:
+            return
+        slug = self.query_one(TabbedContent).active.removeprefix("flow-")
+        try:
+            self.query_one(f"#table-{slug}", FlowTable).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._focus_active_table()
+
+    def action_next_flow(self) -> None:
+        self.query_one(Tabs).action_next_tab()
+
+    def action_prev_flow(self) -> None:
+        self.query_one(Tabs).action_previous_tab()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        name = self._active_flow()
+        con = self._cons.get(name)
+        if con is None:
+            return
+        cols = [str(c.label) for c in event.data_table.columns.values()]
+        run_id = str(event.data_table.get_row(event.row_key)[cols.index("run_id")])
+        self.app.push_screen(RunDetailScreen(self.flows[name], run_id, con))
+
+
+class SetupScreen(Screen):
+    """Shown when the repo isn't configured; writes .ionflow/config.
+
+    The form is generated from SETUP_FIELDS — the same spec that drives
+    `ionflow setup`'s prompts.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Label("Configure ionflow for this repo")
+        for key, label, default in SETUP_FIELDS:
+            yield Label(label)
+            yield Input(value=default or "", id=key)
+        yield Button("Save", id="save", variant="primary")
+        yield Static("", id="setup-msg")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "save":
+            return
+        vals = {
+            key: self.query_one(f"#{key}", Input).value.strip() or default or "" for key, _, default in SETUP_FIELDS
+        }
+        if not vals["bucket"]:
+            self.query_one("#setup-msg", Static).update(
+                "Bucket is required (for a bucket-free local store, quit and run `ionflow setup --local`)."
+            )
+            return
+        cfg = config_from_setup(vals)
+        root = git.repo_root()
+        write_config(Path(root) if root else Path.cwd(), cfg)
+        app = cast("IonflowTUI", self.app)
+        app.switch_screen(app.overview_screen(cfg))
+
+
+def scan_runs(store):
+    """Flow names with a ledger in the store — one LIST of the prefix."""
+    prefix = store.prefix + "/"
+    return {name for key in store.list(prefix) if (name := flow_id_of_ledger_key(prefix, key)) is not None}
+
+
+def startup_warnings(flows, store, with_data):
+    """Health check: orphaned stored data + schema drift, as human-readable lines."""
+    warnings = []
+    for name in sorted(with_data - set(flows)):
+        warnings.append(f"{name}: has runs on S3 but no matching Flow in code")
+    for name, cls in flows.items():  # one store serves every flow's check
+        if name not in with_data:
+            continue
+        try:
+            warnings += lake.schema_drift(cls, Space.for_flow(store, cls))
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"{name}: schema check failed: {e}")
+    return warnings
+
+
+class IonflowTUI(App):
+    TITLE = "ionflow"
+    BINDINGS = [Binding("q", "quit", "Quit")]
+
+    def __init__(self, config=None):
+        super().__init__()
+        self._config = config
+
+    def on_mount(self) -> None:
+        self.theme = "dracula"
+        try:
+            cfg = self._config or Config.load()
+        except ConfigMissing:
+            self.push_screen(SetupScreen())
+            return
+        self.push_screen(self.overview_screen(cfg))
+
+    def overview_screen(self, cfg) -> OverviewScreen:
+        try:
+            flows = discover_flows(cfg.flows) if cfg.flows else {}
+            import_warnings = []
+        except Exception as e:  # noqa: BLE001
+            flows, import_warnings = {}, [f"could not import flows '{cfg.flows}': {e}"]
+        try:
+            store = Store.of(cfg)
+            with_ledger = scan_runs(store)
+            warnings = import_warnings + startup_warnings(flows, store, with_ledger)
+            with_data = set(flows) & with_ledger
+        except Exception as e:  # noqa: BLE001
+            with_data, warnings = set(), import_warnings + [f"could not read S3: {e}"]
+        return OverviewScreen(cfg, flows, warnings, with_data)
+
+
+def run_tui(config=None):
+    IonflowTUI(config).run()

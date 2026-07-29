@@ -1,20 +1,43 @@
 # ionflow — agent notes
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed table,
-persisted as Parquet on S3. Only infra: one S3-compatible bucket. DuckDB-first.
-See README.md for user-facing docs. Design decisions (the *why* behind
-non-obvious choices) live in `docs/decisions/` — check there before changing
-architecture, add a numbered record when you make such a decision.
+persisted as Parquet on S3. Only infra: one S3-compatible bucket — or none:
+local mode (`Config.local_dir`, `ionflow setup --local`) stores everything in a
+directory via schrein's `LocalClient`, `ionflow sync` pushes a flow's history
+to a bucket later (0016). DuckDB-first.
+See `packages/ionflow/README.md` for user-facing docs. Design decisions (the *why*
+behind non-obvious choices) live in `packages/ionflow/docs/decisions/` — check there
+before changing architecture, add a numbered record when you make such a decision.
+
+## Repo layout (uv workspace)
+
+The repo root is a **workspace root only** — no package lives there (decision 0017).
+`ionflow` and `schrein` are siblings under `packages/`, each with its own
+`pyproject.toml`, dev group, test suite, README, `docs/decisions/` and LICENSE:
+
+```
+pyproject.toml            # [tool.uv.workspace] + repo-wide ruff/ty config, no [project]
+packages/ionflow/         # src/, tests/, examples/, docs/{decisions,specs,screenshots}/
+packages/schrein/         # src/, tests/, docs/{decisions,specs}/
+```
+
+`uv sync` at the root builds **one** environment holding both members and every
+dev group, so `uv run` works from anywhere in the repo; `--directory` picks which
+member's config (pytest, in particular) applies. Paths below are relative to the
+repo root unless stated otherwise.
 
 ## Testing (important)
 
 ```bash
-uv run pytest              # default: fast set (incl. doctests)
-uv run pytest -m ""        # FULL suite — run this before committing
-uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
+uv run --directory packages/ionflow pytest        # default: fast set (incl. doctests)
+uv run --directory packages/ionflow pytest -m ""  # FULL suite — run this before committing
+uv run --directory packages/ionflow pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist workers
 ```
 
-- Tests run **parallel by default** (`-n 5 --dist worksteal`, set in pyproject).
+- There is **no root test suite** (decision 0017): always pass `--directory` (or
+  `cd` into the package). A bare `uv run pytest` at the root is a mistake.
+- Tests run **parallel by default** (`-n 5 --dist worksteal`, set in the member's
+  pyproject).
 - The heaviest integration tests are marked `slow` and **skipped by default**:
   CLI end-to-end, process-pool run, and every multi-run resume test (plain and
   keyed/incremental). `-m ""` includes them.
@@ -27,18 +50,36 @@ uv run pytest -n 0 tests/test_x.py::test_y   # debug one test without xdist work
 - `repo` fixture = session-scoped git repo, for tests that only *read* git.
   Use `clean_repo` (function-scoped) if the test mutates the repo or its cwd.
 - The TUI has no automated tests (deliberate — human-tested). Don't add TUI tests.
+- **Never poll for the suite with `pgrep -f`.** The waiting shell's own command line
+  contains the pattern, so `until ! pgrep -f "bin/pytest"; do sleep 15; done` matches
+  ITSELF and spins forever — this has already burned hours. Wait on the harness's
+  completion notification for the backgrounded command, or match a string a waiter
+  cannot contain (`\.venv/bin/pytest`). Never hand-roll a poll loop over something
+  the harness already reports.
+- **Never test what the library guarantees.** Writer and reader both derive from the
+  same `Table`, so a write-then-read-back assertion tests pyarrow/DuckDB, not ionflow.
+  Test only where ionflow's own mapping DIFFERS from the pass-through — `_persist`
+  (a fixed array round-trips as a plain list), the constraint scans, the numpy
+  conversion. Likewise, `_LEAF`/`_SQL` are lookup tables: spot-check the kinds,
+  never enumerate the dict.
 
 ## Commands
 
 ```bash
-uv sync                       # install (uv-managed, Python >=3.12)
+uv sync                       # install the whole workspace (uv-managed, Python >=3.12)
+uv run ruff check             # lint + typecheck are repo-wide, run from the root
+uv run ty check
+uv build --all-packages       # both wheels into dist/
 uv run ionflow               # bare command opens the TUI
-uv run ionflow setup         # wizard: writes .ionflow/config (TOML)
-uv run ionflow run examples.embed:EmbedDocs            # sizing: --max-workers/--threads/--branch-retries
+uv run ionflow setup         # wizard: writes .ionflow/config (TOML); --local = bucket-free dir store
+uv run ionflow sync myproj:Annotate --to s3://bucket   # push local-store history to a bucket
 uv run ionflow run myproj:Annotate --resume latest # keyed resume from latest complete run
-uv run ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
-uv run ionflow stats examples.embed:EmbedDocs          # per-step resources, latest run
 uv run ionflow publish myproj:Annotate <run_id> <step> blessed_table  # --to s3://bucket/prefix
+
+# the bundled example flow lives in the ionflow package, so run it from there
+uv run --directory packages/ionflow ionflow run examples.embed:EmbedDocs   # sizing: --max-workers/--threads/--branch-retries
+uv run --directory packages/ionflow ionflow query examples.embed:EmbedDocs "SELECT * FROM summary"
+uv run --directory packages/ionflow ionflow stats examples.embed:EmbedDocs # per-step resources, latest run
 ```
 
 ## Performance analysis (start here when optimizing a step)
@@ -64,7 +105,7 @@ ionflow query myproj.flows:Training \
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
 
-## Architecture (one line per module, src/ionflow/)
+## Architecture (one line per module, packages/ionflow/src/ionflow/)
 
 - `schema.py`  — `Table`/`LedgerColumns`: columns as class annotations (bare = NOT NULL,
   `T | None` = nullable, `list[T]` = DuckDB array, `= primary_key` / `= check(...)` /
@@ -82,7 +123,9 @@ ionflow query myproj.flows:Training \
 - `dag.py`     — DAG from method signatures: param name = upstream step; `Fanout`/`Branch`/
   `Collect` markers; validated at class definition. Every branch step belongs to the
   `Group` of the fan-out rooting its chain (0015); `dag.plan` is the step order with
-  each group contracted into its fan-out node, and `group.deps` the intra-item edges.
+  each group contracted into its fan-out node, `dag.roots` maps a branch step to that
+  fan-out (0014), and `group.deps` are the intra-item edges. The global topological
+  order is internal — `dag.downstream(step)` is the one thing that reads it.
   Refused here: a fan-out inside a branch, a per-item step reading a sibling per-item
   step whole (`Collect`/plain instead of `Branch`), a `Branch[...]` over a step that is
   neither, and a fan-in feeding back into its own fan-out (a cycle once contracted).
@@ -93,6 +136,8 @@ ionflow query myproj.flows:Training \
   (written from run start); resume reuses the origin's params from `_meta.json`.
   There is no prototype/scratch mode (0012): every flow carries the full
   guarantees — clean git, typed steps, a catalog — from its first run.
+  `discover_flows(package)` imports a package (and its submodules) to register
+  the flows it defines — registration is a side effect of importing.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
   per-branch resume (refuses commit drift unless `allow_commit_drift`),
   in-worker branch retries (`branch_retries`), git gate,
@@ -123,11 +168,12 @@ ionflow query myproj.flows:Training \
   key-matched too, never positionally reused.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
-- `publish.py` — bless one step's output from a complete run into the publish
-  lake (a schrein DuckLake, default `<prefix>/published/`, `--to` for any
-  bucket): atomic replace in one CAS commit, snapshot history instead of
-  --force, `publications` provenance table, optional `--where` filter.
-  Still a copy into the lake's data path, never a pointer (0009).
+- `state.py`   — the run's state as types, orchestrator-side only (nothing here crosses
+  the process boundary). `Slot(step, branch)` names one written part and parses the
+  `"step/branch"` on-disk form; `Progress` maps Slot -> its part key (O(1) membership
+  and `width`, `keys(step)` in NUMERIC branch order — that is the catalog's registration
+  order, so insertion order would make reducers nondeterministic); `RunRecord.persist`
+  writes `_meta.json` and the ledger row from one state.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode item workers each flush their own
@@ -136,45 +182,76 @@ ionflow query myproj.flows:Training \
   them. Sub-steps running concurrently in one worker share one label
   (`upload_db+search`) and NULL means the worker is between sub-steps; in thread
   mode the group answers to the fan-out's name (one process interleaves items).
-- `storage.py` — S3 `Layout` (key scheme), boto3 I/O, DuckDB connections. **Writes go through boto3, never DuckDB `COPY TO s3://`**
-  (a failed httpfs write finalizes anyway, leaving a corrupt part visible — 0010).
+- `store.py`   — one object store: bytes by key plus the DuckDB wiring to read them.
+  `Store.of(cfg)` is **the only place local-vs-S3 is decided** (`S3Store` /
+  `DirStore` over boto3 or schrein's `LocalClient`); it holds the one client,
+  mints fresh connections (`connect`/`local_connection`, never memoized), and
+  builds CAS registers (`cas`) and DuckLakes (`lake`). `uri()`/`key_for_uri()`
+  are the key<->URI pair; `copy_many` is a **generator** (a failed copy leaves
+  the already-yielded prefix as real resume progress). `s3_client` stays
+  module-level — the documented side-input hatch.
+- `space.py`   — `Space`: one flow's region of a store — the key scheme both ways
+  (`part`/`meta`/`metrics`/`ledger` <-> `parse_part`) and the verbs over those keys.
+  Identity is the **`flow_id` string, never a class** (branch workers re-import the
+  flow module under a loader name). Frozen dataclass, no I/O to construct, so build
+  one wherever; the *store* is the per-command/per-worker object.
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
-  scan (NOT NULL / CHECK / PK) of that file, then `upload_file` (multipart —
-  parts may exceed S3's 5GB single-PUT cap). A COPY pipeline must NEVER read
+  scan (NOT NULL / CHECK / PK) of that file, then `Store.upload` (multipart above
+  8MB — parts may exceed S3's 5GB single-PUT cap). **Writes go through boto3,
+  never DuckDB `COPY TO s3://`** (a failed httpfs write finalizes anyway, leaving
+  a corrupt part visible — 0010). A COPY pipeline must NEVER read
   httpfs (deadlocks on partially consumed sources); relations are drained
   through `to_arrow_reader` instead. Violations raise `ConstraintViolation`.
+  Also the ledger (append-only `ledger.parquet` via `upsert_runs`/`amend`, whose
+  closure rebuilds the whole parquet from `old` on every CAS attempt — 0011, roles
+  stay separate: the ledger is run bookkeeping, never a catalog), per-run
+  `_meta.json` (`read_meta`/`write_meta`), and `sync_to` (local -> S3 migration:
+  copy immutable run folders, MERGE ledger rows idempotently by run_id, rebuild
+  the target catalog via `lake.backfill` — a DuckLake catalog holds absolute
+  paths, so it is re-derived, never copied). Timestamps are naive UTC (`utc_now`;
+  tz-aware parquet needs pytz in DuckDB).
+- `arrow.py`   — pure marshalling, no store knowledge.
   `to_arrow` auto-converts numpy step returns (dict of ndarrays — 2D+ nest as
   fixed-size lists — structured arrays, bare arrays mapped onto declared columns;
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `ledger.py`  — append-only `ledger.parquet`; the CAS loop is `schrein.CasRegister`
-  (0011 — roles stay separate: the ledger is run bookkeeping, never a catalog).
-  Per-run `_meta.json`. Timestamps are naive UTC (tz-aware parquet needs pytz
-  in DuckDB).
-- `catalog.py` — every flow's DuckLake catalog (0012 — the only
-  read/registration mode; no config flag): at the flow root, one table per
-  step, run_id inferred from the parts' hive paths at registration (parts
-  never rewritten). One CAS commit per completed step by the orchestrator;
-  registration failure fails the run. `duck()` views an attached snapshot
-  (run_id kept last) and refuses a pre-catalog bucket, pointing at
-  `ionflow catalog-backfill` (the corruption-recovery path; there is no
-  other read path). No schema-migration workflow, deliberately: schema
-  change = new flow name, or backfill --replace when old parts conform.
-  Ledger/meta/metrics untouched.
+- `lake.py`    — both DuckLakes ionflow keeps, driven by the same three operations
+  (genesis, register pre-uploaded parquet, attach a snapshot read-only):
+  `Catalog`, every flow's catalog (0012 — the only read/registration mode; no
+  config flag): at the flow root, one table per step, run_id inferred from the
+  parts' hive paths at registration (parts never rewritten). One CAS commit per
+  completed step by the orchestrator; registration failure fails the run.
+  `duck()` views an attached snapshot (run_id kept last) and refuses a
+  pre-catalog bucket, pointing at `backfill()` / `ionflow catalog-backfill`
+  (the corruption-recovery path; there is no other read path). No
+  schema-migration workflow, deliberately: schema change = new flow name, or
+  backfill --replace when old parts conform. Ledger/meta/metrics untouched;
+  `schema_drift()` compares a step's declared columns against its catalog table.
+  And `publish()`: bless one step's output from a complete run into the publish
+  lake (default `<prefix>/published/`, `--to` for any bucket) — atomic replace
+  in one CAS commit, snapshot history instead of --force, `publications`
+  provenance table (the `Publication` Table), optional `--where` filter. Still
+  a copy into the lake's data path, never a pointer (0009). A lake only ever
+  receives table schemas and data-file registrations; the ledger keeps sole
+  authority over run bookkeeping.
 - `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
   column) + `ledger` view; typed empty views for steps with no parts.
-- `discovery.py` — import a flows package to register flows; `scan_runs` (one bucket
-  LIST); schema-drift check (one parquet footer per step).
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
+  Exactly one of `bucket` / `local_dir` (relative `local_dir` anchors at the repo root).
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
+  The TUI owns its own startup helpers: `scan_runs` (one store LIST for flows
+  with a ledger) and `startup_warnings` (orphaned data + `lake.schema_drift`).
 
 ## Conventions & gotchas
 
-- Deps via `uv add` only. Core deps: duckdb, boto3, pyarrow, typer, textual —
-  **no pandas/polars in core** (steps may return anything arrow-convertible).
+- Deps via `uv add` only, and name the member it belongs to:
+  `uv add --package ionflow <dep>` (`--dev` for the dev group). Core deps:
+  duckdb, boto3, pyarrow, typer, textual — **no pandas/polars in core**
+  (steps may return anything arrow-convertible). ruff and ty are the exception:
+  repo-wide tooling, so they live in the root's dev group.
 - Runs refuse a dirty git tree, without exception. Tests always create/commit
   a repo first.
 - Untyped steps (no return annotation) are a class-definition error.
@@ -186,18 +263,21 @@ ionflow query myproj.flows:Training \
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
   has been quiet for 300s; its metrics survive up to the last flush.
 
-## schrein (uv workspace member, `schrein/`)
+## schrein (sibling workspace package, `packages/schrein/`)
 
 Sibling library: zero-infrastructure DuckLake catalogs on S3 conditional
-writes (DuckLake only — schrein decision 0004). Spec: `docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
+writes (DuckLake only — schrein decision 0004), or on a plain directory via
+`LocalClient` — a boto3-shaped client with enforced conditional writes,
+single-host by design (schrein decision 0005). Spec:
+`packages/schrein/docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
 two things — `CasRegister` under the ledger (0011) and `DuckLake` under
 the catalog (0012); schrein must never import ionflow. Its decisions live
-in `schrein/docs/decisions/` (own numbering).
+in `packages/schrein/docs/decisions/` (own numbering).
 
-- Test from inside it: `cd schrein && uv run pytest` (fast set) or `-m ""`
-  (full, incl. the CAS-contention hammer). Root `uv run pytest` doesn't
-  collect it.
+- Test it with `uv run --directory packages/schrein pytest` (fast set) or `-m ""`
+  (full, incl. the CAS-contention hammer). Nothing collects it alongside
+  ionflow's suite.
 - Its tests launch `schrein.testing`, NOT bare moto: moto's
   conditional PUTs race under threads and silently lose updates
   (schrein decision 0003).
