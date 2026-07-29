@@ -1,6 +1,6 @@
 # 0011 — the ledger's CAS loop delegates to schrein's CasRegister
 
-Status: accepted (2026-07-26)
+Status: superseded by 0019 (2026-07-29) — ledger.parquet is gone; run bookkeeping lives in the catalog DuckLake
 
 The ledger's one mutation — append a run row, conditionally, retrying on
 412 — needs a read → modify → conditional-PUT → retry loop plus its

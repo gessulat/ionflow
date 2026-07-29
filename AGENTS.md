@@ -99,8 +99,9 @@ ionflow query myproj.flows:Training \
   cores = delta(cpu_user+cpu_system) / delta(wall). `query.step_stats()` does this.
 - Sampling is adaptive: 1s at run start; at 1024 samples per process the buffer
   folds (peaks preserved) and the interval doubles, so long runs stay bounded.
-- Branch rows (`branch IS NOT NULL`) exist only for process-mode fan-outs;
-  thread-mode branches are covered by the orchestrator's samples.
+- Branch rows (`branch IS NOT NULL`; the label is the ITEM KEY, a string) exist
+  only for process-mode fan-outs; thread-mode branches are covered by the
+  orchestrator's samples.
 - Failed runs keep their metrics — check them first when a run dies.
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
@@ -128,18 +129,20 @@ ionflow query myproj.flows:Training \
   order is internal — `dag.downstream(step)` is the one thing that reads it.
   Refused here: a fan-out inside a branch, a per-item step reading a sibling per-item
   step whole (`Collect`/plain instead of `Branch`), a `Branch[...]` over a step that is
-  neither, and a fan-in feeding back into its own fan-out (a cycle once contracted).
+  neither, a fan-in feeding back into its own fan-out (a cycle once contracted), and
+  the reserved step names (`ledger`/`metrics`/`runs`/`manifest`) and columns
+  (`run_id`, the views' filename column).
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`, keyed by
   `flow_id()` = module-qualified class name — also the S3 namespace (rename/move a
   class = new flow); the runner
   binds `self.config` and all params during a run. Params become ledger columns
-  (written from run start); resume reuses the origin's params from `_meta.json`.
+  (written from run start); resume reuses the origin's params from its runs row.
   There is no prototype/scratch mode (0012): every flow carries the full
   guarantees — clean git, typed steps, a catalog — from its first run.
   `discover_flows(package)` imports a package (and its submodules) to register
   the flows it defines — registration is a side effect of importing.
 - `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-branch resume (refuses commit drift unless `allow_commit_drift`),
+  per-item resume (refuses commit drift unless `allow_commit_drift`),
   in-worker branch retries (`branch_retries`), git gate,
   run status (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
@@ -148,8 +151,15 @@ ionflow query myproj.flows:Training \
   `temp_directory`. A fan-out counts as completed only when ALL parts are written
   (partial fan-out must not look resumable). The orchestrator connects before
   spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
-  never races across cold workers. Missing/unreadable parts now surface lazily
+  never races across cold workers. Missing/unreadable parts surface lazily
   inside the step or at write time (duckdb `IOException`), not at input binding.
+  Progress accumulates in a `Manifest` and lands via `flush()` — one
+  `Catalog.commit_run` per plan node (plus begin/final), CAS-atomic with the
+  data registration (0019); `_meta.json` is written after each flush as the
+  recovery export. Input paths come from the manifest: the orchestrator resolves
+  them (`resolve`, `group_deps`, `item_inputs`); a worker derives only the paths
+  it writes itself. Group-wide inputs ride the POOL INITIALIZER (`_init_group`,
+  pickled once per process), item payloads carry just key/steps/branch-inputs.
   A step may branch over another branch step (`Branch[T]` names the upstream
   *step*), so a branch is a whole sub-DAG. It runs **per item, not per stage**
   (0015): one worker owns one item end to end (`_run_items` -> `_branch_worker`
@@ -158,22 +168,25 @@ ionflow query myproj.flows:Training \
   the first — so intermediates scale with `max_workers`, not the work-list.
   Members of one item are same-process by construction and may hand over local
   artifacts by path. Completion is per (item, sub-step): `branch_retries` retries
-  one sub-step, resume restarts an item at its first incomplete one, and
-  sub-steps complete for every item are registered even when a later one fails.
-  Keyed resume (0008): if the fan-out's Table declares a `fanout_key`, resume
-  re-runs the fan-out, copies origin branch parts by item key (positions may
-  shift), and reuses downstream steps only when the key set is unchanged; item
-  keys per fan-out are recorded as `fanout_keys` in `_meta.json`. Item keys name
-  every branch step down a chain, not just the first (0014) — chained steps are
-  key-matched too, never positionally reused.
+  one sub-step, resume restarts an item at its first incomplete one, and the
+  failure flush commits everything that did complete.
+  Resume NEVER copies (0020): `reuse_slots` records references to the origin's
+  part objects. Keyed resume (0008/0018): if the fan-out's Table declares a
+  `fanout_key`, resume re-runs the fan-out, reuses origin parts by item key —
+  keys name parts down the whole chain (0014), so reuse is a manifest lookup,
+  never positional — and reuses downstream steps only when the key set is
+  unchanged.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
   "latest" = newest complete run, falling through fresh when none exists.
 - `state.py`   — the run's state as types, orchestrator-side only (nothing here crosses
-  the process boundary). `Slot(step, branch)` names one written part and parses the
-  `"step/branch"` on-disk form; `Progress` maps Slot -> its part key (O(1) membership
-  and `width`, `keys(step)` in NUMERIC branch order — that is the catalog's registration
-  order, so insertion order would make reducers nondeterministic); `RunRecord.persist`
-  writes `_meta.json` and the ledger row from one state.
+  the process boundary). `Slot(step, key)` names one part by its ITEM KEY (0018 —
+  position ints for unkeyed work, fanout_key values for keyed); `Manifest` maps
+  Slot -> its part object (O(1) membership, `width`, `keys`/`paths` in SORTED key
+  order — the one registration order, so reducers stay deterministic across
+  resumes and reordered work-lists; serializes to meta pairs and lake rows);
+  `RunRecord` renders the lake `runs` row (params/custom as JSON — the table
+  never migrates) and the `_meta.json` recovery payload. `BASE_COLS` reserves
+  the runs columns against params/Ledger names.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
   run heartbeat); process-mode item workers each flush their own
@@ -186,30 +199,31 @@ ionflow query myproj.flows:Training \
   `Store.of(cfg)` is **the only place local-vs-S3 is decided** (`S3Store` /
   `DirStore` over boto3 or schrein's `LocalClient`); it holds the one client,
   mints fresh connections (`connect`/`local_connection`, never memoized), and
-  builds CAS registers (`cas`) and DuckLakes (`lake`). `uri()`/`key_for_uri()`
-  are the key<->URI pair; `copy_many` is a **generator** (a failed copy leaves
-  the already-yielded prefix as real resume progress). `s3_client` stays
-  module-level — the documented side-input hatch.
-- `space.py`   — `Space`: one flow's region of a store — the key scheme both ways
-  (`part`/`meta`/`metrics`/`ledger` <-> `parse_part`) and the verbs over those keys.
+  builds DuckLakes (`lake`). `uri()`/`key_for_uri()` are the key<->URI pair.
+  `s3_client` stays module-level — the documented side-input hatch.
+- `space.py`   — `Space`: one flow's region of a store — the key scheme
+  (`part`/`meta`/`metrics`/`run_ids`) and the verbs over those keys. A part is
+  named by its ITEM KEY (`part_<key_slug>.parquet`, 0018) — `key_slug` passes
+  clean keys verbatim and sanitizes+hashes the rest; the manifest, never the
+  filename, is the authoritative key->part mapping.
   Identity is the **`flow_id` string, never a class** (branch workers re-import the
   flow module under a loader name). Frozen dataclass, no I/O to construct, so build
   one wherever; the *store* is the per-command/per-worker object.
   `write_part` streams: cast-projection COPY
   to a local temp file (zstd) on a **fresh local connection**, one constraint
   scan (NOT NULL / CHECK / PK) of that file, then `Store.upload` (multipart above
-  8MB — parts may exceed S3's 5GB single-PUT cap). **Writes go through boto3,
+  8MB — parts may exceed S3's 5GB single-PUT cap); `dest` may be a callable of
+  the extracted fanout key (keyed items name themselves; a duplicate key raises
+  before anything uploads). **Writes go through boto3,
   never DuckDB `COPY TO s3://`** (a failed httpfs write finalizes anyway, leaving
   a corrupt part visible — 0010). A COPY pipeline must NEVER read
   httpfs (deadlocks on partially consumed sources); relations are drained
   through `to_arrow_reader` instead. Violations raise `ConstraintViolation`.
-  Also the ledger (append-only `ledger.parquet` via `upsert_runs`/`amend`, whose
-  closure rebuilds the whole parquet from `old` on every CAS attempt — 0011, roles
-  stay separate: the ledger is run bookkeeping, never a catalog), per-run
-  `_meta.json` (`read_meta`/`write_meta`), and `sync_to` (local -> S3 migration:
-  copy immutable run folders, MERGE ledger rows idempotently by run_id, rebuild
-  the target catalog via `lake.backfill` — a DuckLake catalog holds absolute
-  paths, so it is re-derived, never copied). Timestamps are naive UTC (`utc_now`;
+  Also per-run `_meta.json` (`read_meta`/`write_meta` — the recovery export,
+  read only by `backfill`), and `sync_to` (local -> S3 migration: copy run
+  folders, then `lake.backfill` re-derives the whole target catalog — ledger
+  rows included — from the copied metas; a DuckLake catalog holds absolute
+  paths, so it is never copied). Timestamps are naive UTC (`utc_now`;
   tz-aware parquet needs pytz in DuckDB).
 - `arrow.py`   — pure marshalling, no store knowledge.
   `to_arrow` auto-converts numpy step returns (dict of ndarrays — 2D+ nest as
@@ -217,33 +231,43 @@ ionflow query myproj.flows:Training \
   complex rejected). `StepInput` wraps every step input: delegates to the lazy
   relation, adds `.np()` (materializes; ragged/NULL columns raise). numpy itself
   is optional in core (guarded imports), a dev dep for tests.
-- `lake.py`    — both DuckLakes ionflow keeps, driven by the same three operations
-  (genesis, register pre-uploaded parquet, attach a snapshot read-only):
-  `Catalog`, every flow's catalog (0012 — the only read/registration mode; no
-  config flag): at the flow root, one table per step, run_id inferred from the
-  parts' hive paths at registration (parts never rewritten). One CAS commit per
-  completed step by the orchestrator; registration failure fails the run.
-  `duck()` views an attached snapshot (run_id kept last) and refuses a
-  pre-catalog bucket, pointing at `backfill()` / `ionflow catalog-backfill`
-  (the corruption-recovery path; there is no other read path). No
-  schema-migration workflow, deliberately: schema change = new flow name, or
-  backfill --replace when old parts conform. Ledger/meta/metrics untouched;
-  `schema_drift()` compares a step's declared columns against its catalog table.
+- `lake.py`    — both DuckLakes ionflow keeps. `Catalog`, every flow's catalog
+  (0012/0019 — **the run's ONE metadata authority**): at the flow root, one data
+  table per step PLUS the fixed-DDL system tables `runs` (the ledger;
+  params/custom as JSON text) and `manifest` (run -> (step, item_key, path)).
+  `commit_run` is the one write: genesis + runs-row upsert + manifest inserts +
+  data-file registration of the NEWLY CREATED parts among them (a path inside
+  the committing run's folder means "created here"; anything else is a
+  reference, 0020) — one CAS commit, replay-safe (`_apply` skips rows that
+  already landed). Registration failure fails the run. Reads: `runs()` and
+  `run_state()` (row + manifest off one snapshot; "latest" = newest complete).
+  DuckLake inlines the tiny system rows into the register artifact — no
+  small-file churn in `_lake/`. `backfill()` / `ionflow catalog-backfill`
+  restores EVERYTHING (rows, manifests, registrations, failed runs included)
+  from the run folders' `_meta.json` records in one commit — the recovery path,
+  and how `sync` derives the target catalog. No schema-migration workflow,
+  deliberately: schema change = new flow name, or backfill --replace when old
+  parts conform. `schema_drift()` compares declared columns against the catalog.
   And `publish()`: bless one step's output from a complete run into the publish
   lake (default `<prefix>/published/`, `--to` for any bucket) — atomic replace
   in one CAS commit, snapshot history instead of --force, `publications`
   provenance table (the `Publication` Table), optional `--where` filter. Still
-  a copy into the lake's data path, never a pointer (0009). A lake only ever
-  receives table schemas and data-file registrations; the ledger keeps sole
-  authority over run bookkeeping.
-- `query.py`   — `duck()`: one view per step (hive `run_id=` partition surfaces as a
-  column) + `ledger` view; typed empty views for steps with no parts.
+  a copy into the lake's data path, never a pointer (0009); the parts come from
+  the run's manifest, wherever they live.
+- `query.py`   — `duck()`: one view per step — `read_parquet` over the parts the
+  manifest names, joined to their referencing run on the `filename` column
+  (0020; `lake.<step>` itself is the corpus: each part once, under its creating
+  run) — plus the `ledger` view (`ledger_sql`: base runs columns + params/Ledger
+  columns CAST out of their JSON storage against the flow's declarations) and
+  `metrics`; typed empty views for steps with no parts. `run_id` is always the
+  last view column. Refuses a bucket with runs but no catalog, pointing at
+  catalog-backfill.
 - `config.py`  — `.ionflow/config` (TOML) found by walking up like `.git`;
   `IONFLOW_*` env vars override; credentials only from the AWS chain, never stored.
   Exactly one of `bucket` / `local_dir` (relative `local_dir` anchors at the repo root).
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow` launches it).
   The TUI owns its own startup helpers: `scan_runs` (one store LIST for flows
-  with a ledger) and `startup_warnings` (orphaned data + `lake.schema_drift`).
+  with a catalog) and `startup_warnings` (orphaned data + `lake.schema_drift`).
 
 ## Conventions & gotchas
 
@@ -257,7 +281,11 @@ ionflow query myproj.flows:Training \
 - Untyped steps (no return annotation) are a class-definition error.
 - Python docs: a one-liner, plus short prose only for non-obvious constraints;
   doctests for examples (they run in the suite).
-- Run folders on S3 are immutable; the ledger is the only mutated object (CAS).
+- Run folders on S3 are immutable (`_meta.json` is the exception — the run
+  rewrites its own recovery record); the catalog register is the only
+  CAS-mutated object. A part is stored once, by the run that computed it;
+  other runs reference it through their manifests (0020) — never delete a run
+  folder without checking `lake.manifest` for references.
 - Backblaze B2 is unsupported (no If-Match conditional writes).
 - A run killed by SIGKILL stays `running` in the ledger forever (can't catch it),
   but `ls`/TUI derive `running (stale?)` once its heartbeat (the 60s metrics flush)
@@ -271,9 +299,10 @@ writes (DuckLake only — schrein decision 0004), or on a plain directory via
 single-host by design (schrein decision 0005). Spec:
 `packages/schrein/docs/specs/cas-catalog-library.md`; status: M0 (CAS core) +
 M1 (DuckLake adapter) + M2 (expire/gc/probe). ionflow depends on schrein for
-two things — `CasRegister` under the ledger (0011) and `DuckLake` under
-the catalog (0012); schrein must never import ionflow. Its decisions live
-in `packages/schrein/docs/decisions/` (own numbering).
+one thing — `DuckLake` under the per-flow catalog and the publish lake
+(0012/0019; the old separate ledger CAS died with 0019); schrein must never
+import ionflow. Its decisions live in `packages/schrein/docs/decisions/`
+(own numbering).
 
 - Test it with `uv run --directory packages/schrein pytest` (fast set) or `-m ""`
   (full, incl. the CAS-contention hammer). Nothing collects it alongside

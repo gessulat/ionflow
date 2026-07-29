@@ -17,9 +17,10 @@ configure is one S3-compatible bucket.
   No `self.next(...)`.
 - **Schemas are declared, enforced, and queryable.** Each output table is a class;
   DuckDB validates types / `NOT NULL` / `CHECK` on write and exposes every run as SQL.
-- **Runs are logged in an append-only ledger** in the bucket: `run_id`, `status`
+- **Runs are logged in a ledger** inside the flow's catalog: `run_id`, `status`
   (`running` / `complete` / `failed`), `started`, `finished`, git `commit`,
-  `steps_complete`, plus any flow-specific columns.
+  plus any flow-specific columns — committed atomically with the data they
+  describe.
 - **Fan-out / fan-in** over N inputs, in parallel, on one machine — and a branch can
   be a sub-DAG, run per item, with independent sub-steps concurrent. Transient branch
   failures (flaky S3) retry in place: `run(branch_retries=1)`.
@@ -86,9 +87,10 @@ ionflow sync mymodule:EmbedDocs --to s3://my-bucket        # repeatable; add --e
 ionflow setup                                              # point the config at the bucket
 ```
 
-`sync` copies the immutable run folders, merges ledger rows through the same
-CAS path a live run uses, and rebuilds the flow's catalog on the bucket — so
-re-running it after more local runs is safe. The local store is left untouched.
+`sync` copies the immutable run folders and rebuilds the flow's catalog —
+ledger rows, manifests, registrations — from their recovery records on the
+bucket, so re-running it after more local runs is safe. The local store is
+left untouched.
 Local mode is single-machine by design: CAS commits serialize on a file lock,
 which coordinates processes on one host, not a team on a shared drive.
 
@@ -299,16 +301,20 @@ EmbedDocs.run(params={"min_len": 12})
 ```
 
 Every param becomes a **ledger column** (queryable per run, recorded from the moment
-the run starts — see the `min_len` column in the ledger query below) and is stored in
-the run's meta; `resume` always reuses the origin run's params. Types are limited to
-`int`/`float`/`str`/`bool` so params round-trip JSON, parquet, and the command line.
+the run starts — see the `min_len` column in the ledger query below); `resume` always
+reuses the origin run's params. Types are limited to `int`/`float`/`str`/`bool` so
+params round-trip JSON and the command line.
 
 ## Query every run as one database
 
-`duck()` returns a DuckDB connection with a **view per step table** plus a `ledger` view.
-Views read the flow's **DuckLake catalog** (attached read-only as a consistent
-snapshot), so a new run shows up with nothing to sync — `run_id` is a column.
-Anyone with stock DuckDB can attach the catalog directly, no ionflow needed:
+`duck()` returns a DuckDB connection with a **view per step** plus a `ledger` view.
+Views derive from the flow's **DuckLake catalog** (attached read-only as a
+consistent snapshot), so a new run shows up with nothing to sync — `run_id` is a
+column, and a part reused across resumed runs appears under every run that
+references it. Anyone with stock DuckDB can attach the catalog directly, no
+ionflow needed — `lake.<step>` is the corpus (each part once, under the run that
+computed it), `lake.runs` the ledger, and `lake.manifest` says which parts make
+up each run:
 
 ```sql
 INSTALL ducklake; LOAD ducklake;
@@ -424,9 +430,10 @@ and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 ionflow run mymodule:EmbedDocs --resume <origin_run_id>   # API: EmbedDocs.run(resume=run_id)
 ```
 
-A **new** `run_id` is created; completed step outputs are copied from the origin run
-(server-side, no re-compute) and execution restarts at the first incomplete step. A
-partially-failed fan-out re-runs only its failed branches.
+A **new** `run_id` is created; the origin run's completed parts are **referenced**
+in the new run's manifest (no copies, no re-compute — a part is stored once, ever)
+and execution restarts at the first incomplete step. A partially-failed fan-out
+re-runs only its failed items.
 
 If HEAD differs from the origin run's commit, resume **refuses by default** — reused
 steps would keep their old-code outputs, mixing two commits in one run. Pass
@@ -453,14 +460,14 @@ ionflow run mymodule:EmbedDocs --resume latest
 ```
 
 `--resume latest` resumes from the latest complete run (a first run is a normal full run).
-The fan-out re-runs to pick up the current work-list; branches whose source already
-exists in the origin are **server-side copied**, only new sources are embedded, and
-removed sources drop out. Every per-branch step is matched this way — including one
+The fan-out re-runs to pick up the current work-list; items whose source already
+exists in the origin are **referenced**, only new sources are embedded, and
+removed sources drop out. Every per-item step is matched this way — including one
 that branches over another branch step's output — so the fan-out is free to list its
-items in any order. Steps that aren't per-branch (the fan-in and beyond) recompute
-whenever the key set changed. The result is still one complete, immutable run folder — adding
-one source to five hundred costs one source's compute, and
-`SELECT ... WHERE run_id = <new>` is always the full corpus.
+items in any order. Steps that aren't per-item (the fan-in and beyond) recompute
+whenever the key set changed. The result is still one complete run — adding one
+source to five hundred costs one source's compute and stores one source's data,
+and `SELECT ... WHERE run_id = <new>` is always the full corpus.
 
 The key is a contract: **same key must mean same content**. Keying by `source` is
 right only because a batch never changes after it lands; if items can be re-uploaded
@@ -500,24 +507,27 @@ SELECT * FROM pub.embeddings;
 
 ```
 s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
-  ledger.parquet                           #   e.g. mymodule.EmbedDocs
-  catalog.ducklake                         # the flow's DuckLake catalog (schrein
-  _lake/                                   #   CAS register); _lake/ = catalog-owned files
-  runs/                                    # ledger: append-only, updated via S3 CAS
-    run_id=<id>/
-      _meta.json                           # live run state (progress, custom columns)
-      docs/part_0.parquet
-      by_source/part_0.parquet   by_source/part_1.parquet
-      vectors/part_0.parquet     vectors/part_1.parquet
+  catalog.ducklake                         #   e.g. mymodule.EmbedDocs
+  _lake/                                   # the flow's DuckLake catalog (schrein CAS
+  runs/                                    #   register): one table per step + `runs`
+    run_id=<id>/                           #   (the ledger) + `manifest` (run -> parts);
+      _meta.json                           #   _lake/ = catalog-owned files
+      docs/part_0.parquet                  # _meta.json = per-run recovery record
+      by_source/part_arxiv.parquet   by_source/part_wiki.parquet
+      vectors/part_arxiv.parquet     vectors/part_wiki.parquet
       summary/part_0.parquet
 ```
 
-Run folders are immutable. The catalog registers each completed step's parts
-(metadata only — parts are never rewritten; `run_id` comes from the hive path)
-in one CAS commit per step, and both the catalog and the ledger swap via S3
-conditional writes (`If-Match`), so concurrent runs stay safe with no extra
-infrastructure. If the catalog object is ever lost or corrupted,
-`ionflow catalog-backfill mymodule:EmbedDocs` rebuilds it from the run folders.
+Parts are named by their **item key** (a keyed fan-out's `fanout_key` value,
+position for the rest) and written exactly once, by the run that computed them —
+a resumed run's manifest references its origin's parts instead of copying them.
+The catalog is the one mutable object: each completed step's parts register
+(metadata only — parts are never rewritten) together with their manifest rows
+and the run's ledger row in a single CAS commit (S3 `If-Match`), so concurrent
+runs stay safe with no extra infrastructure and readers never see a
+half-recorded step. If the catalog object is ever lost or corrupted,
+`ionflow catalog-backfill mymodule:EmbedDocs` rebuilds everything from the run
+folders' `_meta.json` records.
 
 A flow's durable identity is its **module-qualified class name** (`flow_id`), so
 same-named classes in different modules never share data. The flip side: renaming a

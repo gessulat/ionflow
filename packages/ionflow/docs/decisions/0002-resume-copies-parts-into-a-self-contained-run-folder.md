@@ -1,6 +1,6 @@
 # 0002 — Resume copies parts; every run folder is self-contained
 
-Status: accepted (2026-07-26)
+Status: superseded by 0020 (2026-07-29) — resume references parts through the run manifest; nothing is copied
 
 ## Context
 

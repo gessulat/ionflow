@@ -1,6 +1,6 @@
 # 0012 — a per-flow DuckLake catalog is the substrate
 
-Status: accepted (2026-07-26)
+Status: accepted (2026-07-26); amended by 0019 (the catalog also holds the runs + manifest system tables) and 0020 (per-run reads join the manifest; hive run_id names the creating run)
 
 Every flow owns a schrein DuckLake at its root (`catalog.ducklake`, CAS
 register; data path `_lake/` for catalog-owned files only). One table per
