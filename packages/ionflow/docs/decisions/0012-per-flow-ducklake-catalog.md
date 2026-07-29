@@ -14,8 +14,9 @@ Mechanics, and the invariants they carry:
   immutable run folders (0010) and registered metadata-only via
   `ducklake_add_data_files(..., hive_partitioning => true)`: `run_id`
   comes from the part's `runs/run_id=<id>/` path segment, so files carry
-  no run_id column and resume's server-side copies (0002) register under
-  the new run's id for free.
+  no run_id column. Since 0020, that run_id names the part's CREATOR:
+  registration happens once, by the run whose folder holds the part, and
+  per-run membership is the `manifest` table's job.
 - **Genesis precedes the first run object.** `CREATE TABLE IF NOT EXISTS`
   per step (persisted types — the read-side rule; NOT NULL only, all
   DuckLake enforces; PK/CHECK stay ionflow-side per 0003) commits before
@@ -36,8 +37,9 @@ Mechanics, and the invariants they carry:
   are a new flow name (0004) or `catalog-backfill --replace` when
   historic parts conform.
 
-Out of the lake, deliberately: `ledger.parquet` (run bookkeeping),
-`_meta.json` (resume provenance), `_metrics*.parquet` (telemetry) — the
-role separation the schrein spec's scope guard demands (0011). Costs
-accepted: the ducklake extension on every run/read path, and one CAS
-round-trip of commit latency per step — negligible against step runtimes.
+In the lake since 0019: the `runs` and `manifest` system tables (run
+bookkeeping commits atomically with registrations). Out of the lake:
+`_metrics*.parquet` (telemetry) and `_meta.json` (the write-only recovery
+export). Costs accepted: the ducklake extension on every run/read path, and
+one CAS round-trip of commit latency per plan node — negligible against
+step runtimes.

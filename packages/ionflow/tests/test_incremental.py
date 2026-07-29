@@ -2,7 +2,7 @@
 
 import pyarrow as pa
 import pytest
-from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, exec_counts, put_n
+from flows import DupKeyFlow, KeyedChainFlow, KeyedFlow, KeyedItem, TwoKeyFlow, put_n
 
 from ionflow import ConstraintViolation
 from ionflow.space import Space
@@ -125,30 +125,6 @@ def test_keyed_resume_chained_branch_matches_new_items(cfg, repo):
     new = _assert_aligned(con, resumed, {"file-0", "file-1", "file-2"})
     for item in old:  # matched items reused through both branch steps, not recomputed
         assert new[item] == old[item]
-
-
-@pytest.mark.slow
-def test_keyed_resume_chained_branch_survives_reordered_worklist(cfg, repo, tmp_path, monkeypatch):
-    """Item keys, not branch positions, decide reuse — even for a partial chained step."""
-    put_n(cfg, 2)
-    monkeypatch.setenv("CHAIN_DIR", str(tmp_path))
-    monkeypatch.setenv("KEYED_CHAIN_FAIL", "file-1")
-    with pytest.raises(RuntimeError, match="file-1"):
-        KeyedChainFlow.run(cfg, repo=repo, use_processes=False)
-
-    con = KeyedChainFlow.duck(cfg)
-    origin = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
-    old_work = dict(con.sql(f"SELECT item, token FROM work WHERE run_id = '{origin}'").fetchall())
-    monkeypatch.delenv("KEYED_CHAIN_FAIL")
-    Store.of(cfg).put("side/order", b"rev")  # same keys, branch positions swapped
-    resumed = KeyedChainFlow.run(cfg, repo=repo, resume=origin, use_processes=False)
-
-    con = KeyedChainFlow.duck(cfg)
-    new = _assert_aligned(con, resumed, {"file-0", "file-1"})
-    assert {item: t for item, (t, _, _) in new.items()} == old_work  # work matched by key
-    # file-0's refine completed in the origin and was reused despite moving position;
-    # only file-1, which had failed, ran again
-    assert exec_counts(tmp_path, "refine") == {"file-0": 1, "file-1": 2}
 
 
 def test_duplicate_fanout_keys_refused(cfg, repo):

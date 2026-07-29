@@ -30,9 +30,9 @@ uploads (`put_object` under 8MB, multipart `upload_file` above). Grounds:
   rescannable artifact; the local temp file is the only single-pass-safe
   one. Direct `COPY TO s3://` could only validate after the possibly-bad
   object already exists in an immutable folder.
-- **One write path.** The ledger CAS (If-Match), `copy_part`, publish, and
-  deletes are boto3 regardless; httpfs writes would add a second path, not
-  replace the first.
+- **One write path.** The catalog CAS (If-Match), publish, and deletes are
+  boto3 regardless; httpfs writes would add a second path, not replace the
+  first.
 
 ## Consequences
 

@@ -32,17 +32,17 @@ several user-facing spellings of one mechanism.
   rejected — "branch" is runner vocabulary for one parallel execution;
   nothing in the authoring surface calls the feature "branching".
   `Table.fanout_key_column()` reads the marker back.
-- Every run records `fanout_keys` (fan-out step -> key per branch index) in
-  `_meta.json`.
 - Declaring a fanout_key changes resume for that flow: the fan-out re-runs
-  (refreshing the work-list), branch parts are copied from the origin where
-  the key matches and computed where it doesn't, and steps further downstream
-  are reused only when the key set is unchanged — otherwise they recompute.
-  Removed keys simply drop out. Flows without a fanout_key keep positional
-  resume with a frozen fan-out.
-- The source is a single origin run, not a cache index. Because resume copies
-  parts forward (0002), the latest complete run already contains the whole
-  accumulated corpus — it *is* the cache, resolved with one ledger read.
+  (refreshing the work-list), items are reused from the origin where the key
+  matches and computed where it doesn't, and steps further downstream are
+  reused only when the key set is unchanged — otherwise they recompute.
+  Removed keys simply drop out. Flows without a fanout_key keep whole-step
+  reuse with a frozen fan-out. (The mechanics live in 0018: the key IS the
+  storage identity, so matching is a manifest lookup.)
+- The source is a single origin run, not a cache index. Because a resumed
+  run's manifest names every reused part (0020), the latest complete run
+  still describes the whole accumulated corpus — it *is* the cache, resolved
+  with one catalog read.
 - One resume spelling, end to end: `runner.run(..., resume=...)` takes an
   origin run_id or the string `"latest"`; the CLI exposes it as
   `run --resume RUN_ID|latest`. `"latest"` resolves to the newest complete
@@ -58,9 +58,9 @@ several user-facing spellings of one mechanism.
 
 ## Consequences
 
-- "Add files, re-run" costs what the new files cost, while every run folder
-  stays a single, complete, immutable corpus. Deletions work too — something
-  a union-of-runs approach could never give.
+- "Add files, re-run" costs what the new files cost, while the new run's
+  manifest still names one complete corpus. Deletions work too — something a
+  union-of-runs approach could never give.
 - "Resume a failed run" and "incremental corpus run" are visibly the same
   operation with a different origin — which they are; there is one concept
   to learn and document, and every sizing flag exists exactly once.
@@ -71,10 +71,3 @@ several user-facing spellings of one mechanism.
 - The key column is a contract: same key must mean same content. Users who
   re-upload a source file must reflect that in the key (e.g. include the
   etag), or resume will happily keep the stale part.
-- Storage grows by the corpus size per incremental run (the 0002 trade-off at
-  a higher cadence). Old complete runs can be lifecycle-expired safely —
-  self-contained folders are what make both that and single-origin reuse
-  possible.
-- An origin whose `_meta.json` records no fanout keys (the flow declared its
-  key after that run) can't be matched; resume warns and recomputes the
-  keyed subgraph.

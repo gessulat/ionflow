@@ -1,9 +1,8 @@
 """Characterization of the two DuckLakes: a flow's catalog and the publish lake.
 
-Written before catalog.py + publish.py + discovery.schema_drift merge into one
-module, so every assertion is stated as observable behaviour — register etags
-(one per CAS commit), snapshot rows, the DDL DuckDB itself renders, the objects
-that end up in the store — rather than as calls into the current internals.
+Every assertion is stated as observable behaviour — what a stock DuckDB reader
+sees, the objects that end up in the store, the recovery path — rather than as
+calls into internals.
 """
 
 import re

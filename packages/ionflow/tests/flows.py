@@ -96,12 +96,6 @@ def put_n(config, n):
     Store.of(config).put("side/n", str(n).encode())
 
 
-def _side_order(config):
-    """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
-    blob = Store.of(config).get("side/order")
-    return blob.decode() if blob else "fwd"
-
-
 class SideInputFlow(Flow):
     """Reads a side object via self.config — in a root step and inside a branch."""
 
@@ -264,16 +258,12 @@ class KeyedRefined(Table):
 class KeyedChainFlow(Flow):
     """Keyed fan-out feeding a chained branch step, for incremental resume.
 
-    Fan-out size comes from `side/n` and its order from `side/order`, so a resume
-    can grow, shrink or merely reorder the work-list; KEYED_CHAIN_FAIL="<item>"
-    fails `refine` for one item, which marks its executions in CHAIN_DIR.
+    Fan-out size comes from `side/n`, so a resume can grow or shrink the
+    work-list; `upstream` records which `work` output `refine` actually read.
     """
 
     def items(self) -> Fanout[KeyedItem]:
-        gs = list(range(_side_n(self.config)))
-        if _side_order(self.config) == "rev":
-            gs.reverse()
-        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in gs]
+        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in range(_side_n(self.config))]
 
     def work(self, items: Branch[KeyedItem]) -> KeyedOut:
         item = items.project("item").fetchone()[0]
@@ -281,9 +271,6 @@ class KeyedChainFlow(Flow):
 
     def refine(self, work: Branch[KeyedOut]) -> KeyedRefined:
         item, token = work.project("item, token").fetchone()
-        _mark("refine", item)
-        if item == os.environ.get("KEYED_CHAIN_FAIL"):
-            raise RuntimeError(f"boom on {item}")
         return pa.table({"item": [item], "token": [uuid.uuid4().hex], "upstream": [token]})
 
 

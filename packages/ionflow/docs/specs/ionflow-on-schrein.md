@@ -1,85 +1,63 @@
 # ionflow on schrein: the catalog substrate
 
 **Companion:** `cas-catalog-library.md` (the schrein spec). This document
-describes how ionflow uses schrein; the load-bearing decisions are
-recorded in `docs/decisions/0011` (ledger on `CasRegister`) and `0012`
-(the per-flow DuckLake catalog).
+describes how ionflow uses schrein; the load-bearing decisions are 0012 (the
+per-flow DuckLake catalog), 0019 (the catalog as the one metadata authority)
+and 0020 (runs as manifests).
 
-## 0. The two roles, stated first
+## 0. One authority
 
-A lakehouse catalog is not only a schema store: in DuckLake the catalog
-holds each table's **file list** — a Parquet file on S3 is not part of any
-table until a commit registers it. That mechanism is what ionflow builds
-its read side on. Run *tracking* is a different role and never enters the
-lake:
+A DuckLake catalog holds each table's **file list** — a Parquet object is not
+part of any table until a commit registers it. ionflow builds both its read
+side and its run bookkeeping on that one CAS-swapped artifact:
 
-| Component | Authority over |
+| Object | Holds |
 |---|---|
-| **catalog.ducklake** (per flow, schrein register) | The lake: table schemas, snapshots, and the file list that defines each step table's contents |
-| **`ledger.parquet`** (schrein `CasRegister`) | Run bookkeeping: status, timestamps, commit, params |
-| **`_meta.json`** | Per-run progress: `steps_complete`, `fanout_keys`, resume provenance |
+| **catalog.ducklake** (per flow, schrein register) | Everything with authority: per-step data tables (the corpus — each part once, under its creating run), `runs` (the ledger), `manifest` (run -> (step, item_key, path)) |
+| **`_meta.json`** (per run) | Write-only recovery export; read only by `catalog-backfill` |
 | **`_metrics*.parquet`** | Run telemetry (its flush cadence doubles as the run heartbeat) |
 
 ## 1. Layout and write path
 
 ```
 s3://bucket/<prefix>/<flow_id>/
-  ledger.parquet              <- run bookkeeping (CAS)
   catalog.ducklake            <- schrein register: the flow's lake
-  _lake/                      <- catalog-owned files only (none today)
-  runs/run_id=<id>/           <- immutable run folders: _meta.json,
-    <step>/part_N.parquet        _metrics*.parquet, boto3-written parts
+  _lake/                      <- catalog-owned files (system rows inline, so ~none)
+  runs/run_id=<id>/           <- immutable folders: _meta.json, _metrics*.parquet,
+    <step>/part_<key>.parquet    boto3-written parts, named by item key (0018)
 ```
 
-The orchestrator (never a worker) talks to the catalog exactly three ways:
-
-1. **Genesis** — idempotent `CREATE TABLE IF NOT EXISTS` per step from the
-   `Table` DDL, committed *before* the first run object exists, so a run
-   always implies a catalog.
-2. **Registration** — one CAS commit per completed step:
-   `ducklake_add_data_files(..., hive_partitioning => true)` per part.
-   run_id is inferred from the hive path; parts are never rewritten; a
-   fan-out's parts land in one commit, so lake readers never observe a
-   partial fan-out. Registration failure fails the run.
-3. **Recovery** — `ionflow catalog-backfill` rebuilds a lost or corrupt
-   register from the run folders (one LIST, genesis, one registration
-   commit). Bucket versioning is cheaper insurance still.
-
-Commit rate: one CAS commit per completed step plus genesis. Concurrent
-runs of one flow commute (different run_ids) and stay far below schrein's
-comfort zone; rebases replay cleanly.
+The orchestrator (never a worker) writes through `Catalog.commit_run`: one
+CAS commit per plan node (plus begin/final) carrying genesis, the run's
+ledger row, manifest rows, and `ducklake_add_data_files` for the newly
+created parts among them — atomically, so readers never observe a partial
+fan-out, a part without its manifest row, or a run without its tables.
+Referenced (reused) parts are manifest-only; hive `run_id` names a part's
+creator. Commits are replay-safe: a rebase skips rows that already landed.
+Recovery: `ionflow catalog-backfill` rebuilds the whole register — rows,
+manifests, registrations, failed runs included — from the `_meta.json`
+records in one commit; `sync` derives a target catalog the same way.
 
 ## 2. Read path
 
-`query.duck()` attaches a downloaded catalog snapshot read-only: one view
-per step (`run_id` kept as the last column), plus `ledger` and `metrics`
-views over their own objects. A flow that never ran gets typed empty
-views. Anyone with stock DuckDB attaches the same catalog with no ionflow
-installed — typed schemas included.
-
-Consequences of register-at-completion: a half-finished fan-out is
-invisible to lake readers (its parts are unreferenced objects, not table
-contents); a crashed run's unregistered parts are orphans; its registered
-steps remain queryable under that run_id, with status always from the
-ledger. Crash windows collapse into the same benign class as parts/meta
-skew: parts uploaded but unregistered → the step recomputes on resume;
-registered but meta unflushed → resume recomputes under a new run_id.
+`query.duck()` reads one attached snapshot: per-step views join the
+manifest's part objects to their referencing run (a part reused by N runs
+appears once per run), and the `ledger` view flattens `runs`' JSON
+params/custom into typed columns from the flow's declarations. A flow that
+never ran gets typed empty views. Stock DuckDB attaches the same catalog
+with no ionflow installed: `lake.<step>`, `lake.runs`, `lake.manifest`.
 
 ## 3. Costs, accepted
 
 - The ducklake extension sits on every run and read path (loaded via
   schrein's three-way loader, decision 0013).
-- One CAS round-trip of latency per completed step — negligible against
-  step runtimes.
-- A clobbered register breaks reads until `catalog-backfill` (or bucket
-  versioning) restores it; data files and the ledger are unaffected.
+- One CAS round-trip per plan node — negligible against step runtimes.
+- A clobbered register breaks reads AND bookkeeping until `catalog-backfill`
+  (or bucket versioning) restores them; data files and metas are unaffected.
 
 ## 4. Open
 
-- **Retention** — run deletion as `DELETE WHERE run_id` + schrein
-  `expire_snapshots`/`gc`; would give deletion real semantics and as-of
-  time travel. Unscheduled.
-- (`publish` blesses outputs into a separate stable publish DuckLake,
-  0009: consumers who must not depend on the flow's bucket, layout, or
-  run status attach that lake and see only blessed tables — which the
-  flow catalog's discoverability does not replace.)
+- **Retention / gc** — with references (0020), run deletion must consult
+  `lake.manifest` as the refcount; schrein `expire_snapshots`/`gc` cover the
+  lake side. Unscheduled.
+- (`publish` blesses outputs into a separate stable publish DuckLake, 0009.)
