@@ -1,73 +1,105 @@
-"""A run's mutable state and its two bookkeeping records, as types: `Progress`
-owns what has been written so far, `RunRecord` the run's identity and outcome.
-Both know their on-disk forms, so the runner never spells them out.
+"""A run's mutable state and its bookkeeping, as types: `Manifest` owns which
+parts exist and where, `RunRecord` the run's identity and outcome. Both know
+their serialized forms, so the runner never spells them out.
 """
 
 import datetime as dt
+import json
 import typing
 from dataclasses import dataclass
 
+# The `runs` table's column names — reserved against params/Ledger collisions.
+BASE_COLS = frozenset({"run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom"})
+
 
 class Slot(typing.NamedTuple):
-    """One written part: a step and its branch index (0 for a plain step).
+    """One part: a step and the item key naming it (0 for a plain step).
 
-    >>> Slot.parse("vectors/12")
-    Slot(step='vectors', branch=12)
+    Item keys ARE the storage identity (decision 0018): an unkeyed fan-out's
+    items are keyed by position ints, a keyed fan-out's by its `fanout_key`
+    values — and a chained branch step answers to the same key (0014), so a
+    resumed run matches parts across runs by (step, key) alone.
     """
 
     step: str
-    branch: int
-
-    @classmethod
-    def parse(cls, text):
-        """Read the `steps_complete` form every release writes into `_meta.json`."""
-        step, branch = text.rsplit("/", 1)
-        return cls(step, int(branch))
+    key: str | int
 
 
-class Progress:
-    """A run's completed parts: Slot -> the part key written for it.
+class Manifest:
+    """A run's parts: Slot -> the store key holding that part.
 
-    `keys()` is in NUMERIC branch order, the order the catalog registers a step's
-    parts in: registration order is the lake's data-file order, hence a reader's
-    scan order, so insertion order — nondeterministic under a worker pool — would
-    make a reducer's `first()`, `arg_max` ties or `list_agg` vary between runs.
+    `keys()`/`paths()` are in sorted key order — the single deterministic order
+    (catalog registration, hence a reducer's scan order): insertion order varies
+    under a worker pool, and a resumed run's mix of reused and computed parts
+    has no meaningful insertion order at all. Keys within one step never mix
+    types (ints for positions, or the fanout_key column's str/int values).
 
-    >>> p = Progress()
-    >>> p.add(Slot("v", 2), "k2"); p.add(Slot("v", 0), "k0"); p.add(Slot("v", 1), "k1")
-    >>> p.keys("v")
-    ['k0', 'k1', 'k2']
-    >>> p.width("v"), Slot("v", 1) in p, Slot("v", 9) in p
+    >>> m = Manifest()
+    >>> m.add(Slot("v", 2), "k2"); m.add(Slot("v", 0), "k0"); m.add(Slot("v", 1), "k1")
+    >>> m.keys("v"), m.paths("v")
+    ([0, 1, 2], ['k0', 'k1', 'k2'])
+    >>> m.width("v"), Slot("v", 1) in m, Slot("v", 9) in m
     (3, True, False)
-    >>> p.to_list()
-    ['v/0', 'v/1', 'v/2']
+    >>> Manifest.from_meta(m.meta()).get("v", 2)
+    'k2'
     """
 
     def __init__(self):
-        self._parts: dict[str, dict[int, str]] = {}
+        self._parts: dict[str, dict[str | int, str]] = {}
 
-    def add(self, slot, key):
-        self._parts.setdefault(slot.step, {})[slot.branch] = key
+    def add(self, slot, path):
+        self._parts.setdefault(slot.step, {})[slot.key] = path
 
     def __contains__(self, slot):
-        return slot.branch in self._parts.get(slot.step, ())
+        return slot.key in self._parts.get(slot.step, ())
+
+    def get(self, step, key):
+        """The part path written for (step, key), or None."""
+        return self._parts.get(step, {}).get(key)
 
     def width(self, step):
         return len(self._parts.get(step, ()))
 
     def keys(self, step):
-        """The step's part keys in branch order — the catalog's registration order."""
-        return [key for _, key in sorted(self._parts.get(step, {}).items())]
+        """The step's item keys, sorted."""
+        return sorted(self._parts.get(step, ()))
 
-    def to_list(self):
-        """`steps_complete` as `_meta.json` carries it: `"step/branch"`, sorted."""
-        return sorted(f"{step}/{branch}" for step, parts in self._parts.items() for branch in parts)
+    def paths(self, step):
+        """The step's part paths in sorted key order — the one registration/read order."""
+        parts = self._parts.get(step, {})
+        return [parts[k] for k in sorted(parts)]
+
+    def slots(self, step=None):
+        """Every (Slot, path) pair, one step's or all, in sorted key order."""
+        steps = [step] if step is not None else sorted(self._parts)
+        return [(Slot(s, k), self._parts[s][k]) for s in steps for k in sorted(self._parts.get(s, ()))]
+
+    def meta(self):
+        """JSON form: {step: [[key, path], ...]} — keys keep their int/str type."""
+        return {s: [[k, p] for (_, k), p in self.slots(s)] for s in sorted(self._parts)}
+
+    @classmethod
+    def from_meta(cls, data):
+        m = cls()
+        for step, pairs in (data or {}).items():
+            for key, path in pairs:
+                m.add(Slot(step, key), path)
+        return m
+
+    @classmethod
+    def from_rows(cls, rows):
+        """From (step, key, path) triples — the lake `manifest` table's shape."""
+        m = cls()
+        for step, key, path in rows:
+            m.add(Slot(step, key), path)
+        return m
 
 
 @dataclass
 class RunRecord:
-    """One run's bookkeeping, and the two objects `persist` writes it to from one
-    state: `_meta.json` (progress + resume provenance) and the ledger row (status).
+    """One run's bookkeeping, and the two forms it serializes to: the lake's
+    `runs` row (the one authority, decision 0019) and the `_meta.json`
+    recovery export that `backfill` reads when the register is lost.
     """
 
     run_id: str
@@ -78,46 +110,40 @@ class RunRecord:
     origin_run_id: str | None
     params: dict
     custom: dict
-    fanout_keys: dict
-    custom_fields: list  # params + Ledger columns, as arrow fields for the ledger schema
 
     @property
     def _ok(self):
-        """True once the run is complete. Publish reads `_meta.json`'s `finished`
-        as the success flag, so a failed run — which does get a ledger finish
-        time — must not claim one there."""
+        """True once the run is complete. A failed run keeps its finish time in
+        the ledger row, but must not claim custom results — nor a `finished` in
+        meta, which publish would read as the success flag."""
         return self.status == "complete"
 
-    def meta(self, done):
-        """The `_meta.json` payload; `done` is `Progress.to_list()`."""
+    def row(self):
+        """The lake `runs` row. params/custom travel as JSON text: the table's
+        schema is fixed forever; the `ledger` view derives typed columns from
+        the flow's declarations instead (no migration workflow, deliberately)."""
+        return [
+            self.run_id,
+            self.status,
+            self.started,
+            self.finished,
+            self.commit,
+            self.origin_run_id,
+            json.dumps(self.params),
+            json.dumps(self.custom if self._ok else {}, default=str),
+        ]
+
+    def meta(self, manifest):
+        """The `_meta.json` payload; `manifest` is the run's `Manifest`."""
         ok = self._ok
         return {
             "run_id": self.run_id,
+            "status": self.status,
             "started": self.started.isoformat(),
             "finished": self.finished.isoformat() if ok and self.finished else None,
             "commit": self.commit,
             "origin_run_id": self.origin_run_id,
-            "steps_complete": done,
-            "fanout_keys": self.fanout_keys,
+            "manifest": manifest.meta(),
             "params": self.params,
             "custom": self.custom if ok else {},
         }
-
-    def ledger_row(self):
-        """The ledger's CAS parquet row: base columns, params and Ledger columns flattened."""
-        return {
-            "run_id": self.run_id,
-            "status": self.status,
-            "started": self.started,
-            "finished": self.finished,
-            "commit": self.commit,
-            "origin_run_id": self.origin_run_id,
-            **self.params,
-            **(self.custom if self._ok else {}),
-        }
-
-    def persist(self, space, done, status):
-        """Write both records at `status`: `_meta.json` first, then the ledger row."""
-        self.status = status
-        space.write_meta(self.run_id, self.meta(done))
-        space.upsert_runs([self.ledger_row()], self.custom_fields)

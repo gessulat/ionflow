@@ -48,8 +48,12 @@ def test_items_pipeline_without_a_stage_barrier(s3cfg, repo, tmp_path, monkeypat
 
 @pytest.mark.slow
 def test_one_item_stays_in_one_process(s3cfg, repo, tmp_path, monkeypatch):
-    """Sub-steps of an item share a process, which is what lets them pass a file path."""
+    """Sub-steps of an item share a process, which is what lets them pass a file
+    path. PIPE_MEET makes both items' converts wait for each other, so the run
+    only completes if the items really ran on two workers at once — without the
+    barrier a fast first item may legitimately be packed into the warm worker."""
     _setup(s3cfg, tmp_path, monkeypatch)
+    monkeypatch.setenv("PIPE_MEET", "1")
     run_id = PipelineFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=2)
 
     con = PipelineFlow.duck(s3cfg)
@@ -97,7 +101,7 @@ def test_resume_restarts_an_item_at_its_first_incomplete_sub_step(s3cfg, repo, t
     monkeypatch.delenv("PIPE_FAIL")
     resumed = PipelineFlow.run(s3cfg, repo=repo, resume=origin, use_processes=False)
 
-    # the 40-minute convert and the finished upload are copied; only the search re-runs
+    # the 40-minute convert and the finished upload are reused; only the search re-runs
     assert exec_counts(tmp_path, "convert") == {"raw-0": 1, "raw-1": 1}
     assert exec_counts(tmp_path, "upload_db") == {"raw-0": 1, "raw-1": 1}
     assert exec_counts(tmp_path, "search") == {"raw-0": 1, "raw-1": 2}

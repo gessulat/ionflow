@@ -34,7 +34,7 @@ def test_run_end_to_end(anycfg, repo):
     assert row[0] == "complete"
     assert row[1] is not None
     assert row[2] == 4  # n_docs custom ledger column
-    # per-step progress (steps_complete) lives in _meta.json, not the ledger
+    # per-part progress (the manifest) lives in _meta.json, not the ledger
 
     # resource metrics: every step sampled at least once; stats derivable
     from ionflow import query
@@ -67,7 +67,7 @@ def test_run_with_processes(s3cfg, repo):
         f"SELECT DISTINCT branch FROM metrics WHERE run_id = '{run_id}' "
         "AND step = 'vectors' AND branch IS NOT NULL ORDER BY branch"
     ).fetchall()
-    assert branches == [(0,), (1,)]
+    assert branches == [("arxiv",), ("wiki",)]  # the branch label IS the item key
     # stats count workers only; the orchestrator's pool-wait is not the step's cost
     from ionflow import query
 
@@ -103,33 +103,38 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
     meta = space.read_meta(run_id)
     assert list(meta) == [
         "run_id",
+        "status",
         "started",
         "finished",
         "commit",
         "origin_run_id",
-        "steps_complete",
-        "fanout_keys",
+        "manifest",
         "params",
         "custom",
     ]
-    assert meta["steps_complete"] == [
-        "agg/0",
-        "parts/0",
-        "parts/1",
-        "parts/2",
-        "source/0",
-        "work/0",
-        "work/1",
-        "work/2",
-    ]
+    # the manifest maps (step, item key) -> the part object holding it
+    assert {s: [k for k, _ in pairs] for s, pairs in meta["manifest"].items()} == {
+        "agg": [0],
+        "parts": [0, 1, 2],
+        "source": [0],
+        "work": [0, 1, 2],
+    }
+    assert all(p == space.part(run_id, s, k) for s, pairs in meta["manifest"].items() for k, p in pairs)
 
-    # an origin written by hand in today's format must still drive a resume: `work/1`
-    # is absent, so exactly that branch recomputes and the rest are copied forward
+    # meta is the RECOVERY surface: a record written by hand in today's format
+    # folds back into the catalog via backfill, and the restored run drives a
+    # resume — `work` item 1 is absent, so exactly that item recomputes
+    from ionflow.lake import backfill
+
+    dropped = {("work", 1), ("agg", 0)}
     origin = dict(
         meta,
         run_id="hand-written",
         origin_run_id=None,
-        steps_complete=[s for s in meta["steps_complete"] if s not in ("work/1", "agg/0")],
+        manifest={
+            s: [[k, p.replace(f"run_id={run_id}", "run_id=hand-written")] for k, p in pairs if (s, k) not in dropped]
+            for s, pairs in meta["manifest"].items()
+        },
     )
     for key in space.store.list(space.run_dir(run_id) + "/"):
         space.store.client.copy_object(
@@ -138,5 +143,6 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
             Key=key.replace(f"run_id={run_id}", "run_id=hand-written"),
         )
     space.write_meta("hand-written", origin)
+    backfill(FlakyFlow, space, replace=True)
     resumed = FlakyFlow.run(cfg, repo=repo, resume="hand-written", use_processes=False)
     assert FlakyFlow.duck(cfg).sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)

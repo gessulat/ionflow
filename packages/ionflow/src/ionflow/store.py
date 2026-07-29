@@ -2,7 +2,6 @@ import os
 import shutil
 import tempfile
 import weakref
-from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
@@ -14,7 +13,7 @@ from schrein import CasRegister, DuckLake, LocalClient, error_code
 from schrein.ducklake import CATALOG_KEY, load_extension
 
 MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
-COPY_WORKERS = 16  # server-side copies and sync uploads are latency-bound, not CPU-bound
+COPY_WORKERS = 16  # sync uploads are latency-bound, not CPU-bound
 
 
 def s3_client(cfg):
@@ -145,21 +144,6 @@ class Store:
         server_now = parsedate_to_datetime(r["ResponseMetadata"]["HTTPHeaders"]["date"])
         return (server_now - r["LastModified"]).total_seconds()
 
-    def copy_many(self, pairs):
-        """Server-side copies of (src_key, dst_key) pairs; yields each dst_key as
-        its copy lands, in submission order.
-
-        A generator on purpose: a failed copy raises mid-iteration, leaving the
-        already-yielded prefix as the progress a caller can still record.
-        """
-        with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:
-            yield from ex.map(self._copy_one, pairs)
-
-    def _copy_one(self, pair):
-        src, dst = pair
-        self.client.copy_object(Bucket=self.bucket, CopySource={"Bucket": self.bucket, "Key": src}, Key=dst)
-        return dst
-
     def uri(self, key):
         raise NotImplementedError
 
@@ -179,10 +163,6 @@ class Store:
         nor a secret (DuckDB reads plain paths natively), so S3Store overrides.
         """
         return self.local_connection(threads, memory_mb)
-
-    def cas(self, key):
-        """schrein's CAS register over one key (decision 0011)."""
-        return CasRegister(self.client, self.bucket, key)
 
     def lake(self, prefix, data_subdir="data"):
         raise NotImplementedError

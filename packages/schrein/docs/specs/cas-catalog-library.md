@@ -71,34 +71,16 @@ The honest price (§2, §6): every commit transfers the whole catalog and
 commits serialize. "Zero infrastructure within a stated low-write-rate
 regime" is the claim.
 
-### 1.1 Scope guard: schrein is not ionflow's ledger
+### 1.1 Scope guard: schrein stays generic
 
-Because both designs are "one mutable S3 object, CAS-swapped," it is easy
-to conflate them. They share a *mechanism*, not a *role*:
-
-- **ionflow's ledger** is run bookkeeping: an append-only record of flow
-  runs (`run_id`, status, timestamps, commit, completed steps, params).
-  It has no schema authority — in ionflow, table schemas live in `Table`
-  class annotations and drift checking lives in `lake.py`. The
-  ledger never performs or tracks schema changes.
-- **schrein's register** holds a lakehouse *catalog*: table schemas,
-  snapshots, and file lists for a datalake. Schema evolution is a
-  first-class catalog operation here (§4.6) — the opposite of the
-  ledger's role.
-
-What was extracted from ionflow's `ledger.py` is only the proven CAS
-commit loop — read → modify → conditional PUT → retry-on-412, now
-generalized as `register.py::CasRegister.transact` — i.e. the
-coordination primitive. Nothing of the ledger's run-tracking semantics
-carries over.
-
-ionflow flows do **not** run on schrein; the ledger's CAS loop is
-schrein's `CasRegister` (ionflow decision 0011 — same mechanism, roles
-untouched), and ionflow registers completed step outputs into a per-flow
-schrein lake (`packages/ionflow/docs/specs/ionflow-on-schrein.md`). The roles stay
-distinct throughout: the ledger remains a separate object and keeps sole
-authority over run bookkeeping; the catalog only ever receives table
-schemas and data-file registrations.
+schrein's register holds a lakehouse *catalog* — table schemas, snapshots,
+file lists — and knows nothing about flows or runs. Its one consumer today,
+ionflow, keeps a schrein DuckLake per flow (plus a publish lake) and stores
+its own run bookkeeping as ordinary tables *inside* that catalog (ionflow
+decisions 0012/0019); the CAS commit loop itself was originally extracted
+from ionflow and generalized as `register.py::CasRegister.transact`. None
+of that leaks back: schrein never imports ionflow, and nothing here is
+specific to any consumer's semantics.
 
 ## 2. Non-goals
 
@@ -300,14 +282,11 @@ which the atomic-commit property above makes safe to do in one step.
 ## 5. Public API
 
 ```python
-from schrein import CasRegister, DuckLake
+import boto3
+from schrein import DuckLake, LocalClient
 
-lake = DuckLake(
-    bucket="mybucket", prefix="lake",     # -> s3://mybucket/lake/catalog.ducklake
-    endpoint_url=None,                    # MinIO/R2/moto endpoints supported
-    region="us-east-1",
-    grace_ttl_days=7,
-)
+client = boto3.client("s3")               # or LocalClient(dir) for a plain directory
+lake = DuckLake.at(client, "mybucket", "lake")  # -> s3://mybucket/lake/catalog.ducklake
 
 # writer: replayable closure; retried on CAS conflict
 lake.commit(lambda con: con.execute(
@@ -318,8 +297,8 @@ lake.commit(lambda con: con.execute(
 with lake.read() as con:
     con.sql("SELECT count(*) FROM lake.events").show()
 
-lake.expire_snapshots(older_than_days=30)   # CAS commit
-lake.gc(dry_run=True)                        # list/delete unreferenced+aged files
+lake.expire_snapshots(older_than_days=30)    # CAS commit
+lake.gc(grace_days=7, dry_run=True)          # list/delete unreferenced+aged files
 ```
 
 Vanilla reader, no library (Frozen-DuckLake style; racy only during an

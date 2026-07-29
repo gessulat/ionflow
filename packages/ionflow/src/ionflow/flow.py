@@ -5,7 +5,7 @@ from . import query, runner
 from .config import Config
 from .dag import build_dag
 from .lake import publish as _publish
-from .space import BASE_COLS
+from .state import BASE_COLS
 
 
 class Flow:
@@ -61,11 +61,6 @@ class Flow:
     def params_columns(cls):
         """The flow's declared params ({} if no inner Params class)."""
         return cls.Params.columns() if cls.Params else {}
-
-    @classmethod
-    def custom_ledger_fields(cls):
-        """pyarrow ledger fields beyond the base schema: params, then Ledger columns."""
-        return (cls.Params.arrow_fields() if cls.Params else []) + (cls.Ledger.arrow_fields() if cls.Ledger else [])
 
     @classmethod
     def resolve_params(cls, given=None):

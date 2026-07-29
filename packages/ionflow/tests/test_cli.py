@@ -33,6 +33,13 @@ def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
     assert st.exit_code == 0, st.output
     assert run_id in st.output and "peak_rss_mb" in st.output and "summary" in st.output
 
+    dr = runner.invoke(cli.app, ["run", "examples.embed:EmbedDocs", "--resume", "latest", "--dry-run"])
+    assert dr.exit_code == 0, dr.output
+    # a complete origin reuses everything except the keyed fan-out, which re-runs
+    assert f"resume from {run_id}" in dr.output
+    assert "by_source: reuse 0, compute 2" in dr.output and "vectors: reuse 2, compute 0" in dr.output
+    assert runner.invoke(cli.app, ["run", "examples.embed:EmbedDocs", "--dry-run"]).exit_code != 0
+
 
 def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: setup writes .ionflow/ + .gitignore

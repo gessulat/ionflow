@@ -1,9 +1,8 @@
 """Characterization of the two DuckLakes: a flow's catalog and the publish lake.
 
-Written before catalog.py + publish.py + discovery.schema_drift merge into one
-module, so every assertion is stated as observable behaviour — register etags
-(one per CAS commit), snapshot rows, the DDL DuckDB itself renders, the objects
-that end up in the store — rather than as calls into the current internals.
+Every assertion is stated as observable behaviour — what a stock DuckDB reader
+sees, the objects that end up in the store, the recovery path — rather than as
+calls into internals.
 """
 
 import re
@@ -99,11 +98,11 @@ def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(s3cfg, repo):
     v.close()
 
 
-def test_backfill_registers_only_complete_runs_and_infers_run_id_from_the_path(s3cfg, repo, tmp_path, monkeypatch):
+def test_backfill_restores_runs_manifests_and_registrations(s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
     monkeypatch.setenv("FLAKY_FAIL", "1")
     with pytest.raises(RuntimeError, match="boom"):
-        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)  # writes `source` parts, then dies
+        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)  # writes `source`/`parts`, then dies
     monkeypatch.setenv("FLAKY_FAIL", "0")
     good = FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
 
@@ -112,18 +111,23 @@ def test_backfill_registers_only_complete_runs_and_infers_run_id_from_the_path(s
     with pytest.raises(FileExistsError, match="--replace"):
         lakemod.backfill(FlakyFlow, space)
 
+    before = {r["run_id"]: r["status"] for r in cat.runs()}
     cat.discard()  # the recovery situation: run folders intact, register lost
     with pytest.raises(RuntimeError, match="catalog-backfill"):
         duck(FlakyFlow, s3cfg)  # the only read path refuses, pointing at the fix
 
-    assert lakemod.backfill(FlakyFlow, space) == 1  # one COMPLETE run
+    assert lakemod.backfill(FlakyFlow, space) == 2  # every run with a recovery record
 
     con = duck(FlakyFlow, s3cfg)
-    assert {r[0] for r in con.sql("SELECT DISTINCT run_id FROM source").fetchall()} == {good}
-    assert con.sql("SELECT n, total FROM agg").fetchall() == [(3, 6)]
+    assert dict(con.sql("SELECT run_id, status FROM ledger").fetchall()) == before
+    assert con.sql("SELECT n, total FROM agg").fetchall() == [(3, 6)]  # from the complete run
+    failed = next(r for r, s in before.items() if s == "failed")
+    assert good != failed
+    # the failed run's completed steps are queryable again too
+    assert con.sql(f"SELECT count(*) FROM source WHERE run_id = '{failed}'").fetchone()[0] == 3
     con.close()
 
-    assert lakemod.backfill(FlakyFlow, space, replace=True) == 1  # rebuild over an existing catalog
+    assert lakemod.backfill(FlakyFlow, space, replace=True) == 2  # rebuild over an existing catalog
 
 
 def test_schema_drift_reports_missing_changed_and_unexpected_columns(s3cfg, repo):

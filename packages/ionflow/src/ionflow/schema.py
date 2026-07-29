@@ -458,13 +458,6 @@ class FlowParams(_ColumnSet, base=True):
     _require_columns: typing.ClassVar[bool] = False  # an empty declaration is legal here
 
     @classmethod
-    def arrow_fields(cls):
-        """Ledger fields, all nullable (older runs predate any given param); only
-        the field is widened, the Column's own nullability stays honest for `resolve`.
-        """
-        return [pa.field(n, c.arrow_type, nullable=True) for n, c in cls._columns.items()]
-
-    @classmethod
     def resolve(cls, given=None):
         """Merge `given` over the defaults; validate names, presence, and types."""
         given = given or {}

@@ -1,33 +1,23 @@
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
+import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-import pyarrow as pa
 from schrein.ducklake import CATALOG_KEY
 
-from .arrow import BATCH_ROWS, parquet_bytes, table_from_bytes, to_arrow
+from .arrow import BATCH_ROWS, parquet_bytes, to_arrow
 from .schema import _q
 from .store import COPY_WORKERS, Store
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
-LEDGER_FILE = "ledger.parquet"
 LAKE_SUBDIR = "_lake"  # catalog-written data files at the flow root; sync skips it
-
-LEDGER_FIELDS = [
-    pa.field("run_id", pa.string()),
-    pa.field("status", pa.string()),  # running | complete | failed
-    pa.field("started", pa.timestamp("us")),
-    pa.field("finished", pa.timestamp("us")),
-    pa.field("commit", pa.string()),
-    pa.field("origin_run_id", pa.string()),
-]
-
-BASE_COLS = {f.name for f in LEDGER_FIELDS}  # names params/custom columns must not take
+META_FILE = "_meta.json"  # per-run recovery export; the catalog is the authority (0019)
 
 
 class ConstraintViolation(RuntimeError):
@@ -39,9 +29,27 @@ def utc_now():
     return dt.datetime.now(dt.UTC).replace(tzinfo=None)
 
 
-def flow_id_of_ledger_key(prefix, key):
-    """The flow a `<prefix>/<flow_id>/ledger.parquet` key names, else None."""
-    suffix = "/" + LEDGER_FILE
+_SLUG_BAD = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def key_slug(key):
+    """Filename-safe form of an item key: exact when already clean, else
+    sanitized + content-hashed. The manifest, not the filename, is the
+    authoritative key -> part mapping; the slug only keeps run folders legible.
+
+    >>> key_slug(3), key_slug("file-7")
+    ('3', 'file-7')
+    >>> key_slug("data/a.raw")
+    'data-a.raw-7ffc3f78'
+    """
+    s = str(key)
+    clean = _SLUG_BAD.sub("-", s)[:80]
+    return clean if clean == s else f"{clean}-{hashlib.sha1(s.encode()).hexdigest()[:8]}"
+
+
+def flow_id_of_catalog_key(prefix, key):
+    """The flow a `<prefix>/<flow_id>/catalog.ducklake` key names, else None."""
+    suffix = "/" + CATALOG_KEY
     if not key.startswith(prefix) or not key.endswith(suffix):
         return None
     name = key[len(prefix) : -len(suffix)]
@@ -83,12 +91,12 @@ class Space:
     flow module under a loader name, so their `flow_cls.flow_id()` is wrong.
 
     >>> s = Space(None, "mf", "ETL")
-    >>> s.ledger
-    'mf/ETL/ledger.parquet'
+    >>> s.meta("r1")
+    'mf/ETL/runs/run_id=r1/_meta.json'
     >>> s.part("r1", "raw")
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
-    >>> s.parse_part(s.part("r1", "raw"))
-    ('r1', 'raw', 'part_0.parquet')
+    >>> s.part("r1", "work", "file-7")
+    'mf/ETL/runs/run_id=r1/work/part_file-7.parquet'
     """
 
     store: Store
@@ -104,22 +112,33 @@ class Space:
     def root(self):
         return f"{self.prefix}/{self.flow_id}"
 
-    @property
-    def ledger(self):
-        return f"{self.root}/{LEDGER_FILE}"
-
     def run_dir(self, run_id):
         return f"{self.root}/runs/run_id={run_id}"
 
     def meta(self, run_id):
-        return f"{self.run_dir(run_id)}/_meta.json"
+        return f"{self.run_dir(run_id)}/{META_FILE}"
+
+    def run_ids(self):
+        """run_ids of every run folder holding a `_meta.json`, from one LIST."""
+        prefix = f"{self.root}/runs/run_id="
+        out = []
+        for key in self.store.list(prefix):
+            run_id, _, tail = key.removeprefix(prefix).partition("/")
+            if tail == META_FILE:
+                out.append(run_id)
+        return sorted(out)
 
     def metrics(self, run_id):
         return f"{self.run_dir(run_id)}/{METRICS_FILE}"
 
     def metrics_branch(self, run_id, step, branch):
-        """A branch worker's own metrics object — one writer per key, no CAS needed."""
+        """An item worker's own metrics object — one writer per key, no CAS needed."""
         return f"{self.run_dir(run_id)}/{METRICS_PREFIX}_{step}_{branch}.parquet"
+
+    def metrics_node(self, run_id, step):
+        """A whole-step task's metrics object. Dot-separated: step names cannot
+        contain dots, so it can never collide with an item's `_metrics_...` key."""
+        return f"{self.run_dir(run_id)}/{METRICS_PREFIX}.{step}.parquet"
 
     @property
     def metrics_glob(self):
@@ -128,19 +147,9 @@ class Space:
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
 
-    def part(self, run_id, step, branch=0):
-        return f"{self.step_dir(run_id, step)}/part_{branch}.parquet"
-
-    def parse_part(self, key):
-        """Inverse of part(): (run_id, step, tail) for a key under this space's run
-        folders, else None. `tail` is everything after the step segment, so nested
-        keys parse like the flat ones the layout writes."""
-        prefix = f"{self.root}/runs/run_id="
-        if not key.startswith(prefix):
-            return None
-        run_id, _, rest = key[len(prefix) :].partition("/")
-        step, _, tail = rest.partition("/")
-        return (run_id, step, tail) if tail else None
+    def part(self, run_id, step, key=0):
+        """The part key for one (step, item key) — see `key_slug` for the naming."""
+        return f"{self.step_dir(run_id, step)}/part_{key_slug(key)}.parquet"
 
     def is_internal(self, key):
         """True for the flow's catalog register or its catalog-written data files."""
@@ -158,10 +167,6 @@ class Space:
         """
         return con.read_parquet([self.uri(k) for k in keys], hive_partitioning=False)
 
-    def part_keys(self, run_id, step):
-        """A step's part keys for one run, sorted — the one registration/read order."""
-        return sorted(self.store.list(self.step_dir(run_id, step) + "/"))
-
     def lake(self, data_subdir=LAKE_SUBDIR):
         """The flow's catalog DuckLake at its root (catalog-written files only)."""
         return self.store.lake(self.root, data_subdir=data_subdir)
@@ -170,11 +175,6 @@ class Space:
         """Write a small pyarrow Table as one parquet object (whole-object PUT)."""
         self.store.put(key, parquet_bytes(table))
 
-    def read_rows(self, key):
-        """Rows of a parquet object, or [] when it does not exist."""
-        blob = self.store.get(key)
-        return [] if blob is None else table_from_bytes(blob).to_pylist()
-
     def write_meta(self, run_id, meta):
         self.store.put(self.meta(run_id), json.dumps(meta, default=str).encode())
 
@@ -182,40 +182,7 @@ class Space:
         blob = self.store.get(self.meta(run_id))
         return None if blob is None else json.loads(blob)
 
-    def amend(self, key, schema, merge, retries=5):
-        """CAS-rewrite a parquet object: `merge(rows)` returns the FULL new row list.
-
-        `merge` runs inside the CAS closure, against a fresh read on every attempt
-        (decision 0011) — it must be replayable and must not do I/O.
-        """
-
-        def fn(old):
-            rows = merge([] if old is None else table_from_bytes(old).to_pylist())
-            return parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
-
-        self.store.cas(key).transact(fn, max_attempts=retries, base_delay=0.05)
-
-    def upsert_runs(self, rows, custom_fields=(), retries=5):
-        """Insert or replace ledger rows by run_id, all in one CAS commit."""
-        schema = pa.schema(LEDGER_FIELDS + list(custom_fields))
-        new_ids = {r["run_id"] for r in rows}
-
-        def merge(old):
-            merged = [r for r in old if r["run_id"] not in new_ids]
-            merged += [dict(r) for r in rows]  # from_pylist fills missing schema columns with null
-            merged.sort(key=lambda r: r["started"])
-            return merged
-
-        self.amend(self.ledger, schema, merge, retries=retries)
-
-    def copy_parts(self, items):
-        """Server-side copies of (src_key, dst_key, tag) triples; yields each tag as
-        its copy lands, in submission order (consume it as `Store.copy_many` says).
-        """
-        tag_of = {dst: tag for _, dst, tag in items}
-        return (tag_of[dst] for dst in self.store.copy_many([(s, d) for s, d, _ in items]))
-
-    def write_part(self, key, data, table, threads=None, memory_mb=None, fanout_key=None):
+    def write_part(self, dest, data, table, threads=None, memory_mb=None, fanout_key=None):
         """Stream `data` to a local parquet via DuckDB COPY, validate, upload via boto3.
 
         The COPY runs on a fresh local connection fed by an arrow batch reader —
@@ -223,31 +190,36 @@ class Space:
         source deadlocks), and the write itself goes through boto3, never httpfs
         (a failed `COPY TO s3://` leaves a corrupt part visible, ADR 0010).
         Nothing touches S3 until the staged file is complete and validated, so a
-        part object's existence implies the part is whole. Returns the item's
-        `fanout_key` value when a key column is given, else None.
+        part object's existence implies the part is whole. `dest` is the target
+        key, or — for keyed fan-out items, whose name derives from the data — a
+        callable mapping the extracted key value to it (raising there, e.g. on a
+        duplicate key, still uploads nothing). Returns the item's `fanout_key`
+        value when a key column is given, else None.
         """
         # capability dispatch: covers relations and StepInput (which delegates
         # to_arrow_reader to its relation) without per-wrapper unwrap branches
         src = data.to_arrow_reader(BATCH_ROWS) if hasattr(data, "to_arrow_reader") else to_arrow(data, table)
+        label = dest if isinstance(dest, str) else "step output"
         if missing := set(table.columns()) - set(src.schema.names):
-            raise ConstraintViolation(f"{key}: step output missing declared columns: {sorted(missing)}")
+            raise ConstraintViolation(f"{label}: step output missing declared columns: {sorted(missing)}")
         con = self.store.local_connection(threads, memory_mb)
         con.register("_src", src)
         select = table.cast_sql("_src")
         with tempfile.TemporaryDirectory(prefix="ionflow-part-") as tmp_dir:
             path = os.path.join(tmp_dir, "part.parquet")
             con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE {BATCH_ROWS})")
-            _validate_part(con, table, path, key)
-            key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, key)
-            self.store.upload(key, path)
+            _validate_part(con, table, path, label)
+            key_value = None if fanout_key is None else _extract_fanout_key(con, fanout_key, path, label)
+            self.store.upload(dest(key_value) if callable(dest) else dest, path)
         return key_value
 
     def sync_to(self, other, flow_cls):
-        """Copy this local space's runs + ledger into `other`, then rebuild the
-        catalog there (decision 0016). Returns {copied, runs}.
+        """Copy this local space's run folders into `other`, then rebuild the
+        catalog there from the copied `_meta.json` records (decision 0016).
 
-        Ledger rows MERGE through the target's CAS ledger; the catalog is
-        re-derived rather than copied — it stores absolute data-file locations.
+        The catalog — ledger rows included — is re-derived by `backfill` rather
+        than copied: it stores absolute data-file locations (0019). Returns
+        {copied, runs}.
         """
         from .lake import backfill  # lake builds on Space; the import stays local to break the cycle
 
@@ -263,20 +235,12 @@ class Space:
         todo = []
         for key in self.store.list(self.root + "/"):
             tail = key.removeprefix(self.root)
-            if key == self.ledger or self.is_internal(key) or other.root + tail in existing:
-                continue  # run folders are immutable: a key already on the target is done
+            # parts are immutable — a key already on the target is done; a run's
+            # `_meta.json` is not (a run synced mid-flight finishes later)
+            done = other.root + tail in existing and not key.endswith("/" + META_FILE)
+            if self.is_internal(key) or done:
+                continue
             todo.append((str(root / key), other.root + tail))
         with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:  # many small objects, latency-bound
             list(ex.map(lambda t: other.store.upload(t[1], t[0]), todo))
-
-        runs = 0
-        blob = self.store.get(self.ledger)
-        if blob is not None:
-            table = table_from_bytes(blob)
-            custom = [table.schema.field(n) for n in table.schema.names if n not in BASE_COLS]
-            other.upsert_runs(table.to_pylist(), custom)
-            runs = table.num_rows
-
-        if runs:
-            backfill(flow_cls, other, replace=True)
-        return {"copied": len(todo), "runs": runs}
+        return {"copied": len(todo), "runs": backfill(flow_cls, other, replace=True)}

@@ -96,12 +96,6 @@ def put_n(config, n):
     Store.of(config).put("side/n", str(n).encode())
 
 
-def _side_order(config):
-    """Fan-out order knob: the optional `side/order` object ("rev" reverses)."""
-    blob = Store.of(config).get("side/order")
-    return blob.decode() if blob else "fwd"
-
-
 class SideInputFlow(Flow):
     """Reads a side object via self.config — in a root step and inside a branch."""
 
@@ -121,7 +115,7 @@ class TwoGroupFlow(Flow):
 
     Thread mode is the only place one process runs both groups, so it is the only
     place a worker binding cached for the first group could still be around for
-    the second — with the first group's collect widths.
+    the second — with the first group's collect inputs.
     """
 
     def side_a(self) -> Fanout[Src]:
@@ -159,7 +153,7 @@ class KeyedAgg(Table):
 
 
 class KeyedFlow(Flow):
-    """Keyed fan-out sized by the side object; uuid tokens expose copy vs recompute."""
+    """Keyed fan-out sized by the side object; uuid tokens expose reuse vs recompute."""
 
     def items(self) -> Fanout[KeyedItem]:
         return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in range(_side_n(self.config))]
@@ -264,16 +258,12 @@ class KeyedRefined(Table):
 class KeyedChainFlow(Flow):
     """Keyed fan-out feeding a chained branch step, for incremental resume.
 
-    Fan-out size comes from `side/n` and its order from `side/order`, so a resume
-    can grow, shrink or merely reorder the work-list; KEYED_CHAIN_FAIL="<item>"
-    fails `refine` for one item, which marks its executions in CHAIN_DIR.
+    Fan-out size comes from `side/n`, so a resume can grow or shrink the
+    work-list; `upstream` records which `work` output `refine` actually read.
     """
 
     def items(self) -> Fanout[KeyedItem]:
-        gs = list(range(_side_n(self.config)))
-        if _side_order(self.config) == "rev":
-            gs.reverse()
-        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in gs]
+        return [pa.table({"g": [g], "item": [f"file-{g}"]}) for g in range(_side_n(self.config))]
 
     def work(self, items: Branch[KeyedItem]) -> KeyedOut:
         item = items.project("item").fetchone()[0]
@@ -281,9 +271,6 @@ class KeyedChainFlow(Flow):
 
     def refine(self, work: Branch[KeyedOut]) -> KeyedRefined:
         item, token = work.project("item, token").fetchone()
-        _mark("refine", item)
-        if item == os.environ.get("KEYED_CHAIN_FAIL"):
-            raise RuntimeError(f"boom on {item}")
         return pa.table({"item": [item], "token": [uuid.uuid4().hex], "upstream": [token]})
 
 
@@ -367,6 +354,11 @@ class PipelineFlow(Flow):
         _mark("convert", raw)
         if _fails_now("convert", raw):
             raise RuntimeError(f"convert failed on {raw}")
+        if os.environ.get("PIPE_MEET"):  # cross-item barrier: both converts live at once,
+            # so the items MUST be on two workers (a packed second item would arrive too late)
+            other = {"raw-0": "raw-1", "raw-1": "raw-0"}[raw]
+            if not _rendezvous(f"meet-{raw}", f"meet-{other}", "x"):
+                raise RuntimeError(f"convert {raw} never overlapped its sibling")
         db = _pipe_dir() / f"{raw}.db"
         db.write_text(f"spectra for {raw}")  # the 10 GB .db, in miniature
         return pa.table({"raw": [raw], "db": [str(db)], "pid": [os.getpid()], "started": [time.time()]})

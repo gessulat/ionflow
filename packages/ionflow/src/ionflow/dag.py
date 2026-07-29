@@ -57,6 +57,26 @@ class Dag:
                 out.add(name)
         return out
 
+    def schedule_graph(self):
+        """The runner's node graph: every plain/fan-out step by name, plus an
+        `("items", f)` node for fan-out f's per-item group. Edges are exact — a
+        fan-out's emission does not wait on member-only inputs, and a group's
+        dependents wait for its items — and every edge is implied by `plan`'s
+        contraction, so the cycle check there covers this graph too.
+        """
+
+        def node(s):
+            return ("items", self.roots[s]) if s in self.roots else s
+
+        g: dict[str | tuple, set] = {name: set() for name in self.steps if name not in self.roots}
+        for f in self.groups:
+            g[("items", f)] = {f}
+        for name, step in self.steps.items():
+            for dep in step.deps:
+                if node(dep) != node(name):
+                    g[node(name)].add(node(dep))
+        return g
+
 
 def branch_dep(step):
     """The step whose branches this one runs over — its branch index space, or None."""
@@ -151,7 +171,12 @@ def _plan(steps, roots):
         ) from None
 
 
-RESERVED_STEP_NAMES = {"ledger", "metrics"}  # taken by duck()'s system views
+RESERVED_STEP_NAMES = {"ledger", "metrics", "runs", "manifest"}  # duck()'s views + the lake's system tables
+PATH_COL = "__ionflow_path"  # the step views' filename join column (query.py)
+RESERVED_COLUMNS = {
+    "run_id": "the catalog's partition column",
+    PATH_COL: "the step views' filename column",
+}
 
 
 def build_dag(cls) -> Dag:
@@ -173,8 +198,9 @@ def build_dag(cls) -> Dag:
         table = typing.get_args(ret)[0] if is_fanout else ret
         if table is None:
             raise ValueError(f"step '{name}' has no output table annotation")
-        if "run_id" in table.columns():
-            raise ValueError(f"step '{name}': column 'run_id' is reserved (the catalog's partition column)")
+        for col, why in RESERVED_COLUMNS.items():
+            if col in table.columns():
+                raise ValueError(f"step '{name}': column '{col}' is reserved ({why})")
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 
     for s in steps.values():

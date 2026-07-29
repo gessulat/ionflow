@@ -26,11 +26,17 @@ def test_resume_reuses_origin_params(cfg, repo):
 
 
 def test_resume_ignores_dropped_origin_params(cfg, repo):
+    import json
+
+    from ionflow.lake import RUN_COLS, Catalog
+
     origin = EmptyFanFlow.run(cfg, repo=repo, use_processes=False)
-    # simulate a param recorded by older code, since removed from the declaration
-    space = Space.for_flow(Store.of(cfg), EmptyFanFlow)
-    meta = space.read_meta(origin)
-    space.write_meta(origin, {**meta, "params": {"gone": 1}})
+    # simulate a param recorded by older code, since removed from the declaration:
+    # rewrite the origin's ledger row — the resume authority — with an unknown param
+    cat = Catalog(Space.for_flow(Store.of(cfg), EmptyFanFlow))
+    row, _ = cat.run_state(origin)
+    row["params"] = {"gone": 1}
+    cat.commit_run(origin, row=[json.dumps(row[c]) if c in ("params", "custom") else row[c] for c in RUN_COLS])
 
     with pytest.warns(UserWarning, match="no longer declared"):
         EmptyFanFlow.run(cfg, repo=repo, resume=origin, use_processes=False)

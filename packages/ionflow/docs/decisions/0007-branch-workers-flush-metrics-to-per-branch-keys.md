@@ -26,5 +26,9 @@ One-writer-per-object holds — each process owns its key, no CAS.
 - Wide fan-outs mean more small S3 PUTs, bounded by the 60s flush interval.
 - The orchestrator's `_metrics.parquet` remains the run's only liveness
   heartbeat; branch objects are data, not staleness signals.
-- These keys stay invisible to `parse_key` (run-dir level, like `_meta.json`),
-  so run scans and drift checks never see them.
+- These keys live at run-dir level (like `_meta.json`), outside any step
+  folder, so nothing that scans parts ever sees them.
+
+> NOTE (2026-07-29): since 0021 whole-step tasks flush their own objects too,
+> as `_metrics.<step>.parquet` (dot-separated so item keys cannot collide);
+> the same one-writer-per-object rule covers both patterns.
