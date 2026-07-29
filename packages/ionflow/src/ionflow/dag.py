@@ -151,7 +151,7 @@ def _plan(steps, roots):
         ) from None
 
 
-RESERVED_STEP_NAMES = {"ledger", "metrics"}  # taken by duck()'s system views
+RESERVED_STEP_NAMES = {"ledger", "metrics", "runs", "manifest"}  # duck()'s views + the lake's system tables
 
 
 def build_dag(cls) -> Dag:

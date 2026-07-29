@@ -121,8 +121,11 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
     }
     assert all(p == space.part(run_id, s, k) for s, pairs in meta["manifest"].items() for k, p in pairs)
 
-    # an origin written by hand in today's format must still drive a resume: `work` item 1
-    # is absent, so exactly that item recomputes and the rest are reused
+    # meta is the RECOVERY surface: a record written by hand in today's format
+    # folds back into the catalog via backfill, and the restored run drives a
+    # resume — `work` item 1 is absent, so exactly that item recomputes
+    from ionflow.lake import backfill
+
     dropped = {("work", 1), ("agg", 0)}
     origin = dict(
         meta,
@@ -140,5 +143,6 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
             Key=key.replace(f"run_id={run_id}", "run_id=hand-written"),
         )
     space.write_meta("hand-written", origin)
+    backfill(FlakyFlow, space, replace=True)
     resumed = FlakyFlow.run(cfg, repo=repo, resume="hand-written", use_processes=False)
     assert FlakyFlow.duck(cfg).sql(f"SELECT n, total FROM agg WHERE run_id = '{resumed}'").fetchone() == (3, 6)

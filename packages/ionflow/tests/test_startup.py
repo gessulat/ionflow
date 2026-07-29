@@ -43,5 +43,5 @@ def test_scan_runs(cfg):
     store = Store.of(cfg)
     assert scan_runs(store) == set()
     # key presence is all that matters here; no need for a full flow run
-    store.put(f"{cfg.prefix}/Alpha/ledger.parquet", b"")
+    store.put(f"{cfg.prefix}/Alpha/catalog.ducklake", b"")
     assert scan_runs(store) == {"Alpha"}

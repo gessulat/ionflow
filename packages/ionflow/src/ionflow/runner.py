@@ -34,16 +34,6 @@ def _keyed_fanouts(dag):
     return out
 
 
-def _latest_complete(space):
-    """run_id of the newest complete run, or None (ledger rows sort by start time).
-
-    Complete only — resuming must never chain onto a failed or running origin.
-    `stats`' default "latest" is the looser newest-by-start-time of any status.
-    """
-    rows = space.read_rows(space.ledger)
-    return next((r["run_id"] for r in reversed(rows) if r["status"] == "complete"), None)
-
-
 def _fair_share(workers):
     """Per-worker DuckDB caps: workers x per-worker share ~ the machine (cores, 80% RAM)."""
     cores = os.cpu_count() or 1
@@ -405,7 +395,6 @@ def run(
     run_id = _new_run_id(started)
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
-    origin_run_id = _latest_complete(space) if resume == "latest" else resume
     # connecting here also installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
     con = store.connect()
@@ -414,10 +403,16 @@ def run(
     flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
-    custom_fields = flow_cls.custom_ledger_fields()
+
+    # one snapshot answers everything resume needs: the origin's row + manifest
+    origin_row, origin_rows = cat.run_state(resume) if resume else (None, [])
+    if resume and resume != "latest" and origin_row is None:
+        raise RuntimeError(f"origin run not found: {resume}")
+    origin_run_id = origin_row["run_id"] if origin_row else None  # "latest" with no origin: fresh
 
     manifest = Manifest()
-    origin = Manifest()  # the origin run's parts, empty on a fresh run
+    origin = Manifest.from_rows(origin_rows)  # the origin run's parts, empty on a fresh run
+    pending = []  # manifest triples written since the last catalog commit
     keyed = _keyed_fanouts(dag)
     # Steps downstream of a keyed fan-out can't be reused upfront: the fan-out
     # re-runs first (the work-list may have changed), branch parts are then
@@ -431,6 +426,11 @@ def run(
     key_roots = {m: r for m, r in dag.roots.items() if r in keyed} if origin_run_id else {}
     lazy_reuse = {s for s in deferred if s not in keyed and s not in key_roots}
 
+    def note(slot, path):
+        """Record one part: in the live manifest and in the next catalog commit."""
+        manifest.add(slot, path)
+        pending.append((slot.step, slot.key, path))
+
     def copy_slots(slots):
         """Server-side copy origin parts into this run, recorded as each copy
         lands — a failure mid-iteration keeps the prefix as real progress."""
@@ -438,7 +438,7 @@ def run(
             return
         triples = [(origin.get(s.step, s.key), space.part(run_id, s.step, s.key), s) for s in slots]
         for slot in space.copy_parts(triples):
-            manifest.add(slot, space.part(run_id, slot.step, slot.key))
+            note(slot, space.part(run_id, slot.step, slot.key))
 
     def work_lists_unchanged(name, excluding=None):
         """True when every keyed fan-out upstream of `name` (bar `excluding`) kept its key set."""
@@ -448,25 +448,21 @@ def run(
             if f != excluding and name in ds
         )
 
-    if origin_run_id:
-        origin_meta = space.read_meta(origin_run_id)
-        if origin_meta is None:
-            raise RuntimeError(f"origin run not found: {origin_run_id}")
-        if origin_meta.get("commit") != commit:
+    if origin_row:
+        if origin_row["commit"] != commit:
             # a mixed-commit run must be a visible, deliberate choice
             if not allow_commit_drift:
                 raise CommitDriftError(
-                    f"origin run {origin_run_id} is at commit {origin_meta.get('commit')}, HEAD is "
+                    f"origin run {origin_run_id} is at commit {origin_row['commit']}, HEAD is "
                     f"{commit}; reused steps would keep old-code outputs. Pass "
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        origin = Manifest.from_meta(origin_meta.get("manifest"))
         # server-side copies, IO-bound: one batch, one pool
         copy_slots([s for s, _ in origin.slots() if s.step not in deferred])
-        for k, v in (origin_meta.get("custom") or {}).items():  # reused steps won't reset these
+        for k, v in origin_row["custom"].items():  # reused steps won't reset these
             setattr(flow, k, v)
-        params = origin_meta.get("params") or {}
+        params = origin_row["params"]
         if dropped := set(params) - set(flow_cls.params_columns()):
             warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}", stacklevel=2)
             params = {k: v for k, v in params.items() if k not in dropped}
@@ -484,11 +480,19 @@ def run(
         origin_run_id=origin_run_id,
         params=params,
         custom={},
-        custom_fields=custom_fields,
     )
 
-    cat.ensure_tables(flow_cls)  # before any run object exists: a run implies a catalog
-    record.persist(space, manifest, "running")
+    def flush(row=False, genesis=None):
+        """One catalog commit + the meta recovery export; no-op when unchanged."""
+        if not (pending or row or genesis):
+            return
+        cat.commit_run(run_id, row=record.row() if row else None, rows=list(pending), genesis=genesis)
+        pending.clear()
+        space.write_meta(run_id, record.meta(manifest))
+
+    # genesis + the running row + upfront reuse, atomically, before any part
+    # object exists: a run implies a catalog
+    flush(row=True, genesis=flow_cls)
 
     def flush_metrics(rows):  # periodic (heartbeat) and final metrics write
         metrics.write_parquet(space, space.metrics(run_id), rows)
@@ -500,9 +504,6 @@ def run(
             flush_metrics(sampler.stop())
         except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
             pass
-
-    def register(name):
-        cat.register_parts({name: manifest.paths(name)})
 
     def resolve(rcon, dep, kind, key, table):
         """Manifest-backed input resolution (BRANCH = this item's part, else all parts)."""
@@ -579,12 +580,9 @@ def run(
             )
             for k, members in done.items():  # only the sub-steps that succeeded
                 for m in members:
-                    manifest.add(Slot(m, k), space.part(run_id, m, k))
-        for member in group.order:
-            if manifest.width(member) == len(keys):  # sub-steps done for every item stay
-                register(member)  # queryable even when a later one killed the run
+                    note(Slot(m, k), space.part(run_id, m, k))
         if error:
-            raise error
+            raise error  # the failure flush commits what did complete
 
     try:
         for name in dag.plan:  # a fan-out node covers its group; members never stand alone
@@ -598,28 +596,29 @@ def run(
                     # all-or-nothing: a partial fan-out must not look resumable,
                     # or resume would silently run with fewer branches
                     for slot, path in list(_emit(ctx, step)):
-                        manifest.add(slot, path)
-                register(name)  # before its items run: a failing item leaves the fan-out queryable
+                        note(slot, path)
+                    flush()  # committed before its items run: a failing item leaves the fan-out queryable
                 if group:
-                    run_group(group)  # registers its own members, complete ones even on failure
+                    run_group(group)
             else:
                 if Slot(name, 0) not in manifest:
                     sampler.mark(name)
                     for slot, path in _emit(ctx, step):
-                        manifest.add(slot, path)
-                register(name)
-            space.write_meta(run_id, record.meta(manifest))
+                        note(slot, path)
+            flush()  # one commit per plan node: parts registered with their manifest rows
 
         missing = [c for c in ledger_cols if not hasattr(flow, c)]
         if missing:
             raise RuntimeError(f"ledger columns not populated during run: {missing}")
         record.custom = {c: getattr(flow, c) for c in ledger_cols}
         record.finished = utc_now()
-        record.persist(space, manifest, "complete")
+        record.status = "complete"
+        flush(row=True)
     except Exception:
-        # persist partial progress so resume can reuse completed items
+        # commit partial progress so resume can reuse completed items
         record.finished = utc_now()
-        record.persist(space, manifest, "failed")
+        record.status = "failed"
+        flush(row=True)
         raise
     finally:
         write_metrics()  # success AND failure — failed runs need perf data most

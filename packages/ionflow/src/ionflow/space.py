@@ -8,27 +8,15 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-import pyarrow as pa
 from schrein.ducklake import CATALOG_KEY
 
-from .arrow import BATCH_ROWS, parquet_bytes, table_from_bytes, to_arrow
+from .arrow import BATCH_ROWS, parquet_bytes, to_arrow
 from .store import COPY_WORKERS, Store
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
-LEDGER_FILE = "ledger.parquet"
 LAKE_SUBDIR = "_lake"  # catalog-written data files at the flow root; sync skips it
-
-LEDGER_FIELDS = [
-    pa.field("run_id", pa.string()),
-    pa.field("status", pa.string()),  # running | complete | failed
-    pa.field("started", pa.timestamp("us")),
-    pa.field("finished", pa.timestamp("us")),
-    pa.field("commit", pa.string()),
-    pa.field("origin_run_id", pa.string()),
-]
-
-BASE_COLS = {f.name for f in LEDGER_FIELDS}  # names params/custom columns must not take
+META_FILE = "_meta.json"  # per-run recovery export; the catalog is the authority (0019)
 
 
 class ConstraintViolation(RuntimeError):
@@ -58,9 +46,9 @@ def key_slug(key):
     return clean if clean == s else f"{clean}-{hashlib.sha1(s.encode()).hexdigest()[:8]}"
 
 
-def flow_id_of_ledger_key(prefix, key):
-    """The flow a `<prefix>/<flow_id>/ledger.parquet` key names, else None."""
-    suffix = "/" + LEDGER_FILE
+def flow_id_of_catalog_key(prefix, key):
+    """The flow a `<prefix>/<flow_id>/catalog.ducklake` key names, else None."""
+    suffix = "/" + CATALOG_KEY
     if not key.startswith(prefix) or not key.endswith(suffix):
         return None
     name = key[len(prefix) : -len(suffix)]
@@ -101,8 +89,8 @@ class Space:
     flow module under a loader name, so their `flow_cls.flow_id()` is wrong.
 
     >>> s = Space(None, "mf", "ETL")
-    >>> s.ledger
-    'mf/ETL/ledger.parquet'
+    >>> s.meta("r1")
+    'mf/ETL/runs/run_id=r1/_meta.json'
     >>> s.part("r1", "raw")
     'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
     >>> s.part("r1", "work", "file-7")
@@ -122,15 +110,21 @@ class Space:
     def root(self):
         return f"{self.prefix}/{self.flow_id}"
 
-    @property
-    def ledger(self):
-        return f"{self.root}/{LEDGER_FILE}"
-
     def run_dir(self, run_id):
         return f"{self.root}/runs/run_id={run_id}"
 
     def meta(self, run_id):
-        return f"{self.run_dir(run_id)}/_meta.json"
+        return f"{self.run_dir(run_id)}/{META_FILE}"
+
+    def run_ids(self):
+        """run_ids of every run folder holding a `_meta.json`, from one LIST."""
+        prefix = f"{self.root}/runs/run_id="
+        out = []
+        for key in self.store.list(prefix):
+            run_id, _, tail = key.removeprefix(prefix).partition("/")
+            if tail == META_FILE:
+                out.append(run_id)
+        return sorted(out)
 
     def metrics(self, run_id):
         return f"{self.run_dir(run_id)}/{METRICS_FILE}"
@@ -178,43 +172,12 @@ class Space:
         """Write a small pyarrow Table as one parquet object (whole-object PUT)."""
         self.store.put(key, parquet_bytes(table))
 
-    def read_rows(self, key):
-        """Rows of a parquet object, or [] when it does not exist."""
-        blob = self.store.get(key)
-        return [] if blob is None else table_from_bytes(blob).to_pylist()
-
     def write_meta(self, run_id, meta):
         self.store.put(self.meta(run_id), json.dumps(meta, default=str).encode())
 
     def read_meta(self, run_id):
         blob = self.store.get(self.meta(run_id))
         return None if blob is None else json.loads(blob)
-
-    def amend(self, key, schema, merge, retries=5):
-        """CAS-rewrite a parquet object: `merge(rows)` returns the FULL new row list.
-
-        `merge` runs inside the CAS closure, against a fresh read on every attempt
-        (decision 0011) — it must be replayable and must not do I/O.
-        """
-
-        def fn(old):
-            rows = merge([] if old is None else table_from_bytes(old).to_pylist())
-            return parquet_bytes(pa.Table.from_pylist(rows, schema=schema))
-
-        self.store.cas(key).transact(fn, max_attempts=retries, base_delay=0.05)
-
-    def upsert_runs(self, rows, custom_fields=(), retries=5):
-        """Insert or replace ledger rows by run_id, all in one CAS commit."""
-        schema = pa.schema(LEDGER_FIELDS + list(custom_fields))
-        new_ids = {r["run_id"] for r in rows}
-
-        def merge(old):
-            merged = [r for r in old if r["run_id"] not in new_ids]
-            merged += [dict(r) for r in rows]  # from_pylist fills missing schema columns with null
-            merged.sort(key=lambda r: r["started"])
-            return merged
-
-        self.amend(self.ledger, schema, merge, retries=retries)
 
     def copy_parts(self, items):
         """Server-side copies of (src_key, dst_key, tag) triples; yields each tag as
@@ -255,11 +218,12 @@ class Space:
         return key_value
 
     def sync_to(self, other, flow_cls):
-        """Copy this local space's runs + ledger into `other`, then rebuild the
-        catalog there (decision 0016). Returns {copied, runs}.
+        """Copy this local space's run folders into `other`, then rebuild the
+        catalog there from the copied `_meta.json` records (decision 0016).
 
-        Ledger rows MERGE through the target's CAS ledger; the catalog is
-        re-derived rather than copied — it stores absolute data-file locations.
+        The catalog — ledger rows included — is re-derived by `backfill` rather
+        than copied: it stores absolute data-file locations (0019). Returns
+        {copied, runs}.
         """
         from .lake import backfill  # lake builds on Space; the import stays local to break the cycle
 
@@ -275,20 +239,12 @@ class Space:
         todo = []
         for key in self.store.list(self.root + "/"):
             tail = key.removeprefix(self.root)
-            if key == self.ledger or self.is_internal(key) or other.root + tail in existing:
-                continue  # run folders are immutable: a key already on the target is done
+            # parts are immutable — a key already on the target is done; a run's
+            # `_meta.json` is not (a run synced mid-flight finishes later)
+            done = other.root + tail in existing and not key.endswith("/" + META_FILE)
+            if self.is_internal(key) or done:
+                continue
             todo.append((str(root / key), other.root + tail))
         with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:  # many small objects, latency-bound
             list(ex.map(lambda t: other.store.upload(t[1], t[0]), todo))
-
-        runs = 0
-        blob = self.store.get(self.ledger)
-        if blob is not None:
-            table = table_from_bytes(blob)
-            custom = [table.schema.field(n) for n in table.schema.names if n not in BASE_COLS]
-            other.upsert_runs(table.to_pylist(), custom)
-            runs = table.num_rows
-
-        if runs:
-            backfill(flow_cls, other, replace=True)
-        return {"copied": len(todo), "runs": runs}
+        return {"copied": len(todo), "runs": backfill(flow_cls, other, replace=True)}

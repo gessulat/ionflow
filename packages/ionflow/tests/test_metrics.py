@@ -1,5 +1,3 @@
-import datetime as dt
-
 import pytest
 
 from ionflow import metrics, query
@@ -31,14 +29,15 @@ def test_flush_errors_do_not_kill_sampling():
 def test_stale_running_detection(cfg):
     store = Store.of(cfg)
     space = store.space("F")
-    old = dt.datetime(2020, 1, 1)
-    for run_id in ("dead", "alive"):
-        space.upsert_runs([{"run_id": run_id, "status": "running", "started": old}])
     # a fresh metrics flush is the heartbeat; "dead" never wrote one
     metrics.write_parquet(space, space.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)])
 
     con = store.connect()
-    con.execute(f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{space.uri(space.ledger)}')")
+    con.execute(
+        "CREATE VIEW ledger AS SELECT * FROM (VALUES "
+        "('dead', 'running', TIMESTAMP '2020-01-01'), "
+        "('alive', 'running', TIMESTAMP '2020-01-01')) t(run_id, status, started)"
+    )
     stub = type("F", (), {"flow_id": classmethod(lambda cls: "F")})  # matches the space above
     rel = query.ledger_with_liveness(stub, cfg, con)
     statuses = dict(rel.project("run_id, status").fetchall())

@@ -4,8 +4,12 @@ their serialized forms, so the runner never spells them out.
 """
 
 import datetime as dt
+import json
 import typing
 from dataclasses import dataclass
+
+# The `runs` table's column names — reserved against params/Ledger collisions.
+BASE_COLS = frozenset({"run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom"})
 
 
 class Slot(typing.NamedTuple):
@@ -82,11 +86,20 @@ class Manifest:
                 m.add(Slot(step, key), path)
         return m
 
+    @classmethod
+    def from_rows(cls, rows):
+        """From (step, key, path) triples — the lake `manifest` table's shape."""
+        m = cls()
+        for step, key, path in rows:
+            m.add(Slot(step, key), path)
+        return m
+
 
 @dataclass
 class RunRecord:
-    """One run's bookkeeping, and the two records `persist` writes from one
-    state: `_meta.json` (manifest + resume provenance) and the ledger row.
+    """One run's bookkeeping, and the two forms it serializes to: the lake's
+    `runs` row (the one authority, decision 0019) and the `_meta.json`
+    recovery export that `backfill` reads when the register is lost.
     """
 
     run_id: str
@@ -97,14 +110,28 @@ class RunRecord:
     origin_run_id: str | None
     params: dict
     custom: dict
-    custom_fields: list  # params + Ledger columns, as arrow fields for the ledger schema
 
     @property
     def _ok(self):
-        """True once the run is complete. Publish reads `_meta.json`'s `finished`
-        as the success flag, so a failed run — which does get a ledger finish
-        time — must not claim one there."""
+        """True once the run is complete. A failed run keeps its finish time in
+        the ledger row, but must not claim custom results — nor a `finished` in
+        meta, which publish would read as the success flag."""
         return self.status == "complete"
+
+    def row(self):
+        """The lake `runs` row. params/custom travel as JSON text: the table's
+        schema is fixed forever; the `ledger` view derives typed columns from
+        the flow's declarations instead (no migration workflow, deliberately)."""
+        return [
+            self.run_id,
+            self.status,
+            self.started,
+            self.finished,
+            self.commit,
+            self.origin_run_id,
+            json.dumps(self.params),
+            json.dumps(self.custom if self._ok else {}, default=str),
+        ]
 
     def meta(self, manifest):
         """The `_meta.json` payload; `manifest` is the run's `Manifest`."""
@@ -120,22 +147,3 @@ class RunRecord:
             "params": self.params,
             "custom": self.custom if ok else {},
         }
-
-    def ledger_row(self):
-        """The ledger's CAS parquet row: base columns, params and Ledger columns flattened."""
-        return {
-            "run_id": self.run_id,
-            "status": self.status,
-            "started": self.started,
-            "finished": self.finished,
-            "commit": self.commit,
-            "origin_run_id": self.origin_run_id,
-            **self.params,
-            **(self.custom if self._ok else {}),
-        }
-
-    def persist(self, space, manifest, status):
-        """Write both records at `status`: `_meta.json` first, then the ledger row."""
-        self.status = status
-        space.write_meta(self.run_id, self.meta(manifest))
-        space.upsert_runs([self.ledger_row()], self.custom_fields)

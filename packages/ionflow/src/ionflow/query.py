@@ -2,36 +2,42 @@ import duckdb
 
 from . import lake, metrics
 from .arrow import read_parquet_sql
-from .schema import _sql
-from .space import LEDGER_FIELDS, Space, utc_now
+from .space import Space, utc_now
 from .store import Store
 
-# a flow with no runs has no ledger object; the view must still exist and type
-_EMPTY_LEDGER_SQL = (
-    "SELECT " + ", ".join(f'NULL::{_sql(f.type)} AS "{f.name}"' for f in LEDGER_FIELDS) + " WHERE false"
+# a flow with no runs has no catalog; the `ledger` view must still exist and type
+_EMPTY_RUNS = (
+    "(SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
+    'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR AS origin_run_id, '
+    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom WHERE false)"
 )
+
+
+def ledger_sql(flow_cls, src="lake.runs"):
+    """The `ledger` view over the `runs` table: base columns, then the flow's
+    params and Ledger columns flattened out of their JSON storage — the table's
+    schema never migrates; the view derives typed columns from the declarations.
+    """
+    cols = ['run_id, status, started, finished, "commit", origin_run_id']
+    for n, c in flow_cls.params_columns().items():
+        cols.append(f"CAST(params->>'{n}' AS {c.duckdb_type()}) AS {n}")
+    for n, c in flow_cls.ledger_columns().items():
+        op = "->" if c.is_vector() else "->>"  # -> keeps JSON arrays castable to DuckDB arrays
+        cols.append(f"CAST(custom{op}'{n}' AS {c.persisted_type()}) AS {n}")
+    return f"SELECT {', '.join(cols)} FROM {src}"
 
 
 def _empty_view_sql(table):
     """Typed, zero-row SELECT standing in for a table with nothing on S3 yet.
 
-    `run_id` is the hive partition's, not the schema's, so it is appended here —
-    last, matching its position in the catalog views.
+    `run_id` is the catalog's, not the schema's, so it is appended here —
+    last, matching its position in the real views.
     """
     return f"SELECT *, NULL::VARCHAR AS run_id FROM ({table.empty()})"
 
 
-def _view_or_empty(con, name, body, empty_table):
-    """CREATE VIEW over S3 objects, falling back to a typed empty view.
-
-    DuckDB binds read_parquet at CREATE time, so an absent glob/object raises
-    here — that IS the "nothing on S3 yet" signal, no LIST needed.
-    """
-    try:
-        con.execute(f"CREATE VIEW {name} AS {body}")
-    except duckdb.IOException:
-        empty = _EMPTY_LEDGER_SQL if empty_table is None else _empty_view_sql(empty_table)
-        con.execute(f"CREATE VIEW {name} AS {empty}")
+def _ledger_view(con, flow_cls, attached):
+    con.execute(f"CREATE VIEW ledger AS {ledger_sql(flow_cls, 'lake.runs' if attached else _EMPTY_RUNS)}")
 
 
 def step_rows(con, step, run_id, limit=100):
@@ -88,9 +94,9 @@ def ledger_with_liveness(flow_cls, config, con=None):
     """
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
-    if con is None:  # ledger-only callers (ls) skip the catalog attach entirely
+    if con is None:  # ledger-only callers (ls) skip the step views entirely
         con = store.connect()
-        _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{space.uri(space.ledger)}')", None)
+        _ledger_view(con, flow_cls, lake.Catalog(space).attach_readonly(con))
     stale = _stale_running(con, space)
     if not stale:
         return con.sql("SELECT * FROM ledger")
@@ -103,18 +109,18 @@ def ledger_with_liveness(flow_cls, config, con=None):
 def duck(flow_cls, config):
     """DuckDB connection with a view per step table + `ledger` and `metrics` views.
 
-    Step views sit over the flow's DuckLake catalog, attached read-only (one
-    consistent snapshot). `ledger` and `metrics` keep their own plumbing: run
-    bookkeeping and telemetry are not lake data.
+    Step and ledger views sit over the flow's DuckLake catalog, attached
+    read-only (one consistent snapshot). `metrics` keeps its own plumbing:
+    telemetry objects are not lake data.
     """
     store = Store.of(config)
     con = store.connect()
     space = Space.for_flow(store, flow_cls)
-    if lake.Catalog(space).attach_readonly(con):
+    if attached := lake.Catalog(space).attach_readonly(con):
         for name in flow_cls._dag.steps:
             # run_id last: keeps one column order between real and empty views
             con.execute(f"CREATE VIEW {name} AS SELECT * EXCLUDE (run_id), run_id FROM lake.{name}")
-    elif store.age(space.ledger) is not None:
+    elif space.run_ids():
         # runs happened (genesis precedes the first run object) but the register is gone
         raise RuntimeError(
             f"{flow_cls.flow_id()}: runs exist but no catalog does; "
@@ -123,6 +129,18 @@ def duck(flow_cls, config):
     else:  # never ran
         for name, step in flow_cls._dag.steps.items():
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
-    _view_or_empty(con, "metrics", read_parquet_sql(space.uri(space.metrics_glob)), metrics.Sample)
-    _view_or_empty(con, "ledger", f"SELECT * FROM read_parquet('{space.uri(space.ledger)}')", None)
+    _ledger_view(con, flow_cls, attached)
+    _metrics_view(con, space)
     return con
+
+
+def _metrics_view(con, space):
+    """View over every metrics object, falling back to a typed empty view.
+
+    DuckDB binds read_parquet at CREATE time, so an absent glob raises here —
+    that IS the "no metrics yet" signal, no LIST needed.
+    """
+    try:
+        con.execute(f"CREATE VIEW metrics AS {read_parquet_sql(space.uri(space.metrics_glob))}")
+    except duckdb.IOException:
+        con.execute(f"CREATE VIEW metrics AS {_empty_view_sql(metrics.Sample)}")

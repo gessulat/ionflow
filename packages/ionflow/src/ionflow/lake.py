@@ -1,14 +1,18 @@
-"""The two DuckLakes ionflow keeps: every flow's catalog (decision 0012) and the
-publish lake (decision 0009).
+"""The two DuckLakes ionflow keeps: every flow's catalog (decisions 0012/0019)
+and the publish lake (decision 0009).
 
-Both are schrein DuckLakes driven by the same three operations — genesis (typed
-tables), registering pre-uploaded parquet, attaching a snapshot read-only. Roles
-stay separate: a lake only ever receives table schemas and data-file
-registrations; the ledger keeps sole authority over run bookkeeping.
+Both are schrein DuckLakes driven by the same operations — genesis (typed
+tables), registering pre-uploaded parquet, attaching a snapshot read-only. The
+flow catalog is the run's ONE metadata authority (0019): beyond the per-step
+data tables it holds `runs` (the ledger) and `manifest` (run -> its parts), so
+a step's completion, its data registration and the run's bookkeeping land in a
+single CAS commit. `_meta.json` in the run folders is a write-only recovery
+export; `backfill` is its only reader.
 """
 
 import atexit
 import datetime as dt
+import json
 import pathlib
 import re
 import shutil
@@ -24,6 +28,23 @@ from .store import Store, parse_dest
 
 PUBLISH_PREFIX = "published"  # default lake: s3://<bucket>/<config.prefix>/published/
 PROVENANCE = "publications"  # per-lake provenance table, appended on every publish
+
+# The system tables' fixed DDL — never migrated; params/custom are JSON text
+# that the `ledger` view flattens against the flow's declarations at read time.
+RUNS_DDL = (
+    "run_id VARCHAR NOT NULL, status VARCHAR NOT NULL, started TIMESTAMP NOT NULL, finished TIMESTAMP, "
+    '"commit" VARCHAR, origin_run_id VARCHAR, params VARCHAR, custom VARCHAR'
+)
+MANIFEST_DDL = "run_id VARCHAR NOT NULL, step VARCHAR NOT NULL, item_key VARCHAR NOT NULL, path VARCHAR NOT NULL"
+RUN_COLS = ("run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom")
+_RUNS_SELECT = 'SELECT run_id, status, started, finished, "commit", origin_run_id, params, custom FROM lake.runs'
+
+
+def _decode_run(row):
+    row = dict(zip(RUN_COLS, row, strict=True))
+    row["params"] = json.loads(row["params"] or "{}")
+    row["custom"] = json.loads(row["custom"] or "{}")
+    return row
 
 
 def _create(name, cols):
@@ -43,8 +64,12 @@ def _add_files(con, table, uris, hive=False):
 
 
 class Catalog:
-    """schrein DuckLake at the flow root; its data_path is catalog-written files
-    only (`_lake/`) — registered step parts stay in their immutable run folders."""
+    """schrein DuckLake at the flow root — the run's one metadata authority.
+
+    Per-step data tables plus the `runs` and `manifest` system tables; its own
+    data_path (`_lake/`) holds only catalog-written files — registered step
+    parts stay in their immutable run folders, and the tiny system rows inline
+    into the register artifact itself."""
 
     def __init__(self, space):
         self.space = space
@@ -71,24 +96,78 @@ class Catalog:
             ]
             return {t: {r[0]: r[1] for r in con.sql(f"DESCRIBE lake.{t}").fetchall()} for t in names}
 
-    def ensure_tables(self, flow_cls):
-        """Genesis, idempotent: one table per step, skipped when all exist."""
-        ddls = {
+    def _ddls(self, flow_cls):
+        """CREATE TABLE IF NOT EXISTS for every table genesis owes this flow."""
+        steps = {
             name: _create(name, f"run_id VARCHAR NOT NULL, {step.output_table.persisted_ddl()}")
             for name, step in flow_cls._dag.steps.items()
         }
-        if set(ddls) <= set(self.tables()):
-            return
-        self.lake.commit(lambda con: [con.execute(ddl) for ddl in ddls.values()])
+        return steps | {"runs": _create("runs", RUNS_DDL), "manifest": _create("manifest", MANIFEST_DDL)}
 
-    def register_parts(self, parts):
-        """One CAS commit registering {table: [part keys]} (metadata-only), in the
-        given order; nothing to register commits nothing.
+    def _apply(self, con, run_id, row=None, rows=()):
+        """One run's upsert, inside an open lake transaction: replace its ledger
+        row, insert the manifest rows not already present (a replayed commit
+        whose predecessor actually landed must not duplicate), and register the
+        data files of the newly created parts among them — a path inside this
+        run's own folder means "created here", anything else is a reference.
         """
-        uris = {t: [self.space.uri(k) for k in keys] for t, keys in parts.items() if keys}
-        if not uris:
+        if row is not None:
+            con.execute("DELETE FROM lake.runs WHERE run_id = ?", [run_id])
+            con.execute(f"INSERT INTO lake.runs VALUES ({', '.join('?' * len(RUN_COLS))})", row)
+        if not rows:
             return
-        self.lake.commit(lambda con: [_add_files(con, t, u, hive=True) for t, u in uris.items()])
+        have = set(con.execute("SELECT step, item_key FROM lake.manifest WHERE run_id = ?", [run_id]).fetchall())
+        # sorted = key order per step, the one registration (hence reducer) order
+        fresh = [(s, json.dumps(k), p) for s, k, p in sorted(rows) if (s, json.dumps(k)) not in have]
+        own = self.space.run_dir(run_id) + "/"
+        files = {}
+        for s, k, p in fresh:
+            con.execute("INSERT INTO lake.manifest VALUES (?, ?, ?, ?)", [run_id, s, k, p])
+            if p.startswith(own):
+                files.setdefault(s, []).append(self.space.uri(p))
+        for s, uris in files.items():
+            _add_files(con, s, uris, hive=True)
+
+    def commit_run(self, run_id, row=None, rows=(), genesis=None):
+        """One CAS commit of a run's progress: optional genesis (pass the flow
+        class), the run's ledger `row`, and `rows` — (step, item key, path)
+        manifest triples with their new parts' registration. Atomic, so a
+        reader never sees a part without its manifest row, a run without its
+        tables, or a partially registered step. Replay-safe (see `_apply`).
+        """
+
+        def fn(con):
+            con.execute("BEGIN")
+            if genesis is not None:
+                for ddl in self._ddls(genesis).values():
+                    con.execute(ddl)
+            self._apply(con, run_id, row, rows)
+            con.execute("COMMIT")
+
+        self.lake.commit(fn)
+
+    def runs(self):
+        """Ledger rows as dicts (params/custom decoded), oldest first; [] when
+        this flow has no catalog yet."""
+        if self._blob() is None:
+            return []
+        with self.lake.read() as con:
+            return [_decode_run(r) for r in con.sql(_RUNS_SELECT + " ORDER BY started").fetchall()]
+
+    def run_state(self, run_id):
+        """(ledger row, manifest triples) for one run, off one snapshot;
+        `"latest"` picks the newest complete run. (None, []) when absent."""
+        if self._blob() is None:
+            return None, []
+        with self.lake.read() as con:
+            if run_id == "latest":
+                r = con.execute(_RUNS_SELECT + " WHERE status = 'complete' ORDER BY started DESC LIMIT 1").fetchone()
+            else:
+                r = con.execute(_RUNS_SELECT + " WHERE run_id = ?", [run_id]).fetchone()
+            if r is None:
+                return None, []
+            triples = con.execute("SELECT step, item_key, path FROM lake.manifest WHERE run_id = ?", [r[0]]).fetchall()
+        return _decode_run(r), [(s, json.loads(k), p) for s, k, p in triples]
 
     def attach_readonly(self, con):
         """Download-then-attach the catalog on `con` as `lake` (snapshot-consistent);
@@ -110,10 +189,30 @@ class Catalog:
         self.space.store.delete(self.key)
 
 
+def _meta_row(meta, run_id):
+    """A `runs` row reconstructed from one `_meta.json` recovery record."""
+
+    def ts(v):
+        return dt.datetime.fromisoformat(v) if v else None
+
+    return [
+        run_id,
+        meta.get("status") or "failed",
+        ts(meta.get("started")) or utc_now(),
+        ts(meta.get("finished")),
+        meta.get("commit"),
+        meta.get("origin_run_id"),
+        json.dumps(meta.get("params") or {}),
+        json.dumps(meta.get("custom") or {}, default=str),
+    ]
+
+
 def backfill(flow_cls, space, replace=False):
-    """Rebuild a flow's catalog from the run folders' `_meta.json` recovery
-    records — the path for a lost or corrupt register; returns the number of
-    complete runs registered. Steps no longer in the flow's code are dropped.
+    """Rebuild a flow's catalog — ledger rows, manifests, data registrations —
+    from the run folders' `_meta.json` recovery records, in one CAS commit.
+    The only path out of a lost or corrupt register; also how `sync` derives
+    the target-side catalog. Returns the number of runs restored; steps no
+    longer in the flow's code are dropped.
     """
     from .state import Manifest  # state builds on Space; local import breaks the cycle
 
@@ -122,16 +221,24 @@ def backfill(flow_cls, space, replace=False):
         if not replace:
             raise FileExistsError(f"catalog exists at {cat.key}; pass --replace to rebuild")
         cat.discard()
-    cat.ensure_tables(flow_cls)
-    complete = {r["run_id"] for r in space.read_rows(space.ledger) if r["status"] == "complete"}
     steps = set(flow_cls._dag.steps)
-    by_step = {}
-    for run_id in sorted(complete):
-        manifest = Manifest.from_meta((space.read_meta(run_id) or {}).get("manifest"))
-        for step in steps:
-            by_step.setdefault(step, []).extend(manifest.paths(step))
-    cat.register_parts({step: by_step[step] for step in sorted(by_step)})
-    return len(complete)
+    runs = []
+    for run_id in space.run_ids():
+        meta = space.read_meta(run_id) or {}
+        manifest = Manifest.from_meta(meta.get("manifest"))
+        rows = [(slot.step, slot.key, path) for slot, path in manifest.slots() if slot.step in steps]
+        runs.append((run_id, _meta_row(meta, run_id), rows))
+
+    def fn(con):
+        con.execute("BEGIN")
+        for ddl in cat._ddls(flow_cls).values():
+            con.execute(ddl)
+        for run_id, row, rows in runs:
+            cat._apply(con, run_id, row, rows)
+        con.execute("COMMIT")
+
+    cat.lake.commit(fn)
+    return len(runs)
 
 
 def schema_drift(flow_cls, space):
@@ -199,10 +306,10 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         raise ValueError(f"invalid published table name '{table}'")
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
-    meta = space.read_meta(run_id)
-    if meta is None:
+    row, _ = Catalog(space).run_state(run_id)
+    if row is None:
         raise RuntimeError(f"run not found: {run_id}")
-    if not meta.get("finished"):
+    if row["status"] != "complete":
         raise RuntimeError(f"run {run_id} did not complete; only complete runs publish")
 
     lake, target = publish_lake(config, dest)
@@ -228,7 +335,7 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
         "run_id": run_id,
         "step": step,
         "filter": where,
-        "commit": meta.get("commit"),
+        "commit": row["commit"],
         "published_at": utc_now(),
     }
 
