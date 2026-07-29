@@ -57,6 +57,26 @@ class Dag:
                 out.add(name)
         return out
 
+    def schedule_graph(self):
+        """The runner's node graph: every plain/fan-out step by name, plus an
+        `("items", f)` node for fan-out f's per-item group. Edges are exact — a
+        fan-out's emission does not wait on member-only inputs, and a group's
+        dependents wait for its items — and every edge is implied by `plan`'s
+        contraction, so the cycle check there covers this graph too.
+        """
+
+        def node(s):
+            return ("items", self.roots[s]) if s in self.roots else s
+
+        g: dict[str | tuple, set] = {name: set() for name in self.steps if name not in self.roots}
+        for f in self.groups:
+            g[("items", f)] = {f}
+        for name, step in self.steps.items():
+            for dep in step.deps:
+                if node(dep) != node(name):
+                    g[node(name)].add(node(dep))
+        return g
+
 
 def branch_dep(step):
     """The step whose branches this one runs over — its branch index space, or None."""

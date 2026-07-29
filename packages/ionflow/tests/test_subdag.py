@@ -48,8 +48,12 @@ def test_items_pipeline_without_a_stage_barrier(s3cfg, repo, tmp_path, monkeypat
 
 @pytest.mark.slow
 def test_one_item_stays_in_one_process(s3cfg, repo, tmp_path, monkeypatch):
-    """Sub-steps of an item share a process, which is what lets them pass a file path."""
+    """Sub-steps of an item share a process, which is what lets them pass a file
+    path. PIPE_MEET makes both items' converts wait for each other, so the run
+    only completes if the items really ran on two workers at once — without the
+    barrier a fast first item may legitimately be packed into the warm worker."""
     _setup(s3cfg, tmp_path, monkeypatch)
+    monkeypatch.setenv("PIPE_MEET", "1")
     run_id = PipelineFlow.run(s3cfg, repo=repo, use_processes=True, max_workers=2)
 
     con = PipelineFlow.duck(s3cfg)

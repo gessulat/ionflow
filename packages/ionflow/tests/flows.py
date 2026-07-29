@@ -354,6 +354,11 @@ class PipelineFlow(Flow):
         _mark("convert", raw)
         if _fails_now("convert", raw):
             raise RuntimeError(f"convert failed on {raw}")
+        if os.environ.get("PIPE_MEET"):  # cross-item barrier: both converts live at once,
+            # so the items MUST be on two workers (a packed second item would arrive too late)
+            other = {"raw-0": "raw-1", "raw-1": "raw-0"}[raw]
+            if not _rendezvous(f"meet-{raw}", f"meet-{other}", "x"):
+                raise RuntimeError(f"convert {raw} never overlapped its sibling")
         db = _pipe_dir() / f"{raw}.db"
         db.write_text(f"spectra for {raw}")  # the 10 GB .db, in miniature
         return pa.table({"raw": [raw], "db": [str(db)], "pid": [os.getpid()], "started": [time.time()]})

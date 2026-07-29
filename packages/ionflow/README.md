@@ -439,6 +439,19 @@ If HEAD differs from the origin run's commit, resume **refuses by default** — 
 steps would keep their old-code outputs, mixing two commits in one run. Pass
 `--allow-commit-drift` (API: `allow_commit_drift=True`) to proceed deliberately.
 
+`--dry-run` previews a resume without running anything: per step, how many parts
+would be reused and how many computed — for a failed origin, exactly the missing
+work.
+
+```bash
+$ ionflow run mymodule:EmbedDocs --resume latest --dry-run
+resume from 1785035390513-81e8a70b (assuming unchanged work-lists):
+  docs: reuse 1, compute 0
+  by_source: reuse 0, compute 2
+  vectors: reuse 2, compute 0
+  summary: reuse 1, compute 0
+```
+
 ## Incremental runs (growing corpora)
 
 For a corpus that grows item-by-item, declare which column identifies a fan-out item —
@@ -547,8 +560,10 @@ the old id.
   to its share of cores and memory and spills to disk instead of OOMing.
 - **Backends**: AWS S3, MinIO (recent), Cloudflare R2. Backblaze B2 is unsupported (no
   `If-Match` conditional writes).
-- Set custom ledger columns on non-branch (main-process) steps; branch steps run in
-  separate processes and their `self` is not carried back.
+- Every step body runs in a worker; independent steps of the DAG run
+  concurrently. Cross-step `self` state is exactly the declared contract —
+  params plus `Ledger` columns, set on non-branch steps (a per-item step's
+  `self` is not carried back).
 - Steps can read **side inputs** (raw files that aren't step outputs) via `self.config`
   (e.g. `ionflow.store.s3_client(self.config)`). Side inputs escape run provenance —
   record their identifiers as ledger columns.

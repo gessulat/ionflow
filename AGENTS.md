@@ -99,9 +99,10 @@ ionflow query myproj.flows:Training \
   cores = delta(cpu_user+cpu_system) / delta(wall). `query.step_stats()` does this.
 - Sampling is adaptive: 1s at run start; at 1024 samples per process the buffer
   folds (peaks preserved) and the interval doubles, so long runs stay bounded.
-- Branch rows (`branch IS NOT NULL`; the label is the ITEM KEY, a string) exist
-  only for process-mode fan-outs; thread-mode branches are covered by the
-  orchestrator's samples.
+- In process mode every task measures itself: whole-step tasks sample with
+  `branch` NULL, item tasks label `branch` with the ITEM KEY (a string). In
+  thread mode the orchestrator's sampler covers everything, labelling the
+  union of active nodes.
 - Failed runs keep their metrics — check them first when a run dies.
 - Typical workflow: `stats` to find the expensive step -> compare `peak_rss_mb` /
   `avg_cores` across run_ids after a change -> time series via `metrics` for detail.
@@ -127,11 +128,20 @@ ionflow query myproj.flows:Training \
   each group contracted into its fan-out node, `dag.roots` maps a branch step to that
   fan-out (0014), and `group.deps` are the intra-item edges. The global topological
   order is internal — `dag.downstream(step)` is the one thing that reads it.
+  `dag.schedule_graph()` is the runner's exact node graph: steps plus an
+  `("items", f)` node per group, so a group's dependents wait for its items while
+  the fan-out's emission doesn't wait on member-only inputs.
   Refused here: a fan-out inside a branch, a per-item step reading a sibling per-item
   step whole (`Collect`/plain instead of `Branch`), a `Branch[...]` over a step that is
   neither, a fan-in feeding back into its own fan-out (a cycle once contracted), and
   the reserved step names (`ledger`/`metrics`/`runs`/`manifest`) and columns
   (`run_id`, the views' filename column).
+- `plan.py`    — `Planner`: the reuse policy of a resumed run as pure functions of
+  (dag, origin manifest, live manifest) — `upfront()` / `node_reuse()` /
+  `member_reuse()` and the cross-ancestor taint rule (`unchanged`); inert on a
+  fresh run, unit-tested without a store (test_plan). `preview()` powers
+  `run --resume X --dry-run` (per-step reuse-vs-compute, assuming unchanged
+  work-lists).
 - `flow.py`    — `Flow` base; subclasses auto-register in `Flow._registry`, keyed by
   `flow_id()` = module-qualified class name — also the S3 namespace (rename/move a
   class = new flow); the runner
@@ -141,35 +151,38 @@ ionflow query myproj.flows:Training \
   guarantees — clean git, typed steps, a catalog — from its first run.
   `discover_flows(package)` imports a package (and its submodules) to register
   the flows it defines — registration is a side effect of importing.
-- `runner.py`  — topo execution, ProcessPool fan-out (workers get S3 keys, not data),
-  per-item resume (refuses commit drift unless `allow_commit_drift`),
-  in-worker branch retries (`branch_retries`), git gate,
-  run status (running|complete|failed). Step inputs are **lazy httpfs relations**
+- `runner.py`  — a scheduler and nothing else (0021): ONE pool per run (spawn
+  processes or threads) executes every task — a whole plain/fan-out step, or one
+  item's pending sub-steps — over `dag.schedule_graph()`, so independent chains
+  run concurrently and NO user code runs in the orchestrator. Reuse verdicts come
+  from `plan.Planner`; commit-drift refusal (`allow_commit_drift`), in-worker
+  sub-step retries (`branch_retries`), git gate, run status
+  (running|complete|failed). Step inputs are **lazy httpfs relations**
   (pushdown; memory = query working set, not input size) — always read with
-  `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Worker
-  DuckDBs are capped (`threads`, `memory_limit` ~ 80% RAM / workers) + spill
-  `temp_directory`. A fan-out counts as completed only when ALL parts are written
-  (partial fan-out must not look resumable). The orchestrator connects before
-  spawning workers, so `INSTALL httpfs` (one-time download per duckdb version)
-  never races across cold workers. Missing/unreadable parts surface lazily
-  inside the step or at write time (duckdb `IOException`), not at input binding.
-  Progress accumulates in a `Manifest` and lands via `flush()` — one
-  `Catalog.commit_run` per plan node (plus begin/final), CAS-atomic with the
-  data registration (0019); `_meta.json` is written after each flush as the
-  recovery export. Input paths come from the manifest: the orchestrator resolves
-  them (`resolve`, `group_deps`, `item_inputs`); a worker derives only the paths
-  it writes itself. Group-wide inputs ride the POOL INITIALIZER (`_init_group`,
-  pickled once per process), item payloads carry just key/steps/branch-inputs.
+  `hive_partitioning=false` or the path's `run_id=` leaks in as a column. Task
+  DuckDBs are capped + spill `temp_directory`; shares are sized at submit from
+  the tasks actually in flight (a solo step gets the whole machine). A fan-out
+  counts as completed only when ALL parts are written (partial fan-out must not
+  look resumable). The orchestrator connects before the pool spawns, so
+  `INSTALL httpfs` never races across cold workers. Progress accumulates in a
+  `Manifest` and lands via `flush()` — one `Catalog.commit_run` per node (plus
+  begin/final), CAS-atomic with the data registration (0019); `_meta.json` is
+  written after each flush, and BECAUSE the flush precedes scheduling a node,
+  workers resolve every input from one meta snapshot per (process, node, phase)
+  (`_node_manifest`) — the pool initializer carries only per-run constants, and
+  task payloads a few keys. Cross-step `self` state is the declared contract
+  exactly: params + `Ledger` columns, seeded into whole-step tasks and merged
+  from their results (item tasks never carry `self` back).
   A step may branch over another branch step (`Branch[T]` names the upstream
   *step*), so a branch is a whole sub-DAG. It runs **per item, not per stage**
-  (0015): one worker owns one item end to end (`_run_items` -> `_branch_worker`
-  -> `_run_sub_dag`), independent sub-steps run concurrently in threads (own
+  (0015): one worker owns one item end to end (`_task_worker` ->
+  `_run_sub_dag`), independent sub-steps run concurrently in threads (own
   DuckDB cursor each), and item A can be in the last sub-step while item B is on
   the first — so intermediates scale with `max_workers`, not the work-list.
   Members of one item are same-process by construction and may hand over local
   artifacts by path. Completion is per (item, sub-step): `branch_retries` retries
   one sub-step, resume restarts an item at its first incomplete one, and the
-  failure flush commits everything that did complete.
+  failure path lets in-flight tasks settle and commits everything that completed.
   Resume NEVER copies (0020): `reuse_slots` records references to the origin's
   part objects. Keyed resume (0008/0018): if the fan-out's Table declares a
   `fanout_key`, resume re-runs the fan-out, reuses origin parts by item key —
@@ -177,7 +190,8 @@ ionflow query myproj.flows:Training \
   never positional — and reuses downstream steps only when the key set is
   unchanged.
   `resume=<run_id>|"latest"` is the single resume spelling (0008), CLI `run --resume`;
-  "latest" = newest complete run, falling through fresh when none exists.
+  "latest" = newest complete run, falling through fresh when none exists;
+  `run --resume X --dry-run` previews reuse-vs-compute without running.
 - `state.py`   — the run's state as types, orchestrator-side only (nothing here crosses
   the process boundary). `Slot(step, key)` names one part by its ITEM KEY (0018 —
   position ints for unkeyed work, fanout_key values for keyed); `Manifest` maps
@@ -189,12 +203,14 @@ ionflow query myproj.flows:Training \
   the runs columns against params/Ledger names.
 - `metrics.py` — adaptive psutil sampler (rss/threads/cpu per step+branch). The
   orchestrator writes `_metrics.parquet` (success AND failure; its 60s flush is the
-  run heartbeat); process-mode item workers each flush their own
-  `_metrics_<fanout>_<branch>.parquet` (crash-durable per-item samples — one object
-  per item, the worker covers its whole sub-DAG); the `metrics` view unions all of
-  them. Sub-steps running concurrently in one worker share one label
+  run heartbeat); in process mode every task flushes its own object —
+  `_metrics.<step>.parquet` for whole-step tasks (branch NULL),
+  `_metrics_<fanout>_<key>.parquet` for items (crash-durable, one per item, the
+  worker covers its whole sub-DAG); the `metrics` view unions all of them.
+  Sub-steps running concurrently in one worker share one label
   (`upload_db+search`) and NULL means the worker is between sub-steps; in thread
-  mode the group answers to the fan-out's name (one process interleaves items).
+  mode the orchestrator's sampler labels the union of active nodes (a
+  single-member group answers to the member's name).
 - `store.py`   — one object store: bytes by key plus the DuckDB wiring to read them.
   `Store.of(cfg)` is **the only place local-vs-S3 is decided** (`S3Store` /
   `DirStore` over boto3 or schrein's `LocalClient`); it holds the one client,

@@ -6,7 +6,8 @@ import threading
 import typing
 import uuid
 import warnings
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from multiprocessing import get_context
 
@@ -34,12 +35,8 @@ def _fair_share(workers):
 
 
 class _Ctx(typing.NamedTuple):
-    """What calling a step needs, on either side of the process boundary.
-
-    Never pickled — each side builds its own, and they differ only in `resolve`:
-    the orchestrator resolves inputs from the run's live Manifest, a worker from
-    the paths its payload carries (plus what it wrote itself).
-    """
+    """What calling a step needs inside a worker (never pickled — each worker
+    builds its own; `resolve` maps a dependency to its input relation)."""
 
     con: typing.Any
     space: Space
@@ -62,12 +59,11 @@ def _call(ctx, step, key):
 def _emit(ctx, step, key=None):
     """Call `step` and write what it returned; yield (Slot, part path) per part.
 
-    The one call -> write -> report path, shared by the orchestrator and the item
-    workers. A generator because that is the only difference between the three
-    shapes: a plain step and a branch sub-step yield one part (named by `key`),
-    a fan-out one per item — keyed items named by their extracted fanout_key
-    value, positional ones by index. Recording completion stays with the caller —
-    a fan-out is all-or-nothing, a sub-step reports through its worker.
+    The one call -> write -> report path for every task shape: a plain step and
+    a branch sub-step yield one part (named by `key`), a fan-out one per item —
+    keyed items named by their extracted fanout_key value, positional ones by
+    index. Recording completion stays with the caller — a fan-out is
+    all-or-nothing, a sub-step reports through its worker.
     """
     result = _call(ctx, step, key)
     table = step.output_table
@@ -107,52 +103,42 @@ def _import(file, name):
 
 
 class _Bound(typing.NamedTuple):
-    """What a worker process builds once per group and reuses for every item it gets.
+    """What a worker process builds once per run and reuses for every task it gets.
 
-    Deliberately NOT the DuckDB connection. Re-executing the flow module per item
-    is pure waste, but an item's *database* is not: cursors of one connection share
+    Deliberately NOT the DuckDB connection. Re-executing the flow module per task
+    is pure waste, but a task's *database* is not: cursors of one connection share
     a catalog, so a step that materializes a named object (CREATE TABLE/VIEW/macro)
-    would collide with the other items this worker handles. One instance per item
-    also keeps `_fair_share`'s caps meaning what they did — a per-worker share of
-    the machine — instead of one capped instance serving every item.
+    would collide with the other tasks this worker handles.
     """
 
     cfg: Config
     flow_cls: typing.Any
     space: Space
-    threads: int | None
-    memory_mb: int | None
 
 
-_SHARED: dict[tuple, dict] = {}  # (run_id, fan-out) -> the pool's shared payload
-_BOUND: dict[tuple, _Bound] = {}  # (run_id, fan-out) -> this process's binding
-_BOUND_LOCK = threading.Lock()  # thread mode submits items concurrently into one process
+_RUN: dict[str, dict] = {}  # run_id -> the run's shared payload (pool initializer)
+_BOUND: dict[str, _Bound] = {}  # run_id -> this process's binding
+_DEPS: dict[tuple, Manifest] = {}  # (run_id, node) -> the node's manifest snapshot
+_BOUND_LOCK = threading.Lock()  # thread mode submits tasks concurrently into one process
 
 
-def _init_group(shared):
-    """Pool initializer: the group's shared payload lands once per process.
-
-    Item payloads stay small this way — a wide Collect input's path list is
-    pickled once per worker (spawn pickles initargs once), not once per item.
-    """
-    _SHARED[(shared["run_id"], shared["group"])] = shared
+def _init_run(shared):
+    """Pool initializer: the run's constants land once per process (spawn
+    pickles initargs once), so task payloads stay a few keys."""
+    _RUN[shared["run_id"]] = shared
 
 
-def _bound(shared):
-    """This process's binding for one group, built on first use.
+def _bound(shared, threads):
+    """This process's binding for the run, built on first use.
 
-    The pool reuses its processes, so binding per item would re-execute the flow
-    module — the user's own import-time code — once per item. Keyed on
-    (run_id, group) rather than cached outright: in thread mode this process
-    outlives the run, and a later run (or a later group of the same run) must
-    never see the first one's flow class, Space or caps. `_run_items` drops the
-    entry when the pool closes.
+    Keyed on run_id rather than cached outright: in thread mode this process
+    outlives the run, and a later run must never see the first one's flow
+    class or Space; `run()` drops the entry when the pool closes. `threads`
+    (the first task's fair share) caps BLAS before the flow's imports.
     """
     with _BOUND_LOCK:
-        group_key = (shared["run_id"], shared["group"])
-        if (bound := _BOUND.get(group_key)) is not None:
+        if (bound := _BOUND.get(shared["run_id"])) is not None:
             return bound
-        threads, memory_mb = _fair_share(shared["workers"])
         if shared["sample"]:  # own process: cap BLAS/OpenMP before the flow's imports
             # spawn imports numpy/torch fresh in this process, so the caps take effect;
             # setdefault keeps any explicit user setting. Never in thread mode — that
@@ -164,71 +150,93 @@ def _bound(shared):
         # identity travels in the payload, never derived here: the re-imported
         # class's __module__ is the loader's ("_mf_flow"), so its own flow_id() is wrong
         space = Store.of(cfg).space(shared["flow_id"])
-        _BOUND[group_key] = bound = _Bound(cfg, flow_cls, space, threads, memory_mb)
+        _BOUND[shared["run_id"]] = bound = _Bound(cfg, flow_cls, space)
         return bound
 
 
-def _branch_worker(item):
-    shared = _SHARED[(item["run_id"], item["group"])]
-    bound = _bound(shared)
-    flow_cls, space = bound.flow_cls, bound.space
-    flow = flow_cls()  # per item: thread-mode items share this process, not their `self`
-    flow.config = bound.cfg
-    for k, v in shared["params"].items():
-        setattr(flow, k, v)
-    run_id, key, pending = item["run_id"], item["key"], item["steps"]
-    written = {}  # member -> part path, as this worker completes them
+def _node_manifest(space, run_id, node, phase):
+    """The run's manifest as this node's tasks may read it, off `_meta.json` —
+    the orchestrator flushes before scheduling a node, so every input a task
+    resolves is in it. One GET per (process, node, phase); a group's items
+    share one snapshot, taken separately from their fan-out's (whose own
+    snapshot predates the fan-out's parts).
+    """
+    if (key := (run_id, node, phase)) not in _DEPS:
+        _DEPS[key] = Manifest.from_meta((space.read_meta(run_id) or {}).get("manifest"))
+    return _DEPS[key]
 
-    def resolve(rcon, dep, kind, _key, table):
-        """Payload-backed input resolution: `written` covers members this worker
-        produced, `inputs` every branch input that already existed, and the
-        shared `deps` map the group's whole-step (non-branch) inputs."""
+
+def _task_worker(task):
+    """One scheduler task: a whole plain/fan-out step (`key` None), or one
+    item's pending sub-steps. Returns the parts written, the first error (with
+    the parts that still completed), and any declared Ledger columns a
+    whole-step task set on `self`.
+    """
+    shared = _RUN[task["run_id"]]
+    bound = _bound(shared, task["threads"])
+    flow_cls, space = bound.flow_cls, bound.space
+    flow = flow_cls()  # per task: thread-mode tasks share this process, not their `self`
+    flow.config = bound.cfg
+    for k, v in {**shared["params"], **task["custom"]}.items():
+        setattr(flow, k, v)
+    run_id, node, key, pending = task["run_id"], task["node"], task["key"], task["steps"]
+    manifest = _node_manifest(space, run_id, node, "step" if key is None else "items")
+    written = {}  # step -> part path, as this task completes them
+
+    def resolve(rcon, dep, kind, k, table):
+        """Inputs come from the node's manifest snapshot; `written` overlays the
+        members this task produced itself (BRANCH = this item's part only)."""
         if kind == "BRANCH":
-            return space.relation(rcon, [written.get(dep) or item["inputs"][dep]])
-        paths = shared["deps"].get(dep) or []
+            return space.relation(rcon, [written.get(dep) or manifest.get(dep, k)])
+        paths = manifest.paths(dep)
         return space.relation(rcon, paths) if paths else table.empty(rcon)
 
-    # this item's OWN DuckDB instance: private catalog and spill dir, and the
-    # caps are a per-worker share of the machine (see _Bound)
-    con = space.store.connect(threads=bound.threads, memory_mb=bound.memory_mb)
-    ctx = _Ctx(con, space, flow, run_id, resolve, bound.threads, bound.memory_mb)
-    group = flow_cls._dag.groups[item["group"]]
+    # this task's OWN DuckDB instance: private catalog and spill dir, capped to
+    # the fair share the orchestrator computed from the tasks in flight
+    con = space.store.connect(threads=task["threads"], memory_mb=task["memory_mb"])
+    ctx = _Ctx(con, space, flow, run_id, resolve, task["threads"], task["memory_mb"])
     # own sampler only in a separate process; in thread mode the orchestrator's
     # sampler already covers this process (a second one would double-count CPU).
-    # Each worker flushes to its OWN metrics key (one writer per object, no CAS),
-    # so branch samples survive a run killed mid-branch up to the last flush.
+    # Each task flushes to its OWN metrics key (one writer per object, no CAS),
+    # so its samples survive a run killed mid-task up to the last flush.
     sampler, active, label_lock = None, set(), threading.Lock()
 
     def relabel():
         # concurrent members share one process, so they share one sample label
         if sampler:
-            sampler.mark("+".join(sorted(active)) or None, str(key))
+            sampler.mark("+".join(sorted(active)) or None, None if key is None else str(key))
 
     if shared["sample"]:
-        metrics_key = space.metrics_branch(run_id, group.fanout, key_slug(key))
+        metrics_key = (
+            space.metrics_node(run_id, node) if key is None else space.metrics_branch(run_id, node, key_slug(key))
+        )
 
         def flush_metrics(rows):
             metrics.write_parquet(space, metrics_key, rows)
 
         sampler = metrics.Sampler(flush=flush_metrics).start()
     retries = shared["retries"]
+    parts = []  # (step, key, path) triples, reported even when a later member fails
 
     def run_member(name):
-        """One sub-step for this item, retried on its own — a flaky upload is not a re-search."""
+        """One step of this task. Group sub-steps retry on their own — a flaky
+        upload is not a re-search; whole-step tasks never retry."""
         step = flow_cls._dag.steps[name]
+        tries = 1 if name == node else retries + 1  # retries the whole sub-step, not just
+        # the S3 write: transient step errors count too, and boto3 retries at the HTTP layer
         cur = con.cursor()  # own cursor: members of one item may run concurrently
         with label_lock:
             active.add(name)
             relabel()
         try:
-            for attempt in range(retries + 1):  # retries the whole step, not just the S3 write:
-                # transient step errors count too, and boto3 already retries at the HTTP layer
+            for attempt in range(tries):
                 try:
-                    for _slot, path in _emit(ctx._replace(con=cur), step, key):
+                    for slot, path in _emit(ctx._replace(con=cur), step, key):
                         written[name] = path
+                        parts.append((slot.step, slot.key, path))
                     return
                 except Exception:
-                    if attempt == retries:
+                    if attempt == tries - 1:
                         raise
         finally:
             with label_lock:
@@ -236,25 +244,25 @@ def _branch_worker(item):
                 relabel()
             cur.close()
 
-    done, error = [], None
+    error = None
     try:
-        if len(pending) == 1:  # the common single-step branch: no pool, no extra thread
+        if len(pending) == 1:  # the common single-step task: no pool, no extra thread
             try:
                 run_member(pending[0])
-                done.append(pending[0])
             except Exception as e:  # noqa: BLE001 — reported to the orchestrator with the progress
                 error = e
         else:
-            done, error = _run_sub_dag(group, pending, run_member)
+            _, error = _run_sub_dag(flow_cls._dag.groups[node], pending, run_member)
     finally:
         if sampler:  # final superset write, on failure too — that's where perf data matters most
             try:
                 flush_metrics(sampler.stop())
-            except Exception:  # noqa: BLE001 — metrics must never mask the branch's outcome
+            except Exception:  # noqa: BLE001 — metrics must never mask the task's outcome
                 pass
-    # progress travels with the failure: resume restarts this item at its first
+    custom = {c: getattr(flow, c) for c in flow_cls.ledger_columns() if hasattr(flow, c)} if key is None else {}
+    # progress travels with the failure: resume restarts an item at its first
     # incomplete sub-step, not at the top
-    return {"key": key, "done": done, "error": error}
+    return {"parts": parts, "error": error, "custom": custom}
 
 
 def _run_sub_dag(group, pending, run_member):
@@ -291,71 +299,6 @@ def _run_sub_dag(group, pending, run_member):
     return done, error
 
 
-def _run_items(flow_cls, cfg, run_id, group, items, deps, max_workers, use_processes, retries, params):
-    """Run each item's sub-DAG in its own worker; return ({item key: sub-steps done}, first error).
-
-    `items` maps item key -> (pending sub-steps, that item's resolved branch-input
-    paths); `deps` are the group's whole-step inputs, shared by every item.
-    Failures don't cancel siblings, so a partial fan-out leaves the completed
-    items' parts durably on S3 for a later resume to reuse. Process-mode
-    workers write their own per-item metrics objects; the `metrics` view
-    unions them with the orchestrator's.
-    """
-    cores = os.cpu_count() or 1
-    workers = min(max_workers or cores, len(items))
-    shared = {
-        "config": asdict(cfg),
-        "file": inspect.getfile(flow_cls),
-        "flow": flow_cls.__name__,  # for getattr after the file import
-        "flow_id": flow_cls.flow_id(),  # for the Space; see _bound
-        "group": group.fanout,
-        "run_id": run_id,
-        "sample": use_processes,
-        "retries": retries,
-        "params": params,
-        "deps": deps,  # non-branch dep -> its part paths, so no worker LISTs for them
-        "workers": workers,  # workers derive their own caps: same machine, one formula
-    }
-    if use_processes:
-        # spawn, never fork: the orchestrator is multi-threaded here (sampler,
-        # DuckDB workers), and non-branch steps ran user code in this process,
-        # so forked children inherit OpenMP/BLAS/CUDA state mid-flight (hangs,
-        # "cannot re-initialize CUDA"). Spawn on 3.12/3.13 Linux too, where the
-        # stdlib default is still fork.
-        pool = ProcessPoolExecutor(
-            max_workers=workers, mp_context=get_context("spawn"), initializer=_init_group, initargs=(shared,)
-        )
-    else:
-        pool = ThreadPoolExecutor(max_workers=workers, initializer=_init_group, initargs=(shared,))
-    done, error = {}, None
-    try:
-        with pool as ex:
-            futures = [
-                ex.submit(
-                    _branch_worker,
-                    {"run_id": run_id, "group": group.fanout, "key": k, "steps": steps, "inputs": inputs},
-                )
-                for k, (steps, inputs) in items.items()
-            ]
-            for fut in as_completed(futures):
-                try:
-                    result = fut.result()
-                except Exception as e:  # noqa: BLE001 — a worker that died without reporting
-                    error = error if error is not None else e
-                    continue
-                done[result["key"]] = result["done"]
-                if error is None:  # surface the first, keep the rest
-                    error = result["error"]
-    finally:
-        # the pool has joined, so nothing can still hold the binding: drop it and
-        # its connection's spill dir. A no-op in the parent under process mode,
-        # where only the (now dead) children ever bound anything.
-        group_key = (run_id, group.fanout)
-        _BOUND.pop(group_key, None)
-        _SHARED.pop(group_key, None)
-    return done, error
-
-
 class CommitDriftError(RuntimeError):
     """Resume refused: HEAD differs from the origin run's commit."""
 
@@ -383,6 +326,8 @@ def run(
 ):
     """Execute `flow_cls`; returns the new run_id.
 
+    Every step body runs in a worker (0021); the orchestrator only schedules —
+    independent chains of the DAG execute concurrently, sharing one pool.
     `resume` is the one resume spelling: an origin run_id reuses that run's
     completed steps; the string "latest" resumes the newest complete run and
     falls through to a fresh full run when there is none (so cron jobs can
@@ -398,12 +343,10 @@ def run(
     run_id = _new_run_id(started)
     store = Store.of(config)
     space = Space.for_flow(store, flow_cls)
-    # connecting here also installs httpfs once, before any worker pool spawns
+    # connecting here installs httpfs once, before any worker pool spawns
     # (N cold workers would otherwise race the extension download)
-    con = store.connect()
+    store.connect()
     cat = lake.Catalog(space)
-    flow = flow_cls()
-    flow.config = config
     dag = flow_cls._dag
     ledger_cols = flow_cls.ledger_columns()
 
@@ -417,6 +360,7 @@ def run(
     origin = Manifest.from_rows(origin_rows)  # the origin run's parts, empty on a fresh run
     planner = Planner(dag, origin)  # ALL reuse decisions; inert on a fresh run
     pending = []  # manifest triples written since the last catalog commit
+    custom = {}  # declared Ledger columns, merged from whole-step task results
 
     def note(slot, path):
         """Record one part: in the live manifest and in the next catalog commit."""
@@ -440,17 +384,13 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        for k, v in origin_row["custom"].items():  # reused steps won't reset these
-            setattr(flow, k, v)
+        custom = dict(origin_row["custom"])  # reused steps won't reset these
         params = origin_row["params"]
         if dropped := set(params) - set(flow_cls.params_columns()):
             warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}", stacklevel=2)
             params = {k: v for k, v in params.items() if k not in dropped}
     reuse_slots(planner.upfront())
-
     params = flow_cls.resolve_params(params)
-    for k, v in params.items():
-        setattr(flow, k, v)
 
     record = RunRecord(
         run_id=run_id,
@@ -480,105 +420,115 @@ def run(
 
     sampler = metrics.Sampler(flush=flush_metrics).start()
 
-    def write_metrics():
+    workers = max_workers or os.cpu_count() or 1
+    shared = {
+        "config": asdict(config),
+        "file": inspect.getfile(flow_cls),
+        "flow": flow_cls.__name__,  # for getattr after the file import
+        "flow_id": flow_cls.flow_id(),  # for the Space; see _bound
+        "run_id": run_id,
+        "sample": use_processes,
+        "retries": branch_retries,
+        "params": params,
+    }
+    if use_processes:
+        # spawn, never fork: this process is multi-threaded (the sampler, DuckDB
+        # inside the catalog commits), and forked children would inherit that
+        # state mid-flight. Spawn on 3.12/3.13 Linux too, where the stdlib
+        # default is still fork. Workers spawn on demand, up to the cap.
+        pool = ProcessPoolExecutor(
+            max_workers=workers, mp_context=get_context("spawn"), initializer=_init_run, initargs=(shared,)
+        )
+    else:
+        pool = ThreadPoolExecutor(max_workers=workers, initializer=_init_run, initargs=(shared,))
+
+    ts = graphlib.TopologicalSorter(dag.schedule_graph())
+    ts.prepare()
+    running = {}  # future -> its scheduler node
+    left = {}  # node -> outstanding task count
+    labels = Counter()  # thread mode: the sampler's active node labels
+    error = None
+
+    def mark(nk, delta):
+        # process mode: workers measure their own steps, and the orchestrator's
+        # pool-wait must not be attributed to any of them (its label stays NULL)
+        if use_processes:
+            return
+        group = dag.groups.get(nk[1]) if isinstance(nk, tuple) else None
+        label = nk if group is None else group.order[0] if len(group.order) == 1 else group.fanout
+        labels[label] += delta
+        sampler.mark("+".join(sorted(k for k, v in labels.items() if v > 0)) or None)
+
+    def launch(nk):
+        """Reuse first; then one task per remaining unit of work — a whole
+        plain/fan-out step, or one item's pending sub-steps (one worker owns
+        one item end to end, no barrier between sub-steps). A node with
+        nothing left completes on the spot."""
+        if group := (dag.groups[nk[1]] if isinstance(nk, tuple) else None):
+            reuse_slots(planner.member_reuse(manifest, group))  # reuse shrinks every item's work
+            tasks = [
+                {"node": group.fanout, "key": k, "steps": todo}
+                for k in manifest.keys(group.fanout)
+                if (todo := [m for m in group.order if Slot(m, k) not in manifest])
+            ]
+        else:
+            reuse_slots(planner.node_reuse(manifest, nk))
+            have = manifest.width(nk) if dag.steps[nk].is_fanout else Slot(nk, 0) in manifest
+            tasks = [] if have else [{"node": nk, "key": None, "steps": [nk]}]
+        flush()  # reuse refs + upstream parts land before any worker reads meta
+        if not tasks:
+            ts.done(nk)
+            return
+        left[nk] = len(tasks)
+        # a fair share of the machine per task, sized by what is actually in
+        # flight — a solo step gets the whole machine, a wide wave splits it
+        threads, memory_mb = _fair_share(min(workers, len(running) + len(tasks)))
+        for t in tasks:
+            t |= {"run_id": run_id, "custom": dict(custom), "threads": threads, "memory_mb": memory_mb}
+            running[pool.submit(_task_worker, t)] = nk
+            mark(nk, +1)
+
+    def settle(fut):
+        """Fold one finished task into the run; completes its node when last."""
+        nonlocal error
+        nk = running.pop(fut)
+        mark(nk, -1)
         try:
-            flush_metrics(sampler.stop())
-        except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
-            pass
-
-    def resolve(rcon, dep, kind, key, table):
-        """Manifest-backed input resolution (BRANCH = this item's part, else all parts)."""
-        if kind == "BRANCH":
-            return space.relation(rcon, [manifest.get(dep, key)])
-        paths = manifest.paths(dep)
-        return space.relation(rcon, paths) if paths else table.empty(rcon)
-
-    ctx = _Ctx(con, space, flow, run_id, resolve)  # uncapped: the orchestrator owns the machine
-
-    def group_deps(group):
-        """The group's whole-step inputs: {non-branch dep: part paths} — external
-        by construction (a per-item step reads its siblings via Branch only)."""
-        return {
-            dep: manifest.paths(dep)
-            for m in group.order
-            for dep, kind in dag.steps[m].param_kinds.items()
-            if kind != "BRANCH"
-        }
-
-    def item_inputs(pending, key):
-        """One item's already-written branch inputs — the fan-out part and any
-        member finished earlier; the worker derives only the paths it writes."""
-        pend = set(pending)
-        return {
-            dep: manifest.get(dep, key)
-            for m in pending
-            for dep, kind in dag.steps[m].param_kinds.items()
-            if kind == "BRANCH" and dep not in pend
-        }
-
-    def run_group(group):
-        """Execute the fan-out's sub-DAG per item — one worker owns one item end to end.
-
-        No barrier between sub-steps: item A can be in the last one while item B
-        is still in the first, so only `workers` items are ever in flight.
-        """
-        reuse_slots(planner.member_reuse(manifest, group))  # first: reuse shrinks every item's work
-        keys = manifest.keys(group.fanout)
-        items = {}
-        for k in keys:
-            if pending := [m for m in group.order if Slot(m, k) not in manifest]:
-                items[k] = (pending, item_inputs(pending, k))
-        error = None
-        if items:
-            # process mode: workers measure the sub-steps; the orchestrator's pool-wait
-            # must not be attributed to them (step stays NULL). In thread mode one
-            # process runs interleaved items, so the whole group answers to one label.
-            label = group.order[0] if len(group.order) == 1 else group.fanout
-            sampler.mark(None if use_processes else label)
-            done, error = _run_items(
-                flow_cls,
-                config,
-                run_id,
-                group,
-                items,
-                group_deps(group),
-                max_workers,
-                use_processes,
-                branch_retries,
-                params,
-            )
-            for k, members in done.items():  # only the sub-steps that succeeded
-                for m in members:
-                    note(Slot(m, k), space.part(run_id, m, k))
-        if error:
-            raise error  # the failure flush commits what did complete
+            result = fut.result()
+            parts, err = result["parts"], result["error"]
+            custom.update(result["custom"])
+        except Exception as e:  # noqa: BLE001 — a worker that died without reporting
+            parts, err = [], e
+        # all-or-nothing: a partial fan-out must not look resumable, or resume
+        # would silently run with fewer branches; items keep partial progress
+        if not (not isinstance(nk, tuple) and dag.steps[nk].is_fanout and err):
+            for s, k, p in parts:
+                note(Slot(s, k), p)
+        if error is None:  # surface the first, keep the rest
+            error = err
+        left[nk] -= 1
+        if not left[nk]:
+            del left[nk]
+            flush()  # the node's parts + manifest rows land in one commit
+            if error is None:
+                ts.done(nk)
 
     try:
-        for name in dag.plan:  # a fan-out node covers its group; members never stand alone
-            step = dag.steps[name]
-            reuse_slots(planner.node_reuse(manifest, name))
-            group = dag.groups.get(name)
-            if step.is_fanout:
-                if not manifest.width(name):  # skip if a prior run already produced it
-                    sampler.mark(name)
-                    # all-or-nothing: a partial fan-out must not look resumable,
-                    # or resume would silently run with fewer branches
-                    for slot, path in list(_emit(ctx, step)):
-                        note(slot, path)
-                    flush()  # committed before its items run: a failing item leaves the fan-out queryable
-                if group:
-                    run_group(group)
-            else:
-                if Slot(name, 0) not in manifest:
-                    sampler.mark(name)
-                    for slot, path in _emit(ctx, step):
-                        note(slot, path)
-            flush()  # one commit per plan node: parts registered with their manifest rows
-
-        missing = [c for c in ledger_cols if not hasattr(flow, c)]
-        if missing:
+        with pool:
+            while True:
+                while error is None and (ready := [*ts.get_ready()]):
+                    for nk in ready:
+                        launch(nk)
+                if not running:  # done — or failed, with every in-flight task settled
+                    break
+                finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    settle(fut)
+        if error:
+            raise error
+        if missing := [c for c in ledger_cols if c not in custom]:
             raise RuntimeError(f"ledger columns not populated during run: {missing}")
-        record.custom = {c: getattr(flow, c) for c in ledger_cols}
+        record.custom = custom
         record.finished = utc_now()
         record.status = "complete"
         flush(row=True)
@@ -589,6 +539,15 @@ def run(
         flush(row=True)
         raise
     finally:
-        write_metrics()  # success AND failure — failed runs need perf data most
+        # thread mode: the pool has joined, so nothing still holds the binding
+        # (a no-op in process mode, where only the dead children ever bound)
+        _RUN.pop(run_id, None)
+        _BOUND.pop(run_id, None)
+        for k in [k for k in _DEPS if k[0] == run_id]:
+            del _DEPS[k]
+        try:
+            flush_metrics(sampler.stop())
+        except Exception:  # noqa: BLE001 — metrics must never mask the run's outcome
+            pass
 
     return run_id

@@ -130,8 +130,13 @@ class Space:
         return f"{self.run_dir(run_id)}/{METRICS_FILE}"
 
     def metrics_branch(self, run_id, step, branch):
-        """A branch worker's own metrics object — one writer per key, no CAS needed."""
+        """An item worker's own metrics object — one writer per key, no CAS needed."""
         return f"{self.run_dir(run_id)}/{METRICS_PREFIX}_{step}_{branch}.parquet"
+
+    def metrics_node(self, run_id, step):
+        """A whole-step task's metrics object. Dot-separated: step names cannot
+        contain dots, so it can never collide with an item's `_metrics_...` key."""
+        return f"{self.run_dir(run_id)}/{METRICS_PREFIX}.{step}.parquet"
 
     @property
     def metrics_glob(self):
