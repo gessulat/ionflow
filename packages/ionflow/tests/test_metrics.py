@@ -34,7 +34,7 @@ def test_stale_running_detection(cfg):
 
     con = store.connect()
     con.execute(
-        "CREATE VIEW ledger AS SELECT * FROM (VALUES "
+        "CREATE VIEW ledger AS SELECT *, true AS local FROM (VALUES "
         "('dead', 'running', TIMESTAMP '2020-01-01'), "
         "('alive', 'running', TIMESTAMP '2020-01-01')) t(run_id, status, started)"
     )

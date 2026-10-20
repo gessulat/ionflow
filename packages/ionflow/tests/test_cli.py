@@ -9,9 +9,9 @@ runner = CliRunner()
 
 
 @pytest.mark.slow
-def test_cli_run_and_query(s3cfg, clean_repo, monkeypatch):
+def test_cli_run_and_query(cfg, clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # the CLI treats cwd as the git repo
-    monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": s3cfg))
+    monkeypatch.setattr(config.Config, "load", classmethod(lambda cls, start=".": cfg))
     monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: True))
 
     r = runner.invoke(cli.app, ["run", "examples.embed:EmbedDocs"])
@@ -45,14 +45,19 @@ def test_cli_setup_writes_config(clean_repo, monkeypatch):
     monkeypatch.chdir(clean_repo)  # own repo: setup writes .ionflow/ + .gitignore
     monkeypatch.setattr("ionflow.store.Store.credentials", staticmethod(lambda: False))
 
-    # bucket, prefix, endpoint(blank), region, flows(blank), gitignore? -> yes
-    r = runner.invoke(cli.app, ["setup"], input="mybucket\nionflow\n\nus-east-1\n\ny\n")
+    # local directory, remote, prefix, endpoint, region, flows, gitignore
+    r = runner.invoke(cli.app, ["setup"], input="\ns3://mybucket/ionflow\n\n\n\n\ny\n")
     assert r.exit_code == 0, r.output
 
     path = config.find_config(clean_repo)  # resolves symlinks; robust on macOS
     assert path is not None
     cfg = tomllib.loads(path.read_text())
-    assert cfg == {"bucket": "mybucket", "prefix": "ionflow", "region": "us-east-1"}
+    assert cfg == {
+        "local_dir": ".ionflow/data",
+        "remote": "s3://mybucket/ionflow",
+        "prefix": "ionflow",
+        "region": "us-east-1",
+    }
     assert ".ionflow/" in (path.parent.parent / ".gitignore").read_text()
 
 

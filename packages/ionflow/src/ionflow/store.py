@@ -1,9 +1,12 @@
 import builtins
+import hashlib
 import os
 import shutil
 import tempfile
 import weakref
+from dataclasses import replace
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import boto3
@@ -97,6 +100,42 @@ class Store:
         from .space import Space  # Space builds on Store; the import stays local to break the cycle
 
         return Space(self, self.prefix, flow_id)
+
+    @property
+    def identity(self) -> str:
+        """Stable identity of this physical store, independent of Python classes."""
+        return self.identity_for(self.cfg)
+
+    @staticmethod
+    def identity_for(cfg) -> str:
+        """Compute physical identity without credentials or network access."""
+        root = (
+            str(Path(cfg.local_dir).expanduser().resolve() / cfg.prefix)
+            if cfg.local_dir
+            else f"{cfg.endpoint_url or ''}|s3://{cfg.bucket}/{cfg.prefix}"
+        )
+        return hashlib.sha256(root.encode()).hexdigest()
+
+    def stat(self, key: str) -> dict | None:
+        """Object size and transport revision, without reading its payload."""
+        try:
+            r = self.client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if error_code(e) in MISSING_KEY_CODES:
+                return None
+            raise
+        return {"size": r["ContentLength"], "etag": r.get("ETag")}
+
+    def describe(self, key: str) -> dict:
+        """Describe newly committed data; local files carry a full checksum."""
+        info = self.stat(key)
+        if info is None:
+            raise FileNotFoundError(key)
+        digest = None
+        if self.local_dir:
+            with open(self.uri(key), "rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        return {"path": key, "size": info["size"], "sha256": digest}
 
     def flow_ids(self) -> builtins.list[str]:
         """Discover flow catalogs without importing their Python definitions."""
@@ -211,6 +250,18 @@ class Store:
 
 
 class S3Store(Store):
+    def flow_ids(self) -> builtins.list[str]:
+        from schrein.ducklake import CATALOG_KEY
+
+        prefix = self.prefix + "/runs/"
+        pages = self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix, Delimiter="/")
+        return sorted(
+            p["Prefix"][len(prefix) : -1]
+            for page in pages
+            for p in page.get("CommonPrefixes", [])
+            if self.exists(p["Prefix"] + CATALOG_KEY)
+        )
+
     def _client(self):
         return s3_client(self.cfg)
 
@@ -228,6 +279,15 @@ class S3Store(Store):
 
 
 class DirStore(Store):
+    def __init__(self, cfg):
+        super().__init__(replace(cfg, local_dir=str(Path(cfg.local_dir).expanduser().resolve())))
+
+    def flow_ids(self) -> builtins.list[str]:
+        from schrein.ducklake import CATALOG_KEY
+
+        root = Path(self.uri(self.prefix + "/runs"))
+        return sorted(p.name for p in root.iterdir() if (p / CATALOG_KEY).is_file()) if root.is_dir() else []
+
     def _client(self):
         return LocalClient(self.cfg.local_dir)
 

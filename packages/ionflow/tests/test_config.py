@@ -2,7 +2,14 @@ import pytest
 
 from ionflow.config import Config, ConfigMissing, find_config, write_config
 
-_ENV = ["IONFLOW_BUCKET", "IONFLOW_PREFIX", "IONFLOW_ENDPOINT", "IONFLOW_LOCAL_DIR", "AWS_DEFAULT_REGION"]
+_ENV = [
+    "IONFLOW_REMOTE",
+    "IONFLOW_BUCKET",
+    "IONFLOW_PREFIX",
+    "IONFLOW_ENDPOINT",
+    "IONFLOW_LOCAL_DIR",
+    "AWS_DEFAULT_REGION",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -20,12 +27,17 @@ def _write(root, text):
 LOADS = [
     (
         "file_wins_when_no_env",
-        'bucket = "b"\nprefix = "p"\nregion = "eu-west-1"\n',
+        'remote = "s3://b/p"\nprefix = "p"\nregion = "eu-west-1"\n',
         {},
-        {"bucket": "b", "prefix": "p", "region": "eu-west-1", "access_key": None},
+        {"remote": "s3://b/p", "prefix": "p", "region": "eu-west-1", "access_key": None},
     ),  # creds never from the file
-    ("defaults", 'bucket = "b"\n', {}, {"endpoint_url": None, "prefix": "ionflow", "flows": None}),
-    ("env_beats_file", 'bucket = "filebucket"\n', {"IONFLOW_BUCKET": lambda r: "envbucket"}, {"bucket": "envbucket"}),
+    ("defaults", 'remote = "s3://b"\n', {}, {"endpoint_url": None, "prefix": "ionflow", "flows": None}),
+    (
+        "env_beats_file",
+        'remote = "s3://filebucket"\n',
+        {"IONFLOW_REMOTE": lambda r: "s3://envbucket"},
+        {"remote": "s3://envbucket"},
+    ),
     (
         "local_dir_anchors_at_the_config_root",
         'local_dir = ".ionflow/data"\n',
@@ -39,16 +51,16 @@ LOADS = [
         {"local_dir": lambda r: str(r / "envstore")},
     ),
     (
-        "env_bucket_switches_a_local_file",
+        "env_remote_preserves_local_file",
         'local_dir = "data"\n',
-        {"IONFLOW_BUCKET": lambda r: "envbucket"},
-        {"bucket": "envbucket", "local_dir": None},
+        {"IONFLOW_REMOTE": lambda r: "s3://envbucket"},
+        {"remote": "s3://envbucket", "local_dir": lambda r: str(r / "data")},
     ),
     (
-        "env_local_dir_switches_a_bucket_file",
-        'bucket = "filebucket"\n',
+        "env_local_dir_preserves_remote",
+        'remote = "s3://filebucket"\n',
         {"IONFLOW_LOCAL_DIR": lambda r: str(r / "envstore")},
-        {"local_dir": lambda r: str(r / "envstore"), "bucket": None},
+        {"local_dir": lambda r: str(r / "envstore"), "remote": "s3://filebucket"},
     ),
 ]
 
@@ -68,8 +80,8 @@ def test_load(tmp_path, monkeypatch, text, env, expected):
 @pytest.mark.parametrize(
     "make",
     [
-        lambda r: Config(bucket="b", flows="myproj.flows"),
-        lambda r: Config(bucket="b", prefix='pre"fix\\path'),  # JSON-as-TOML escaping
+        lambda r: Config(local_dir=str(r / "store"), remote="s3://b/p", flows="myproj.flows"),
+        lambda r: Config(local_dir=str(r / "store"), prefix='pre"fix\\path'),  # JSON-as-TOML escaping
         lambda r: Config(local_dir=str(r / "elsewhere")),  # an absolute local_dir stays absolute
     ],
     ids=["flows", "escapes", "absolute_local_dir"],
@@ -78,8 +90,8 @@ def test_write_config_round_trips(tmp_path, make):
     cfg = make(tmp_path)
     write_config(tmp_path, cfg)
     loaded = Config.load(str(tmp_path))
-    assert (loaded.bucket, loaded.prefix, loaded.flows, loaded.local_dir) == (
-        cfg.bucket,
+    assert (loaded.remote, loaded.prefix, loaded.flows, loaded.local_dir) == (
+        cfg.remote,
         cfg.prefix,
         cfg.flows,
         cfg.local_dir,
@@ -92,7 +104,7 @@ def test_missing_raises(tmp_path):
         Config.load(str(tmp_path))
 
 
-def test_bucket_and_local_dir_together_refused(tmp_path):
+def test_legacy_bucket_config_is_refused(tmp_path):
     _write(tmp_path, 'bucket = "b"\nlocal_dir = "data"\n')
-    with pytest.raises(ValueError, match="both"):
+    with pytest.raises(ValueError, match="optional remote"):
         Config.load(str(tmp_path))

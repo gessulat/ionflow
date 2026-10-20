@@ -82,3 +82,43 @@ def localcfg(tmp_path):
 def anycfg(request):
     """Both storage modes: the mode is one dispatch (Store.of), so most tests want both."""
     return request.getfixturevalue("s3cfg" if request.param == "s3" else "localcfg")
+
+
+@pytest.fixture
+def workspaces(s3cfg, tmp_path, monkeypatch):
+    """Two local execution stores sharing a real HTTP S3 test endpoint."""
+    from dataclasses import replace
+
+    from ionflow import Storage
+
+    monkeypatch.setattr("ionflow.storage.request_refresh", lambda config: None)
+    return tuple(
+        Storage(
+            replace(s3cfg, bucket=None, local_dir=str(tmp_path / name), remote=f"s3://{s3cfg.bucket}/{s3cfg.prefix}")
+        )
+        for name in ("a", "b")
+    )
+
+
+@pytest.fixture
+def executioncfg(s3cfg, localcfg):
+    """Local execution with explicit S3 credentials for user-code side effects."""
+    from dataclasses import replace
+
+    return replace(s3cfg, local_dir=localcfg.local_dir)
+
+
+@pytest.fixture
+def remote_run(localcfg, s3cfg, repo):
+    """Execute locally, then explicitly transfer the snapshot for S3 catalog tests."""
+    from ionflow.space import Space
+    from ionflow.store import Store
+
+    def run(flow, **kwargs):
+        kwargs.setdefault("repo", repo)
+        try:
+            return flow.run(localcfg, **kwargs)
+        finally:
+            Space.for_flow(Store.of(localcfg), flow).sync_to(Space.for_flow(Store.of(s3cfg), flow), flow)
+
+    return run

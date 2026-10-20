@@ -4,14 +4,13 @@ import json
 import os
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from schrein.ducklake import CATALOG_KEY
 
 from .arrow import BATCH_ROWS, parquet_bytes, to_arrow
 from .schema import _q
-from .store import COPY_WORKERS, Store
+from .store import Store
 
 METRICS_PREFIX = "_metrics"  # basename prefix of all metrics objects (run-dir depth, like _meta.json)
 METRICS_FILE = METRICS_PREFIX + ".parquet"  # the orchestrator's object — also the run heartbeat
@@ -213,100 +212,11 @@ class Space:
         return key_value
 
     def sync_to(self, other, flow_cls, run_id=None):
-        """Copy run reference closures, then merge their exported records atomically.
-
-        Destination catalogs derive from records, never copied database bytes.
-        `run_id` selects one run and the creating runs of its referenced parts.
-        """
-        from .artifact import Artifacts
-        from .lake import Catalog, _meta_row
+        """Copy one run's reference closure using the shared transfer planner."""
+        from .lake import Catalog
+        from .storage import execute_transfer, plan_transfer
 
         if not self.flow_id == other.flow_id == flow_cls.flow_id():
-            raise ValueError(
-                f"sync_to: source, target and flow must name one flow, got "
-                f"{self.flow_id!r} -> {other.flow_id!r} for {flow_cls.flow_id()!r}"
-            )
-        selected = set(self.run_ids() if run_id is None else [run_id])
-        metas = {}
-        while selected - metas.keys():
-            rid = sorted(selected - metas.keys())[0]
-            meta = self.read_meta(rid)
-            if meta is None:
-                raise ValueError(f"run not found: {rid}")
-            metas[rid] = meta
-            for pairs in meta.get("manifest", {}).values():
-                for _, path in pairs:
-                    prefix = self.root + "/run_id="
-                    if path.startswith(prefix):
-                        selected.add(path.removeprefix(prefix).split("/", 1)[0])
-        cat = Catalog(other)
-        target_rows = {row["run_id"]: row for row in cat.runs()}
-        skip = set()
-        for rid, meta in metas.items():
-            if rid not in target_rows:
-                continue
-            current = target_rows[rid]
-            expected = {
-                "commit": meta.get("commit"),
-                "params": meta.get("params") or {},
-                "artifacts": meta.get("artifacts") or {},
-            }
-            if any(current[field] != expected[field] for field in expected):
-                raise ValueError(f"run identity conflicts at destination: {rid}")
-            if current["status"] != "running":
-                if meta["status"] == "running":
-                    skip.add(rid)
-                elif current["status"] != meta["status"]:
-                    raise ValueError(f"run outcome conflicts at destination: {rid}")
-        artifact_ids = set()
-        for meta in metas.values():
-            for value in meta.get("artifacts", {}).values():
-                artifact_ids.update(r["id"] for r in (value if isinstance(value, list) else [value]))
-            for activity in meta.get("activities", {}).values():
-                artifact_ids.update(activity["ancestors"])
-                artifact_ids.update(u["artifact"]["id"] for u in activity["uses"])
-                artifact_ids.update(o["artifact"]["id"] for o in activity["outputs"])
-        if artifact_ids:
-            Artifacts(self.store).sync_to(Artifacts(other.store), sorted(artifact_ids))
-        existing = set(other.store.list(other.root + "/"))
-        todo = []
-        for rid in sorted(selected):
-            for key in self.store.list(self.run_dir(rid) + "/"):
-                target = other.root + key.removeprefix(self.root)
-                if target not in existing and key != self.meta(rid):
-                    todo.append((key, target))
-
-        def transfer(pair):
-            source, target = pair
-            with tempfile.TemporaryDirectory(prefix="ionflow-sync-") as tmp:
-                path = os.path.join(tmp, "object")
-                self.store.download(source, path)
-                other.store.upload(target, path)
-
-        with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:
-            list(ex.map(transfer, todo))
-        # Expose records only after the entire reference closure has arrived.
-        for rid, meta in sorted(metas.items()):
-            if rid in skip:
-                continue
-            meta = meta | {
-                "manifest": {
-                    step: [
-                        [k, other.root + p.removeprefix(self.root) if p.startswith(self.root + "/") else p]
-                        for k, p in pairs
-                    ]
-                    for step, pairs in meta.get("manifest", {}).items()
-                }
-            }
-            from .state import Manifest
-
-            rows = [(s.step, s.key, p) for s, p in Manifest.from_meta(meta["manifest"]).slots()]
-            cat.commit_run(
-                rid,
-                row=_meta_row(meta, rid),
-                rows=rows,
-                genesis=flow_cls,
-                activities=list(meta.get("activities", {}).values()),
-            )
-            other.write_meta(rid, meta)
-        return {"copied": len(todo) + len(metas), "runs": len(cat.runs())}
+            raise ValueError("sync_to: source, target and flow must name one flow")
+        result = execute_transfer(plan_transfer(self.store, other.store, self.flow_id, run_id))
+        return {"copied": result["copied"], "runs": len(Catalog(other).runs())}

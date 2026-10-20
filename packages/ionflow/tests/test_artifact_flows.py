@@ -7,8 +7,8 @@ from ionflow.space import Space
 from ionflow.store import Store
 
 
-def test_artifact_steps_inherit_table_ancestry_and_expose_sql(anycfg, repo, tmp_path):
-    cfg = anycfg
+def test_artifact_steps_inherit_table_ancestry_and_expose_sql(cfg, repo, tmp_path):
+    cfg = cfg
     registry = Artifacts(cfg)
     p = tmp_path / "human.fa"
     p.write_text(">p\nPEPTIDE\n")
@@ -125,7 +125,7 @@ def test_artifact_views_cast_json_lists_and_preserve_reference_identity(cfg, rep
 
 
 @pytest.mark.slow
-def test_sync_single_resumed_run_copies_original_parts_and_artifact_parents(localcfg, s3cfg, repo, tmp_path):
+def test_sync_single_resumed_run_copies_original_parts_and_artifact_parents(localcfg, cfg, repo, tmp_path):
     from dataclasses import replace
 
     registry = Artifacts(localcfg)
@@ -137,7 +137,7 @@ def test_sync_single_resumed_run_copies_original_parts_and_artifact_parents(loca
     )
     second = BuildLibrary.run(localcfg, repo=repo, use_processes=False, resume=first)
     source = Space.for_flow(Store.of(localcfg), BuildLibrary)
-    target_cfg = replace(s3cfg, prefix="nested/target")
+    target_cfg = replace(cfg, prefix="nested/target")
     target = Space.for_flow(Store.of(target_cfg), BuildLibrary)
     assert source.sync_to(target, BuildLibrary, run_id=second)["runs"] == 2
     con = BuildLibrary.duck(target_cfg)

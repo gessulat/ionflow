@@ -12,6 +12,7 @@ export; `backfill` is its only reader.
 
 import atexit
 import datetime as dt
+import hashlib
 import json
 import pathlib
 import re
@@ -19,6 +20,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import replace
+from typing import Any
 
 from schrein.ducklake import CATALOG_KEY
 
@@ -42,6 +44,19 @@ _RUNS_SELECT = (
     'SELECT run_id, status, started, finished, "commit", origin_run_id, params, custom, artifacts FROM lake.runs'
 )
 ACTIVITY_DDL = "run_id VARCHAR, step VARCHAR, item_key VARCHAR, record VARCHAR"
+SYSTEM_DDLS = {
+    "runs": RUNS_DDL,
+    "manifest": MANIFEST_DDL,
+    "artifact_activity": ACTIVITY_DDL,
+    "run_versions": "run_id VARCHAR, origin VARCHAR, revision BIGINT, token VARCHAR, present BOOLEAN",
+    "part_files": "path VARCHAR, size BIGINT, sha256 VARCHAR",
+    "registered_parts": "path VARCHAR",
+    "peer_runs": "peer VARCHAR, run_id VARCHAR, token VARCHAR, present BOOLEAN",
+}
+
+
+def _token(value: dict) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
 
 
 def _decode_run(row):
@@ -108,11 +123,7 @@ class Catalog:
             for name, step in flow_cls._dag.steps.items()
             if not step.is_artifact
         }
-        return steps | {
-            "runs": _create("runs", RUNS_DDL),
-            "manifest": _create("manifest", MANIFEST_DDL),
-            "artifact_activity": _create("artifact_activity", ACTIVITY_DDL),
-        }
+        return steps | {name: _create(name, ddl) for name, ddl in SYSTEM_DDLS.items()}
 
     def _apply(self, con, run_id, row=None, rows=(), activities=()):
         """One run's upsert, inside an open lake transaction: replace its ledger
@@ -137,8 +148,15 @@ class Catalog:
         files = {}
         for s, k, p in fresh:
             con.execute("INSERT INTO lake.manifest VALUES (?, ?, ?, ?)", [run_id, s, k, p])
-            if p.startswith(own):
+        registered = {r[0] for r in con.execute("SELECT path FROM lake.registered_parts").fetchall()}
+        for s, _, p in rows:
+            if p.startswith(own) and p not in registered:
+                if con.execute("SELECT 1 FROM lake.part_files WHERE path = ?", [p]).fetchone() is None:
+                    info = self.space.store.describe(p)
+                    con.execute("INSERT INTO lake.part_files VALUES (?, ?, ?)", [p, info["size"], info["sha256"]])
+                con.execute("INSERT INTO lake.registered_parts VALUES (?)", [p])
                 files.setdefault(s, []).append(self.space.uri(p))
+                registered.add(p)
         for s, uris in files.items():
             _add_files(con, s, uris, hive=True)
 
@@ -150,15 +168,217 @@ class Catalog:
         tables, or a partially registered step. Replay-safe (see `_apply`).
         """
 
+        committed = {}
+
         def fn(con):
             con.execute("BEGIN")
             if genesis is not None:
                 for ddl in self._ddls(genesis).values():
                     con.execute(ddl)
             self._apply(con, run_id, row, rows, activities)
+            snapshot = self._snapshot(con, run_id)
+            token = _token(snapshot)
+            old = con.execute(
+                "SELECT origin, revision, token FROM lake.run_versions WHERE run_id = ?", [run_id]
+            ).fetchone()
+            if old and old[0] != self.space.store.identity:
+                raise ValueError(f"only the execution origin can advance run {run_id}")
+            if old is None or old[2] != token:
+                con.execute("DELETE FROM lake.run_versions WHERE run_id = ?", [run_id])
+                con.execute(
+                    "INSERT INTO lake.run_versions VALUES (?, ?, ?, ?, true)",
+                    [run_id, self.space.store.identity, 1 if old is None else old[1] + 1, token],
+                )
+            committed.update(
+                snapshot
+                | {
+                    "version": {
+                        "origin": self.space.store.identity,
+                        "revision": 1 if old is None else old[1] + int(old[2] != token),
+                        "token": token,
+                    }
+                }
+            )
             con.execute("COMMIT")
 
         self.lake.commit(fn)
+        return committed
+
+    def _snapshot(self, con: Any, run_id: str) -> dict:
+        """Portable metadata from one catalog snapshot; never reads a data file."""
+        row = con.execute(_RUNS_SELECT + " WHERE run_id = ?", [run_id]).fetchone()
+        record = _decode_run(row)
+        record["started"] = record["started"].isoformat()
+        record["finished"] = record["finished"].isoformat() if record["finished"] else None
+        root = self.space.root + "/"
+        record["manifest"] = sorted(
+            [
+                [s, json.loads(k), p.removeprefix(root)]
+                for s, k, p in con.execute(
+                    "SELECT step, item_key, path FROM lake.manifest WHERE run_id = ?", [run_id]
+                ).fetchall()
+            ]
+        )
+        record["activities"] = [
+            json.loads(r[0])
+            for r in con.execute(
+                "SELECT record FROM lake.artifact_activity WHERE run_id = ? ORDER BY step, item_key", [run_id]
+            ).fetchall()
+        ]
+        record["files"] = [
+            {"path": p.removeprefix(root), "size": size, "sha256": digest}
+            for p, size, digest in con.execute(
+                "SELECT DISTINCT f.path, f.size, f.sha256 FROM lake.part_files f "
+                "JOIN lake.manifest m ON m.path=f.path WHERE m.run_id = ? ORDER BY f.path",
+                [run_id],
+            ).fetchall()
+        ]
+        return record
+
+    def inventory(self) -> list[dict]:
+        """Portable run records and physical availability, read without payloads."""
+        if self._blob() is None:
+            return []
+        with self.lake.read() as con:
+            return [
+                self._snapshot(con, rid)
+                | {"version": {"origin": origin, "revision": revision, "token": token}, "present": present}
+                for rid, origin, revision, token, present in con.execute(
+                    "SELECT run_id, origin, revision, token, present FROM lake.run_versions ORDER BY run_id"
+                ).fetchall()
+            ]
+
+    def merge_metadata(self, records: list[dict], tables: dict[str, dict[str, str]], peer: str | None = None) -> None:
+        """Merge known runs without registering or fetching missing data files."""
+        if not records:
+            return
+        from .storage import _safe_path
+
+        for record in records:
+            rid = record["run_id"]
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", rid) or rid in (".", ".."):
+                raise ValueError(f"invalid run ID: {rid}")
+            for _, _, path in record["manifest"]:
+                _safe_path(path)
+                if not path.startswith("run_id=") and not re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{64}", path):
+                    raise ValueError(f"invalid manifest path: {path}")
+            for f in record["files"]:
+                _safe_path(f["path"])
+                if not f["path"].startswith("run_id=") or type(f["size"]) is not int or f["size"] < 0:
+                    raise ValueError("invalid run file descriptor")
+        if self._blob() is not None:
+            with self.lake.read() as con:
+                versions = {
+                    r[0]: r[1:]
+                    for r in con.execute("SELECT run_id, origin, revision, token FROM lake.run_versions").fetchall()
+                }
+                observed = {
+                    r[0]: r[1:]
+                    for r in con.execute(
+                        "SELECT run_id, token, present FROM lake.peer_runs WHERE peer = ?", [peer]
+                    ).fetchall()
+                }
+            records = [
+                r
+                for r in records
+                if versions.get(r["run_id"])
+                != (r["version"]["origin"], r["version"]["revision"], r["version"]["token"])
+                or (peer and observed.get(r["run_id"]) != (r["version"]["token"], r["present"]))
+            ]
+            if not records:
+                return
+
+        def commit(con):
+            con.execute("BEGIN")
+            for name, ddl in SYSTEM_DDLS.items():
+                con.execute(_create(name, ddl))
+            for name, columns in tables.items():
+                if name not in SYSTEM_DDLS:
+                    from .schema import _q
+
+                    con.execute(_create(_q(name), ", ".join(f"{_q(n)} {t}" for n, t in columns.items())))
+            for record in records:
+                rid, version = record["run_id"], record["version"]
+                body = {k: v for k, v in record.items() if k not in ("version", "present")}
+                if _token(body) != version["token"]:
+                    raise ValueError(f"run metadata checksum mismatch: {rid}")
+                old = con.execute(
+                    "SELECT origin, revision, token FROM lake.run_versions WHERE run_id = ?", [rid]
+                ).fetchone()
+                if old and (
+                    old[0] != version["origin"] or (old[1] == version["revision"] and old[2] != version["token"])
+                ):
+                    raise ValueError(f"run identity or revision conflict: {rid}")
+                if peer:
+                    con.execute("DELETE FROM lake.peer_runs WHERE peer = ? AND run_id = ?", [peer, rid])
+                    con.execute(
+                        "INSERT INTO lake.peer_runs VALUES (?, ?, ?, ?)",
+                        [peer, rid, version["token"], record["present"]],
+                    )
+                if old and old[1] >= version["revision"]:
+                    continue
+                for table in ("runs", "manifest", "artifact_activity", "run_versions"):
+                    con.execute(f"DELETE FROM lake.{table} WHERE run_id = ?", [rid])
+                con.execute(f"INSERT INTO lake.runs VALUES ({', '.join('?' * len(RUN_COLS))})", _meta_row(record, rid))
+                for step, key, path in record["manifest"]:
+                    con.execute(
+                        "INSERT INTO lake.manifest VALUES (?, ?, ?, ?)",
+                        [
+                            rid,
+                            step,
+                            json.dumps(key),
+                            self.space.root + "/" + path if path.startswith("run_id=") else path,
+                        ],
+                    )
+                for f in record["files"]:
+                    path = self.space.root + "/" + f["path"]
+                    con.execute("DELETE FROM lake.part_files WHERE path = ?", [path])
+                    con.execute("INSERT INTO lake.part_files VALUES (?, ?, ?)", [path, f["size"], f["sha256"]])
+                for activity in record["activities"]:
+                    con.execute(
+                        "INSERT INTO lake.artifact_activity VALUES (?, ?, ?, ?)",
+                        [rid, activity["step"], json.dumps(activity["key"]), json.dumps(activity)],
+                    )
+                con.execute(
+                    "INSERT INTO lake.run_versions VALUES (?, ?, ?, ?, false)",
+                    [rid, version["origin"], version["revision"], version["token"]],
+                )
+            con.execute("COMMIT")
+
+        self.lake.commit(commit)
+        for record in records:
+            key = f"{self.space.root}/_inventory/run_id={record['run_id']}/{record['version']['token']}.json"
+            self.space.store.put(key, json.dumps(record | {"present": False}).encode())
+
+    def mark_present(self, record: dict) -> None:
+        """Register a verified receiving snapshot without advancing its execution."""
+        rid, version = record["run_id"], record["version"]
+
+        def commit(con):
+            current = con.execute("SELECT token FROM lake.run_versions WHERE run_id = ?", [rid]).fetchone()
+            if current is None or current[0] != version["token"]:
+                raise ValueError(f"run changed during transfer: {rid}; refresh and retry")
+            rows = [
+                (s, k, self.space.root + "/" + p if p.startswith("run_id=") else p) for s, k, p in record["manifest"]
+            ]
+            self._apply(con, rid, rows=rows)
+            con.execute("UPDATE lake.run_versions SET present = true WHERE run_id = ?", [rid])
+
+        self.lake.commit(commit)
+
+    def availability(self, peer: str | None = None) -> dict[str, dict[str, bool]]:
+        """Presence at this store and the last observed peer, keyed by run ID."""
+        if self._blob() is None:
+            return {}
+        with self.lake.read() as con:
+            return {
+                rid: {"local": present, "s3": bool(remote)}
+                for rid, present, remote in con.execute(
+                    "SELECT v.run_id, v.present, p.present AND p.token = v.token FROM lake.run_versions v "
+                    "LEFT JOIN lake.peer_runs p ON p.run_id = v.run_id AND p.peer = ?",
+                    [peer],
+                ).fetchall()
+            }
 
     def runs(self):
         """Ledger rows as dicts (params/custom decoded), oldest first; [] when
@@ -246,18 +466,35 @@ def backfill(flow_cls, space, replace=False):
         meta = space.read_meta(run_id) or {}
         manifest = Manifest.from_meta(meta.get("manifest"))
         rows = [(slot.step, slot.key, path) for slot, path in manifest.slots() if slot.step in steps]
-        runs.append((run_id, _meta_row(meta, run_id), rows, list(meta.get("activities", {}).values())))
+        runs.append((run_id, _meta_row(meta, run_id), rows, list(meta.get("activities", {}).values()), meta))
 
     def fn(con):
         con.execute("BEGIN")
         for ddl in cat._ddls(flow_cls).values():
             con.execute(ddl)
-        for run_id, row, rows, activities in runs:
+        for run_id, row, rows, activities, meta in runs:
+            for f in meta.get("files", []):
+                path = space.root + "/" + f["path"]
+                if con.execute("SELECT 1 FROM lake.part_files WHERE path = ?", [path]).fetchone() is None:
+                    con.execute("INSERT INTO lake.part_files VALUES (?, ?, ?)", [path, f["size"], f["sha256"]])
             cat._apply(con, run_id, row, rows, activities)
+            body = cat._snapshot(con, run_id)
+            version = meta.get("version") or {"origin": space.store.identity, "revision": 1, "token": _token(body)}
+            con.execute(
+                "INSERT INTO lake.run_versions VALUES (?, ?, ?, ?, true)",
+                [run_id, version["origin"], version["revision"], version["token"]],
+            )
         con.execute("COMMIT")
 
     cat.lake.commit(fn)
-    return len(runs)
+    snapshots = {}
+    for key in space.store.list(space.root + "/_inventory/"):
+        record = json.loads(space.store.get(key))
+        current = snapshots.get(record["run_id"])
+        if current is None or current["version"]["revision"] < record["version"]["revision"]:
+            snapshots[record["run_id"]] = record
+    cat.merge_metadata(list(snapshots.values()), {})
+    return len(cat.runs())
 
 
 def schema_drift(flow_cls, space):

@@ -1,8 +1,8 @@
 # ionflow — agent notes
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed
-table, persisted as Parquet on S3 — or a plain directory (`ionflow setup
---local`, 0016; `ionflow sync` pushes history to a bucket later). DuckDB-first.
+table, persisted locally as Parquet. An optional S3 peer shares metadata;
+payload transfers are explicit (0026/0027). DuckDB-first.
 User docs: `packages/ionflow/README.md`. The *why* behind non-obvious choices
 lives in `packages/ionflow/docs/decisions/` (cited below by number) — check it
 before changing architecture; add a record when you make such a decision.
@@ -144,7 +144,11 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   flush their own objects (`_metrics.<step>` / `_metrics_<fanout>_<key>`); the
   `metrics` view unions all. Concurrent sub-steps share one label
   (`upload_db+search`); NULL = between steps.
-- `store.py` — `Store.of(cfg)` is THE one place local-vs-S3 is decided; fresh
+- `storage.py` — `Storage` coordinates a mandatory local store and optional peer.
+  Metadata refresh merges logical records without reading outputs or registering
+  absent files. Explicit transfer plans pin revisions, direction and bytes.
+  Runs have one execution origin; divergent artifact edits require resolution.
+- `store.py` — `Store.of(cfg)` selects one physical local/S3 endpoint; fresh
   connections, never memoized; builds DuckLakes. `s3_client` stays
   module-level — the documented side-input hatch.
 - `space.py` — one flow's key scheme + verbs. Parts are
@@ -154,8 +158,8 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   one constraint scan, then boto3 upload (multipart >8MB) — **writes never go
   through DuckDB `COPY TO s3://`** (a failed httpfs write leaves a corrupt part
   visible, 0010), and a COPY pipeline must NEVER read httpfs (deadlock);
-  relations drain through `to_arrow_reader`. `sync_to` copies run folders, then
-  `backfill` re-derives the target catalog. Timestamps: naive UTC (`utc_now`).
+  relations drain through `to_arrow_reader`. `sync_to` delegates to the shared
+  transfer planner. Timestamps: naive UTC (`utc_now`).
 - `arrow.py` — pure marshalling: `to_arrow` (numpy dicts/structured/bare
   arrays; complex rejected), `StepInput` (lazy relation + `.np()`); numpy
   optional in core.
@@ -175,7 +179,8 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   `run_id` always last. Refuses runs-without-catalog, pointing at
   catalog-backfill.
 - `config.py` — `.ionflow/config` (TOML), found by walking up; `IONFLOW_*` env
-  overrides; credentials only from the AWS chain. One of `bucket`/`local_dir`.
+  overrides; credentials only from the AWS chain. A local directory is required;
+  `remote` is optional. Bucket-only configs describe low-level transfer endpoints.
 - `cli.py` / `tui.py` — typer CLI; Textual TUI (bare `ionflow`); TUI startup =
   `scan_runs` (flows with a catalog) + `startup_warnings` (schema drift).
 

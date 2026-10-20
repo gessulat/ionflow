@@ -79,8 +79,8 @@ def _vanilla(cfg, target, key):
 # --- the flow catalog -------------------------------------------------------
 
 
-def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(s3cfg, repo):
-    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(remote_run, s3cfg, repo):
+    run_id = remote_run(LakeFlow, repo=repo, use_processes=False)
 
     # ionflow read path: views over the attached catalog snapshot
     con = duck(LakeFlow, s3cfg)
@@ -98,13 +98,13 @@ def test_a_run_registers_and_stock_duckdb_reads_the_flow_catalog(s3cfg, repo):
     v.close()
 
 
-def test_backfill_restores_runs_manifests_and_registrations(s3cfg, repo, tmp_path, monkeypatch):
+def test_backfill_restores_runs_manifests_and_registrations(remote_run, s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
     monkeypatch.setenv("FLAKY_FAIL", "1")
     with pytest.raises(RuntimeError, match="boom"):
-        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)  # writes `source`/`parts`, then dies
+        remote_run(FlakyFlow, repo=repo, use_processes=False)  # writes `source`/`parts`, then dies
     monkeypatch.setenv("FLAKY_FAIL", "0")
-    good = FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+    good = remote_run(FlakyFlow, repo=repo, use_processes=False)
 
     space = _space(s3cfg, FlakyFlow)
     cat = lakemod.Catalog(space)
@@ -130,8 +130,8 @@ def test_backfill_restores_runs_manifests_and_registrations(s3cfg, repo, tmp_pat
     assert lakemod.backfill(FlakyFlow, space, replace=True) == 2  # rebuild over an existing catalog
 
 
-def test_schema_drift_reports_missing_changed_and_unexpected_columns(s3cfg, repo):
-    LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+def test_schema_drift_reports_missing_changed_and_unexpected_columns(remote_run, s3cfg, repo):
+    remote_run(LakeFlow, repo=repo, use_processes=False)
     space = _space(s3cfg)
 
     assert schema_drift(LakeFlow, space) == []
@@ -147,9 +147,9 @@ def test_schema_drift_reports_missing_changed_and_unexpected_columns(s3cfg, repo
 # --- the publish lake -------------------------------------------------------
 
 
-def test_publish_replaces_atomically_and_records_provenance(s3cfg, repo):
+def test_publish_replaces_atomically_and_records_provenance(remote_run, s3cfg, repo):
     """One run, four publishes: atomic replace, staging, and the provenance table."""
-    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+    run_id = remote_run(LakeFlow, repo=repo, use_processes=False)
     lake, target = publish_lake(s3cfg)
 
     LakeFlow.publish(run_id, "items", "blessed", config=s3cfg)
@@ -188,8 +188,8 @@ def test_publish_replaces_atomically_and_records_provenance(s3cfg, repo):
     con.close()
 
 
-def test_publish_of_an_empty_fanout_step_is_a_typed_zero_row_table(s3cfg, repo):
-    run_id = EmptyFanFlow.run(s3cfg, repo=repo, use_processes=False)
+def test_publish_of_an_empty_fanout_step_is_a_typed_zero_row_table(remote_run, s3cfg, repo):
+    run_id = remote_run(EmptyFanFlow, repo=repo, use_processes=False)
     EmptyFanFlow.publish(run_id, "work", "blessed_work", config=s3cfg)
 
     lake, target = publish_lake(s3cfg)
@@ -199,8 +199,8 @@ def test_publish_of_an_empty_fanout_step_is_a_typed_zero_row_table(s3cfg, repo):
     con.close()
 
 
-def test_publish_to_another_bucket(s3cfg, repo):
-    run_id = LakeFlow.run(s3cfg, repo=repo, use_processes=False)
+def test_publish_to_another_bucket(remote_run, s3cfg, repo):
+    run_id = remote_run(LakeFlow, repo=repo, use_processes=False)
     other = f"{s3cfg.bucket}-pub"
     Store.of(s3cfg).client.create_bucket(Bucket=other)
     dest = f"s3://{other}/consumers/stable"
@@ -214,11 +214,11 @@ def test_publish_to_another_bucket(s3cfg, repo):
     con.close()
 
 
-def test_publish_refuses_unknown_step_bad_names_and_incomplete_runs(s3cfg, repo, tmp_path, monkeypatch):
+def test_publish_refuses_unknown_step_bad_names_and_incomplete_runs(remote_run, s3cfg, repo, tmp_path, monkeypatch):
     monkeypatch.setenv("FLAKY_DIR", str(tmp_path))
     monkeypatch.setenv("FLAKY_FAIL", "1")
     with pytest.raises(RuntimeError, match="boom"):
-        FlakyFlow.run(s3cfg, repo=repo, use_processes=False)
+        remote_run(FlakyFlow, repo=repo, use_processes=False)
     failed = FlakyFlow.duck(s3cfg).sql("SELECT run_id FROM ledger").fetchone()[0]
 
     with pytest.raises(RuntimeError, match="did not complete"):
