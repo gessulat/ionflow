@@ -393,6 +393,8 @@ def run(
     always pass it). Resume always produces a NEW run — its manifest
     references the origin's completed parts, and it computes only the rest.
     """
+    if not config.local_dir:
+        raise ValueError("runs require a local store; configure local_dir and optional remote")
     if allow_commit_drift and not resume:
         raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
     if resume and (params or artifacts):
@@ -414,6 +416,10 @@ def run(
     if resume and resume != "latest" and origin_row is None:
         raise RuntimeError(f"origin run not found: {resume}")
     origin_run_id = origin_row["run_id"] if origin_row else None  # "latest" with no origin: fresh
+    from .artifact import MissingPayload
+
+    if origin_row and not cat.availability()[origin_row["run_id"]]["local"]:
+        raise MissingPayload(f"run {origin_run_id}: download this run before resuming")
 
     manifest = Manifest()
     origin = Manifest.from_rows(origin_rows)  # the origin run's parts, empty on a fresh run
@@ -456,6 +462,13 @@ def run(
     params = flow_cls.resolve_params(params)
     declarations = flow_cls.Inputs.declarations() if flow_cls.Inputs else {}
     artifact_inputs = origin_row["artifacts"] if origin_row else Artifacts(store).bind(declarations, artifacts)
+    for value in artifact_inputs.values():
+        for ref in value if isinstance(value, list) else [value]:
+            if any(
+                not store.exists(f"{config.prefix}/artifacts/_blobs/sha256/{f['sha256']}")
+                for f in ref["content"]["files"]
+            ):
+                raise MissingPayload(f"{ref['id']}: download this artifact before starting a run")
     bindings(Artifacts(store), artifact_inputs, declarations)
 
     record = RunRecord(
@@ -474,7 +487,7 @@ def run(
         """One catalog commit + the meta recovery export; no-op when unchanged."""
         if not (pending or pending_activities or row or genesis):
             return
-        cat.commit_run(
+        committed = cat.commit_run(
             run_id,
             row=record.row() if row else None,
             rows=list(pending),
@@ -483,7 +496,12 @@ def run(
         )
         pending.clear()
         pending_activities.clear()
-        space.write_meta(run_id, record.meta(manifest, activities))
+        space.write_meta(
+            run_id, record.meta(manifest, activities) | {"version": committed["version"], "files": committed["files"]}
+        )
+        from .storage import request_refresh
+
+        request_refresh(config)
 
     # genesis + the running row + upfront reuse, atomically, before any part
     # object exists: a run implies a catalog
@@ -496,7 +514,7 @@ def run(
 
     workers = max_workers or os.cpu_count() or 1
     shared = {
-        "config": asdict(config),
+        "config": asdict(config) | {"remote": None},
         "file": inspect.getfile(flow_cls),
         "flow": flow_cls.__name__,  # for getattr after the file import
         "flow_id": flow_cls.flow_id(),  # for the Space; see _bound

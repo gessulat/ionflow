@@ -16,14 +16,14 @@ from .config import (
     ConfigMissing,
     config_from_setup,
     read_config,
-    resolve_local_dir,
     write_config,
 )
 from .query import ledger_with_liveness, step_stats
 from .space import Space
+from .storage import Storage, execute_transfer, plan_transfer, remote_config
 from .store import Store, parse_dest
 
-app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3 (or a local directory)")
+app = typer.Typer(add_completion=False, help="ionflow: local-first typed flows with optional S3 sharing")
 artifact_app = typer.Typer(help="Shared, typed files and bundles")
 app.add_typer(artifact_app, name="artifacts")
 
@@ -55,11 +55,6 @@ def _config_or_setup():
             raise typer.Exit(0) from None
         typer.echo("No ionflow config found. Run `ionflow setup`.")
         raise typer.Exit(1) from None
-    if not cfg.local_dir and not Store.credentials():
-        typer.echo(
-            "No AWS credentials found. Provide them via environment variables, ~/.aws/credentials, or an IAM role."
-        )
-        raise typer.Exit(1)
     return cfg
 
 
@@ -76,8 +71,7 @@ def setup(
     local: bool = typer.Option(
         False,
         "--local",
-        help="Local mode: store everything in a directory instead of an S3 bucket (no credentials needed); "
-        "move to a bucket later with `ionflow sync`",
+        help="Skip the optional remote prompt",
     ),
 ):
     """Configure the store for this repo (writes .ionflow/config)."""
@@ -89,29 +83,18 @@ def setup(
         root = Path(root)
 
     cur = read_config(str(root))
-    if local:
-        local_dir = typer.prompt("Local store directory", default=cur.get("local_dir", f"{CONFIG_DIR}/data"))
-        flows = typer.prompt(
-            "Flows package for the TUI (e.g. myproject.flows, blank to skip)", default=cur.get("flows", "")
-        )
-        cfg = Config(local_dir=local_dir, prefix=cur.get("prefix", "ionflow"), flows=flows or None)
-        # resolve exactly like Config.load will, so what we verify is what runs use
-        ok, msg = Store.verify(Config(local_dir=resolve_local_dir(root, local_dir)))
-        typer.echo(("OK: " if ok else "Warning: ") + msg)
-    else:
-        vals = {}
-        for key, label, default in SETUP_FIELDS:
-            preset = cur.get(key, default)  # None (required) prompts until non-empty
-            vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
-        cfg = config_from_setup(vals)
-
-        if not Store.credentials():
-            typer.echo("Warning: no AWS credentials found (env / ~/.aws / IAM). Set them before running.")
-        else:
-            ok, msg = Store.verify(cfg)
-            typer.echo(("OK: " if ok else "Warning: ") + msg)
+    vals = {}
+    for key, label, default in SETUP_FIELDS:
+        if local and key in ("remote", "endpoint", "region", "prefix"):
+            vals[key] = cur.get(key, default)
+            continue
+        preset = cur.get(key, default)
+        vals[key] = typer.prompt(label, default=preset, show_default=bool(preset))
+    cfg = config_from_setup(vals)
 
     typer.echo(f"\nWrote {write_config(root, cfg)}")
+    ok, msg = Store.verify(Config.load(root))
+    typer.echo(("OK: " if ok else "Warning: ") + msg)
 
     if typer.confirm(f"Add {CONFIG_DIR}/ to .gitignore (keep it local)?", default=True):
         _add_to_gitignore(root)
@@ -233,8 +216,11 @@ def publish(
 @app.command()
 def ls(flow: str):
     """List runs recorded in the ledger (stale running runs are marked)."""
-    rel = ledger_with_liveness(_load(flow), _config_or_setup())
-    rel.project("run_id, status, started, finished, commit").order("started").show()
+    cfg = _config_or_setup()
+    if cfg.local_dir:
+        Storage(cfg).refresh()
+    rel = ledger_with_liveness(_load(flow), cfg)
+    rel.project("run_id, status, started, finished, commit, local, s3").order("started").show()
 
 
 @app.command()
@@ -263,20 +249,45 @@ def stats(flow: str, run_id: str = typer.Argument(None, help="defaults to the la
 
 @app.command()
 def sync(
-    flow: str,
-    to: str = typer.Option(..., "--to", help="Target bucket as s3://bucket[/prefix] (prefix defaults to the config's)"),
+    flow: str = typer.Argument(None, help="Flow as module:ClassName; omit for artifact-only transfers"),
+    to: str = typer.Option(None, "--to", help="Explicit upload destination; otherwise use the configured remote"),
     endpoint: str = typer.Option(None, "--endpoint", help="S3 endpoint URL (blank for AWS)"),
     region: str = typer.Option("us-east-1", "--region"),
     run_id: str = typer.Option(None, "--run", help="Copy one run and its complete reference closure"),
+    artifact: list[str] = typer.Option([], "--artifact", help="Artifact ID to transfer (repeatable)"),
+    down: bool = typer.Option(False, "--down", help="Download from the configured remote"),
+    plan: bool = typer.Option(False, "--plan", help="Print the transfer plan without copying payloads"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Approve the displayed transfer direction"),
 ):
-    """Copy FLOW's history and dependencies to a store without changing the source."""
+    """Explicitly upload or download a run or selected artifacts."""
     cfg = _config_or_setup()
-    target = _destination(cfg, to, endpoint, region)
-    cls = _load(flow)
-    src = Space.for_flow(Store.of(cfg), cls)
-    dst = Space.for_flow(Store.of(target), cls)
-    n = src.sync_to(dst, cls, run_id=run_id)
-    typer.echo(f"synced {n['copied']} objects, {n['runs']} ledger run(s) to {dst.store.uri(target.prefix)}")
+    if not flow and not artifact:
+        raise typer.BadParameter("select a flow or at least one --artifact")
+    if down and to:
+        raise typer.BadParameter("--to selects an upload; omit it with --down")
+    flow_id = _load(flow).flow_id() if flow else None
+    workspace = Storage(cfg)
+    selection = (
+        plan_transfer(workspace.local, Store.of(_destination(cfg, to, endpoint, region)), flow_id, run_id, artifact)
+        if to
+        else workspace.plan("down" if down else "up", flow_id, run_id, artifact)
+    )
+    typer.echo(json.dumps(selection.summary()))
+    if plan:
+        return
+    if not yes and not typer.confirm("Transfer these payloads in the displayed direction?", default=False):
+        raise typer.Abort()
+    result = execute_transfer(selection) if to else workspace.transfer(selection)
+    typer.echo(json.dumps(result))
+
+
+@app.command()
+def refresh():
+    """Synchronize ledger, inventory and lineage metadata without payloads."""
+    result = Storage(_config_or_setup()).refresh()
+    typer.echo(json.dumps(result))
+    if result["error"] or result["conflicts"]:
+        raise typer.Exit(1)
 
 
 def _destination(cfg, to, endpoint=None, region="us-east-1"):
@@ -310,13 +321,18 @@ def artifact_add(
 @artifact_app.command("ls")
 def artifact_ls(kind: str = typer.Option(None, "--kind")):
     """List inventory without importing a consuming flow."""
-    typer.echo(json.dumps(Artifacts(_config_or_setup()).records(kind), indent=2))
+    workspace = Storage(_config_or_setup())
+    workspace.refresh()
+    typer.echo(json.dumps(workspace.artifacts(kind), indent=2))
 
 
 @artifact_app.command("show")
-def artifact_show(artifact_id: str):
+def artifact_show(
+    artifact_id: str, s3: bool = typer.Option(False, "--s3", help="Inspect the remote metadata revision")
+):
     """Show a reference and its current metadata."""
-    typer.echo(json.dumps(Artifacts(_config_or_setup()).get(artifact_id).snapshot(), indent=2))
+    config = _config_or_setup()
+    typer.echo(json.dumps(Artifacts(remote_config(config) if s3 else config).get(artifact_id).snapshot(), indent=2))
 
 
 @artifact_app.command("update")
@@ -331,6 +347,20 @@ def artifact_update(
         artifact_id, revision=revision, name=name, metadata=json.loads(metadata) if metadata is not None else None
     )
     typer.echo(json.dumps(ref.snapshot(), indent=2))
+
+
+@artifact_app.command("resolve")
+def artifact_resolve(
+    artifact_id: str,
+    prefer: str = typer.Option(..., "--prefer", help="Metadata to retain: local or s3"),
+    local_revision: int = typer.Option(..., "--local-revision"),
+    s3_revision: int = typer.Option(..., "--s3-revision"),
+):
+    """Resolve a metadata conflict after inspecting both revisions; copy no payloads."""
+    record = Storage(_config_or_setup()).resolve_artifact(
+        artifact_id, prefer=prefer, local_revision=local_revision, remote_revision=s3_revision
+    )
+    typer.echo(json.dumps(record, indent=2))
 
 
 @artifact_app.command("path")
@@ -367,11 +397,19 @@ def artifact_sync(
     to: str = typer.Option(..., "--to"),
     endpoint: str = typer.Option(None, "--endpoint"),
     region: str = typer.Option("us-east-1", "--region"),
+    plan: bool = typer.Option(False, "--plan", help="Show the transfer without copying payloads"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Approve this upload"),
 ):
     """Copy selected artifacts and their parents; omit IDs to copy the inventory."""
     cfg = _config_or_setup()
-    n = Artifacts(cfg).sync_to(Artifacts(_destination(cfg, to, endpoint, region)), artifact_id or None)
-    typer.echo(f"synced {n} artifact(s)")
+    ids = artifact_id or [r["id"] for r in Artifacts(cfg).records()]
+    selection = plan_transfer(Store.of(cfg), Store.of(_destination(cfg, to, endpoint, region)), artifact_ids=ids)
+    typer.echo(json.dumps(selection.summary()))
+    if plan:
+        return
+    if not yes and not typer.confirm("Upload these payloads in the displayed direction?", default=False):
+        raise typer.Abort()
+    typer.echo(json.dumps(execute_transfer(selection)))
 
 
 @artifact_app.command("recover")

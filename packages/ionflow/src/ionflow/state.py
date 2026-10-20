@@ -10,7 +10,19 @@ from dataclasses import dataclass, field
 
 # The `runs` table's column names — reserved against params/Ledger collisions.
 BASE_COLS = frozenset(
-    {"run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom", "artifacts"}
+    {
+        "run_id",
+        "status",
+        "started",
+        "finished",
+        "commit",
+        "origin_run_id",
+        "params",
+        "custom",
+        "artifacts",
+        "local",
+        "s3",
+    }
 )
 
 
@@ -116,9 +128,7 @@ class RunRecord:
 
     @property
     def _ok(self):
-        """True once the run is complete. A failed run keeps its finish time in
-        the ledger row, but must not claim custom results — nor a `finished` in
-        meta, which publish would read as the success flag."""
+        """Only successful runs claim custom result values."""
         return self.status == "complete"
 
     def row(self):
@@ -144,7 +154,7 @@ class RunRecord:
             "run_id": self.run_id,
             "status": self.status,
             "started": self.started.isoformat(),
-            "finished": self.finished.isoformat() if ok and self.finished else None,
+            "finished": self.finished.isoformat() if self.finished else None,
             "commit": self.commit,
             "origin_run_id": self.origin_run_id,
             "manifest": manifest.meta(),

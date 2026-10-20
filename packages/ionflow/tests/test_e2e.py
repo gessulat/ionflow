@@ -10,9 +10,9 @@ from ionflow.space import Space
 from ionflow.store import Store
 
 
-def test_run_end_to_end(anycfg, repo):
-    run_id = EmbedDocs.run(anycfg, repo=repo, use_processes=False)
-    con = EmbedDocs.duck(anycfg)
+def test_run_end_to_end(cfg, repo):
+    run_id = EmbedDocs.run(cfg, repo=repo, use_processes=False)
+    con = EmbedDocs.duck(cfg)
 
     # fan-out produced one part per source, aggregated back to a summary
     summary = con.sql(f"SELECT * FROM summary WHERE run_id = '{run_id}'").fetchall()
@@ -51,15 +51,15 @@ def test_run_end_to_end(anycfg, repo):
     from ionflow.store import Store
     from ionflow.tui import scan_runs
 
-    store = Store.of(anycfg)
+    store = Store.of(cfg)
     assert scan_runs(store) == {EmbedDocs.flow_id()}
     assert schema_drift(EmbedDocs, Space.for_flow(store, EmbedDocs)) == []
 
 
 @pytest.mark.slow
-def test_run_with_processes(s3cfg, repo):
-    run_id = EmbedDocs.run(s3cfg, repo=repo, use_processes=True, max_workers=2)
-    con = EmbedDocs.duck(s3cfg)
+def test_run_with_processes(cfg, repo):
+    run_id = EmbedDocs.run(cfg, repo=repo, use_processes=True, max_workers=2)
+    con = EmbedDocs.duck(cfg)
     n_docs = con.sql(f"SELECT n_docs FROM summary WHERE run_id = '{run_id}'").fetchone()[0]
     assert n_docs == 4
     # branch workers (separate processes) contribute per-branch samples
@@ -75,24 +75,24 @@ def test_run_with_processes(s3cfg, repo):
     assert totals[5] == 2  # processes
 
 
-def test_dirty_git_refused(s3cfg, clean_repo):
+def test_dirty_git_refused(cfg, clean_repo):
     pathlib.Path(clean_repo, "dirty.txt").write_text("x")  # untracked -> dirty
     with pytest.raises(DirtyRepoError):
-        EmbedDocs.run(s3cfg, repo=clean_repo)
+        EmbedDocs.run(cfg, repo=clean_repo)
 
 
-def test_resume_refuses_commit_drift(s3cfg, clean_repo):
+def test_resume_refuses_commit_drift(cfg, clean_repo):
     from conftest import _git
     from flows import EmptyFanFlow
 
-    origin = EmptyFanFlow.run(s3cfg, repo=clean_repo, use_processes=False)
+    origin = EmptyFanFlow.run(cfg, repo=clean_repo, use_processes=False)
     pathlib.Path(clean_repo, "flow.py").write_text("# changed\n")
     _git(clean_repo, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-am", "fix")
 
     with pytest.raises(runner.CommitDriftError, match="allow_commit_drift"):
-        EmptyFanFlow.run(s3cfg, repo=clean_repo, resume=origin, use_processes=False)
+        EmptyFanFlow.run(cfg, repo=clean_repo, resume=origin, use_processes=False)
     with pytest.warns(UserWarning, match="different commit"):
-        resumed = EmptyFanFlow.run(s3cfg, repo=clean_repo, resume=origin, use_processes=False, allow_commit_drift=True)
+        resumed = EmptyFanFlow.run(cfg, repo=clean_repo, resume=origin, use_processes=False, allow_commit_drift=True)
     assert resumed != origin
 
 
@@ -113,6 +113,8 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
         "custom",
         "artifacts",
         "activities",
+        "version",
+        "files",
     ]
     # the manifest maps (step, item key) -> the part object holding it
     assert {s: [k for k, _ in pairs] for s, pairs in meta["manifest"].items()} == {

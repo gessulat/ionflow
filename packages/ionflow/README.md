@@ -11,8 +11,7 @@
 A barebones [Metaflow](https://metaflow.org) alternative. A **flow is a class**, a
 **step is a method**, and each step returns a **typed table or artifact**. Tables
 persist as Parquet; artifacts are shared files or bundles. No Kubernetes, no
-scheduler, no metadata server — the only thing you
-configure is one S3-compatible bucket.
+scheduler, no metadata server. Execution is local-first, with an optional S3 peer.
 
 - **The DAG is the method signatures.** A step's parameters name its upstream steps.
   No `self.next(...)`.
@@ -45,55 +44,73 @@ Run the wizard once per repo:
 ionflow setup
 ```
 
-It asks for your bucket (and optional prefix / endpoint / region) and writes them to
-`.ionflow/config` at the repo root — a small TOML file, no secrets in it. It also asks
-whether to gitignore `.ionflow/` (keep it local) or commit it (share with your team).
-Re-run `ionflow setup` any time to change it.
+The wizard creates a required local store and optionally connects a remote.
+Settings live in `.ionflow/config`; credentials remain in the standard AWS chain.
+Relative local paths resolve against the project root.
 
-**Credentials** come from the standard AWS chain (environment variables, `~/.aws/credentials`,
-or an IAM role) and are never written to the repo. `ionflow setup` just checks they resolve
-and that the bucket is reachable. Any command guides you into `setup` if the repo isn't
-configured yet.
-
-```
-# .ionflow/config
-bucket   = "my-bucket"
-prefix   = "ionflow"
-endpoint = "https://…"   # omit for AWS S3; set for MinIO / R2
-region   = "us-east-1"
+```toml
+local_dir = ".ionflow/data"
+prefix = "ionflow"
+remote = "s3://my-bucket/ionflow"  # optional; a directory is also supported
+region = "us-east-1"
+# endpoint = "https://…"        # optional S3-compatible endpoint
 ```
 
-### No bucket yet? Start local
+All execution writes locally. S3 is never the execution store. A bucket-only
+`Config` describes a low-level transfer endpoint, not a runnable workspace.
+`ionflow setup --local` skips the remote prompt.
+
+Metadata refresh shares ledger rows, descriptors, properties, bindings and lineage.
+It copies no step tables, metrics or artifact blobs. The ledger and artifact
+inventory include built-in `local` and `s3` Boolean columns. The TUI displays them
+as local and S3, with ✓ for complete payloads and ○ for absent or incomplete ones.
+Click an absent indicator to review and confirm that transfer direction.
 
 ```bash
-ionflow setup --local
+ionflow refresh
+ionflow sync mymodule:EmbedDocs --run RUN_ID --plan
+ionflow sync mymodule:EmbedDocs --run RUN_ID --yes
+ionflow sync mymodule:EmbedDocs --run RUN_ID --down --yes
+ionflow sync --artifact TYPE:HASH --down --plan
 ```
 
-Local mode stores **everything** — runs, artifacts, ledger, catalog, metrics, the publish
-lake — in a plain directory (default `.ionflow/data/`, gitignored) instead of a
-bucket. No credentials, no endpoint, no infrastructure at all; every other
-command (`run`, `query`, `stats`, `publish`, resume, the TUI) works identically:
+Uploads and downloads include required artifact parents and reused table parts.
+They do not include unrelated descendants. Plans show the source, destination,
+missing file count and bytes. Omit `--yes` to confirm interactively.
+`--to s3://bucket/prefix` selects an explicit upload destination.
 
-```
-# .ionflow/config
-local_dir = ".ionflow/data"   # relative paths anchor at the repo root
-prefix    = "ionflow"
+Refresh is automatic during execution and while the TUI is open. `ls` and
+`artifacts ls` also refresh metadata. Offline work stays usable; refresh errors
+retain last-known inventory and presence. Reconnect and refresh to reconcile
+pending changes. There is no permanent background daemon.
+
+```python
+from ionflow import Config, Storage
+
+storage = Storage(Config.load())
+storage.refresh()  # metadata only
+plan = storage.plan("down", flow_id="mymodule.EmbedDocs", run_id="RUN_ID")
+print(plan.summary())  # present this before approval
+storage.transfer(plan)  # explicit payload transfer
 ```
 
-When you later have a bucket, push each flow's accumulated history into it and
-switch over:
+A run is present when its committed snapshot and required dependencies are
+available. An artifact is present when all payload members are available.
+Metadata alone does not imply presence. Another workstation can advertise
+metadata before uploading its payload, so both indicators can be absent.
+
+Concurrent artifact edits are reported, never silently overwritten. Inspect
+both revisions, then resolve explicitly without copying any payload:
 
 ```bash
-ionflow sync mymodule:EmbedDocs --to s3://my-bucket        # repeatable; add --endpoint for MinIO/R2
-ionflow setup                                              # point the config at the bucket
+ionflow artifacts show TYPE:HASH
+ionflow artifacts show TYPE:HASH --s3
+ionflow artifacts resolve TYPE:HASH --prefer local --local-revision 2 --s3-revision 2
 ```
 
-`sync` copies referenced artifacts and immutable run folders, then merges the
-receiving catalog from recovery records. It follows cross-run table references
-and preserves existing destination history. Re-running it is safe. The source
-store is left untouched.
-Local mode is single-machine by design: CAS commits serialize on a file lock,
-which coordinates processes on one host, not a team on a shared drive.
+Local stores coordinate processes on one host through a file lock. Do not use
+one local directory as a multi-host shared drive. There is no legacy layout
+or configuration migration; recreate development stores.
 
 ## Shared artifacts
 
@@ -155,7 +172,9 @@ ordered references. Duplicate fan-out IDs are refused.
 
 References expose `.id`, `.name`, `.metadata`, `.revision`, `.uri`, and
 `.local_path()`. File URIs name the blob; bundle URIs name its descriptor.
-Materialized paths are verified and read-only. Build into a work directory.
+Workspace references use local payloads. Missing payloads require an explicit
+download before materialization or execution. Materialized paths are verified
+and read-only. Build into a work directory.
 `inventory.evict(id)` removes only the disposable local cache entry.
 
 Table-producing steps can track dynamic inputs and side outputs:
@@ -200,16 +219,16 @@ ionflow artifacts path TYPE:HASH
 ionflow artifacts lineage TYPE:HASH
 ionflow artifacts update TYPE:HASH --revision 1 --name reference
 ionflow artifacts query 'SELECT * FROM artifact_bindings'
-ionflow artifacts sync TYPE:HASH --to s3://bucket/prefix
-ionflow sync examples.artifacts:CountWords --run RUN_ID --to s3://bucket/prefix
+ionflow artifacts sync TYPE:HASH --to s3://bucket/prefix --plan
+ionflow sync examples.artifacts:CountWords --run RUN_ID --to s3://bucket/prefix --yes
 ionflow artifacts recover
 ```
 
 Repeat `--artifact NAME=ID` for collections. Import schemas use `module:ClassName`;
 `--metadata` accepts a JSON object. Inventory queries need no consuming flow.
 
-Sync supports local and S3 stores and different prefixes. It copies referenced
-artifact parents and cross-run table parts before exposing receiving run records.
+Explicit payload sync supports local and S3 stores and different prefixes. It copies
+artifact parents and cross-run table parts before marking the receiving snapshot present.
 Metadata conflicts are reported, not overwritten. Artifact-only sync carries
 producer evidence even when its flow history is absent. Run catalogs take
 precedence over those portable producer records.
@@ -307,7 +326,7 @@ Wide or generated schemas don't have to be written out by hand —
 `Table.make("FullAnnotation", {"peptide": str, **{f"frag_{i}": float | None for i in range(200)}})`
 builds the same kind of class programmatically.
 
-Step inputs arrive as **lazy DuckDB relations** over the Parquet on S3 — column and
+Step inputs arrive as **lazy DuckDB relations** over local Parquet — column and
 filter pushdown included, so a step only pulls what its query touches and memory
 stays at the query's working set, not the input's size. Stay in SQL (`.aggregate`,
 `.filter`, `.project`) or materialize with `.pl()` / `.df()` / `.to_arrow_table()`
@@ -432,8 +451,10 @@ params round-trip JSON and the command line.
 ## Query every run as one database
 
 `duck()` returns a DuckDB connection with a **view per step** plus a `ledger` view.
-Views derive from the flow's **DuckLake catalog** (attached read-only as a
-consistent snapshot), so a new run shows up with nothing to sync — `run_id` is a
+Views derive from the flow's **DuckLake catalog**, attached read-only as a
+consistent snapshot. The ledger includes all known runs; step views contain only
+locally available run snapshots. SQL does not fetch missing remote outputs.
+Run-specific previews and resume reject unavailable snapshots. `run_id` is a
 column, and a part reused across resumed runs appears under every run that
 references it. Anyone with stock DuckDB can attach the catalog directly, no
 ionflow needed — `lake.<step>` is the corpus (each part once, under the run that
@@ -442,7 +463,7 @@ up each run:
 
 ```sql
 INSTALL ducklake; LOAD ducklake;
-ATTACH 'ducklake:s3://bucket/prefix/mymodule.EmbedDocs/catalog.ducklake' AS lake (READ_ONLY);
+ATTACH 'ducklake:s3://bucket/prefix/runs/mymodule.EmbedDocs/catalog.ducklake' AS lake (READ_ONLY);
 ```
 
 ```python
@@ -643,12 +664,11 @@ SELECT * FROM pub.embeddings;
 ## Storage layout
 
 ```
-s3://<bucket>/<prefix>/<flow_id>/          # flow_id = module-qualified class name,
+<local-dir>/<prefix>/runs/<flow_id>/    # mirrored at s3://<bucket>/<prefix>/runs/<flow_id>/
   catalog.ducklake                         #   e.g. mymodule.EmbedDocs
   _lake/                                   # the flow's DuckLake catalog (schrein CAS
-  runs/                                    #   register): one table per step + `runs`
-    run_id=<id>/                           #   (the ledger) + `manifest` (run -> parts);
-      _meta.json                           #   _lake/ = catalog-owned files
+  run_id=<id>/                             #   register): typed parts + known-run metadata;
+      _meta.json                           #   _lake/ = catalog-owned metadata files
       docs/part_0.parquet                  # _meta.json = per-run recovery record
       by_source/part_arxiv.parquet   by_source/part_wiki.parquet
       vectors/part_arxiv.parquet     vectors/part_wiki.parquet
@@ -677,9 +697,8 @@ the old id.
 - **One level of fan-out** (kept deliberately small). A branch may be a whole sub-DAG
   of steps, run per item ("A branch can be a sub-DAG" above), but a fan-out inside a
   branch is not supported.
-- Reading from S3 uses DuckDB's `httpfs` extension, downloaded automatically on
-  first use (one-time, per DuckDB version) — the very first run needs network
-  access to the DuckDB extension repo.
+- Remote catalog access uses DuckDB's `httpfs` extension. Local execution does
+  not require S3 credentials. DuckDB extensions must be installed or cached.
 - Parallel branch workers split the machine fairly: each worker's DuckDB is capped
   to its share of cores and memory and spills to disk instead of OOMing.
 - **Backends**: AWS S3, MinIO (recent), Cloudflare R2. Backblaze B2 is unsupported (no

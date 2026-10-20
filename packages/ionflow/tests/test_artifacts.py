@@ -103,6 +103,7 @@ def test_recovery_and_sync_preserve_edits_and_parent_closure(localcfg, s3cfg, tm
     assert source.get(child.id).name == "edited"
     assert source.links() == target.links()
     target.update(child.id, revision=2, name="conflict")
+    source.update(child.id, revision=2, name="concurrent local edit")
     with pytest.raises(MetadataConflict):
         source.sync_to(target)
 

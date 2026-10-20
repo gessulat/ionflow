@@ -10,7 +10,8 @@ CONFIG_FILE = "config"
 # The setup wizard's fields — one spec drives both the CLI prompts and the TUI
 # form: (config key, prompt label, default). A None default means required.
 SETUP_FIELDS = [
-    ("bucket", "S3 bucket", None),
+    ("local_dir", "Local store directory", ".ionflow/data"),
+    ("remote", "Remote store (s3://bucket/prefix, blank to skip)", ""),
     ("prefix", "Key prefix", "ionflow"),
     ("endpoint", "S3 endpoint URL (blank for AWS)", ""),
     ("region", "Region", "us-east-1"),
@@ -21,7 +22,8 @@ SETUP_FIELDS = [
 def config_from_setup(vals):
     """Config from setup answers keyed like SETUP_FIELDS (blank optionals -> None)."""
     return Config(
-        bucket=vals["bucket"],
+        local_dir=vals["local_dir"],
+        remote=vals["remote"] or None,
         prefix=vals["prefix"],
         endpoint_url=vals["endpoint"] or None,
         region=vals["region"],
@@ -30,7 +32,7 @@ def config_from_setup(vals):
 
 
 class ConfigMissing(RuntimeError):
-    """Raised when no `.ionflow/config` (with a bucket or local_dir) can be found."""
+    """Raised when no workspace config or IONFLOW_LOCAL_DIR is available."""
 
 
 def find_config(start="."):
@@ -62,14 +64,16 @@ def write_config(root, cfg):
     # and JSON's string escapes are a subset of TOML basic-string escapes, so
     # quotes/backslashes/control chars in a value can't corrupt the file
     lines = []
-    if cfg.local_dir:
+    if cfg.local_dir is not None:
         lines.append(f"local_dir = {json.dumps(cfg.local_dir)}")
-    else:
+    if cfg.bucket:
         lines.append(f"bucket = {json.dumps(cfg.bucket)}")
+    if cfg.remote:
+        lines.append(f"remote = {json.dumps(cfg.remote)}")
     lines.append(f"prefix = {json.dumps(cfg.prefix)}")
     if cfg.endpoint_url:
         lines.append(f"endpoint = {json.dumps(cfg.endpoint_url)}")
-    if not cfg.local_dir:
+    if cfg.bucket or cfg.remote:
         lines.append(f"region = {json.dumps(cfg.region)}")
     if cfg.flows:
         lines.append(f"flows = {json.dumps(cfg.flows)}")
@@ -80,10 +84,10 @@ def write_config(root, cfg):
 
 @dataclass
 class Config:
-    """Store connection + layout config. The only thing ionflow needs to set up.
+    """Local workspace and optional metadata peer.
 
-    Exactly one of `bucket` (S3 mode) and `local_dir` (local mode — the whole
-    store is a plain directory, no bucket, no credentials) is set.
+    ``load`` always supplies a local directory. A bucket-only instance describes
+    a low-level S3 endpoint for Store and transfer operations, not a workspace.
 
     >>> Config(bucket="b").prefix
     'ionflow'
@@ -99,6 +103,7 @@ class Config:
     access_key: str | None = None
     secret_key: str | None = None
     local_dir: str | None = None  # local mode: absolute store root once loaded
+    remote: str | None = None
 
     @classmethod
     def load(cls, start="."):
@@ -110,23 +115,18 @@ class Config:
         """
         path = find_config(start)
         data = read_config(start)
-        # the store mode is picked per layer: any IONFLOW_BUCKET/LOCAL_DIR env
-        # var replaces the file's choice wholesale, never mixes with it
-        if os.environ.get("IONFLOW_BUCKET") or os.environ.get("IONFLOW_LOCAL_DIR"):
-            bucket, local_dir = os.environ.get("IONFLOW_BUCKET"), os.environ.get("IONFLOW_LOCAL_DIR")
-        else:
-            bucket, local_dir = data.get("bucket"), data.get("local_dir")
-        if not bucket and not local_dir:
+        local_dir = os.environ.get("IONFLOW_LOCAL_DIR") or data.get("local_dir")
+        remote = os.environ.get("IONFLOW_REMOTE") or data.get("remote")
+        if path is None and not local_dir and not remote:
             raise ConfigMissing("no ionflow config found; run `ionflow setup`")
-        if bucket and local_dir:
-            raise ValueError("config sets both `bucket` and `local_dir`; keep exactly one (see `ionflow sync`)")
-        if local_dir:
-            local_dir = resolve_local_dir(path.parent.parent if path else Path.cwd(), local_dir)
+        if data.get("bucket") or os.environ.get("IONFLOW_BUCKET"):
+            raise ValueError("configure local_dir and optional remote, not bucket; run `ionflow setup`")
+        local_dir = resolve_local_dir(path.parent.parent if path else Path.cwd(), local_dir or ".ionflow/data")
         return cls(
-            bucket=bucket,
             prefix=os.environ.get("IONFLOW_PREFIX") or data.get("prefix", "ionflow"),
             endpoint_url=os.environ.get("IONFLOW_ENDPOINT") or data.get("endpoint"),
             region=os.environ.get("AWS_DEFAULT_REGION") or data.get("region", "us-east-1"),
             flows=data.get("flows"),
             local_dir=local_dir,
+            remote=remote,
         )

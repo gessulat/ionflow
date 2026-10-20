@@ -23,11 +23,19 @@ _DDL = {
     "artifact_files": "artifact_id VARCHAR, path VARCHAR, digest VARCHAR, size BIGINT",
     "artifact_links": "parent VARCHAR, child VARCHAR, relation VARCHAR, source VARCHAR",
     "artifact_provenance": "activity_id VARCHAR, record VARCHAR",
+    "artifact_presence": "id VARCHAR, present BOOLEAN",
+    "artifact_peers": "peer VARCHAR, id VARCHAR, present BOOLEAN",
 }
 
 
 def _json(value: typing.Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def metadata_token(record: dict) -> str:
+    """Identity of an editable metadata revision, separate from payload identity."""
+    body = {k: record.get(k) for k in ("id", "name", "metadata", "revision", "history")}
+    return hashlib.sha256(_json(body).encode()).hexdigest()
 
 
 def _member(name: str) -> str:
@@ -123,6 +131,11 @@ def _check_record(record: dict) -> None:
         raise ValueError("artifact descriptor checksum mismatch")
     if not isinstance(record["name"], str) or type(record["revision"]) is not int or record["revision"] < 1:
         raise ValueError("invalid artifact metadata revision or name")
+    history = record.get("history", [])
+    if not isinstance(history, list) or any(
+        not isinstance(t, str) or not re.fullmatch(r"[0-9a-f]{64}", t) for t in history
+    ):
+        raise ValueError("invalid artifact revision ancestry")
     _member(record["filename"])
     if len(PurePosixPath(record["filename"]).parts) != 1:
         raise ValueError("artifact filename must be a basename")
@@ -179,7 +192,7 @@ class Artifact:
         }
         for hint in cls._fields.values():
             _spec(hint)
-        if collisions := set(cls._fields) & (set(dir(Artifact)) | {"run_id", "item_key"}):
+        if collisions := set(cls._fields) & (set(dir(Artifact)) | {"run_id", "item_key", "local", "s3"}):
             raise ValueError(f"reserved artifact metadata fields: {sorted(collisions)}")
         _KINDS[kind] = cls
 
@@ -265,6 +278,10 @@ class ArtifactInputs:
 
 class MetadataConflict(ValueError):
     """An edit or sync would overwrite a different metadata revision."""
+
+
+class MissingPayload(RuntimeError):
+    """Known metadata needs an explicit payload download before local use."""
 
 
 class Artifacts:
@@ -402,6 +419,7 @@ class Artifacts:
             "created": utc_now().isoformat(),
             "content": content,
             "schema": {k: _spec(v) for k, v in candidate._fields.items()},
+            "history": [],
         }
 
         def commit(con: typing.Any) -> None:
@@ -417,8 +435,12 @@ class Artifacts:
             self._insert(con, record)
 
         self.lake.commit(commit)
+        self.mark_present(artifact_id)
         ref = self.get(artifact_id, type(candidate))
         self._export(ref.snapshot())
+        from .storage import request_refresh
+
+        request_refresh(self.store.cfg)
         return typing.cast(A, ref)
 
     def update(
@@ -433,6 +455,7 @@ class Artifacts:
             "name": old.name if name is None else name,
             "metadata": values,
             "revision": revision + 1,
+            "history": [*old.snapshot().get("history", []), metadata_token(old.snapshot())],
         }
 
         def commit(con: typing.Any) -> None:
@@ -443,7 +466,89 @@ class Artifacts:
 
         self.lake.commit(commit)
         self._export(record)
+        from .storage import request_refresh
+
+        request_refresh(self.store.cfg)
         return self.get(artifact_id)
+
+    def availability(self, peer: str | None = None) -> dict[str, dict[str, bool]]:
+        """Payload presence here and at the last observed peer; metadata alone is absent."""
+        if self.lake.register.read()[0] is None:
+            return {}
+        with self.lake.read() as con:
+            return {
+                aid: {"local": bool(present), "s3": bool(remote)}
+                for aid, present, remote in con.execute(
+                    "SELECT a.id, p.present, r.present FROM lake.artifacts a "
+                    "LEFT JOIN lake.artifact_presence p ON p.id = a.id "
+                    "LEFT JOIN lake.artifact_peers r ON r.id = a.id AND r.peer = ?",
+                    [peer],
+                ).fetchall()
+            }
+
+    def mark_present(self, artifact_id: str) -> None:
+        """Record payload presence only after all members have been verified."""
+
+        def commit(con: typing.Any) -> None:
+            self._genesis(con)
+            con.execute("DELETE FROM lake.artifact_presence WHERE id = ?", [artifact_id])
+            con.execute("INSERT INTO lake.artifact_presence VALUES (?, true)", [artifact_id])
+
+        self.lake.commit(commit)
+
+    def merge_metadata(self, records: list[dict], peer: str | None = None, presence: dict | None = None) -> list[str]:
+        """Import descriptors without blobs; return divergent metadata IDs."""
+        conflicts = []
+        for record in records:
+            _check_record(record)
+        existing = {r["id"]: r for r in self.records()}
+        observed = self.availability(peer)
+        records = [
+            r
+            for r in records
+            if existing.get(r["id"]) != r
+            or (
+                peer is not None
+                and observed.get(r["id"], {}).get("s3", False) != bool((presence or {}).get(r["id"], {}).get("local"))
+            )
+        ]
+        if not records:
+            return []
+
+        def commit(con: typing.Any) -> None:
+            conflicts.clear()
+            self._genesis(con)
+            for record in records:
+                row = con.execute("SELECT record FROM lake.artifacts WHERE id = ?", [record["id"]]).fetchone()
+                old = json.loads(row[0]) if row else None
+                if old is None:
+                    self._insert(con, record)
+                elif (old["schema"], old["payload"], old["content"]) != (
+                    record["schema"],
+                    record["payload"],
+                    record["content"],
+                ):
+                    raise TypeError(f"{record['id']}: artifact schema or content differs")
+                elif metadata_token(old) in record.get("history", []):
+                    con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(record), record["id"]])
+                elif (old["name"], old["metadata"]) != (record["name"], record["metadata"]) and (
+                    metadata_token(record) not in old.get("history", [])
+                ):
+                    conflicts.append(record["id"])
+                if peer is not None:
+                    con.execute("DELETE FROM lake.artifact_peers WHERE peer = ? AND id = ?", [peer, record["id"]])
+                    con.execute(
+                        "INSERT INTO lake.artifact_peers VALUES (?, ?, ?)",
+                        [peer, record["id"], bool((presence or {}).get(record["id"], {}).get("local"))],
+                    )
+
+        if records:
+            self.lake.commit(commit)
+        for record in records:
+            if record["id"] not in conflicts:
+                self.store.put(self.directory(record["id"]) + "/content.json", _json(record["content"]).encode())
+                self._export(self.get(record["id"]).snapshot())
+        return conflicts
 
     def _cache_root(self) -> Path:
         namespace = hashlib.sha256(self.store.uri(self.root).encode()).hexdigest()
@@ -464,6 +569,8 @@ class Artifacts:
     def materialize(self, ref: Artifact) -> Path:
         """Download, verify, and atomically expose a complete shared cache entry."""
         record = ref.snapshot()
+        if any(not self.store.exists(f"{self.root}/_blobs/sha256/{f['sha256']}") for f in record["content"]["files"]):
+            raise MissingPayload(f"{ref.id}: payload unavailable here; download this artifact first")
         cache = self._cache_root()
         cache.mkdir(parents=True, exist_ok=True)
         dest = cache / record["id"].replace(":", "-")
@@ -548,16 +655,20 @@ class Artifacts:
 
     def activities(self) -> list[dict]:
         """Read execution lineage across flow catalogs without importing user code."""
-        records = {}
-        if self.lake.register.read()[0] is not None:
-            with self.lake.read() as con:
-                records = {k: json.loads(v) for k, v in con.sql("SELECT * FROM lake.artifact_provenance").fetchall()}
+        records = {self._activity_id(r): r for r in self.provenance()}
         for flow_id in self.store.flow_ids():
             with self.store.space(flow_id).lake().read() as con:
                 for run_id, body in con.sql("SELECT run_id, record FROM lake.artifact_activity").fetchall():
                     record = {"flow_id": flow_id, "run_id": run_id, **json.loads(body)}
                     records[self._activity_id(record)] = record
         return list(records.values())
+
+    def provenance(self) -> list[dict]:
+        """Portable producer evidence, including artifacts transferred without runs."""
+        if self.lake.register.read()[0] is None:
+            return []
+        with self.lake.read() as con:
+            return [json.loads(v) for (v,) in con.sql("SELECT record FROM lake.artifact_provenance").fetchall()]
 
     @staticmethod
     def _activity_id(record: dict) -> str:
@@ -651,9 +762,6 @@ class Artifacts:
             content = json.loads(self.store.get(self.directory(record["id"]) + "/content.json") or "null")
             if content != record["content"]:
                 raise ValueError(f"missing or conflicting descriptor: {record['id']}")
-            for member in content["files"]:
-                if not self.store.exists(f"{self.root}/_blobs/sha256/{member['sha256']}"):
-                    raise ValueError(f"missing blob: {member['sha256']}")
         links = [json.loads(self.store.get(k)) for k in self.store.list(self.root + "/_links/")]
 
         def commit(con: typing.Any) -> None:
@@ -666,6 +774,10 @@ class Artifacts:
                 con.execute(f"DELETE FROM lake.{table}")
             for record in records.values():
                 self._insert(con, record)
+                present = all(
+                    self.store.exists(f"{self.root}/_blobs/sha256/{m['sha256']}") for m in record["content"]["files"]
+                )
+                con.execute("INSERT INTO lake.artifact_presence VALUES (?, ?)", [record["id"], present])
             for values in links:
                 if not all(v in records for v in values[:2]):
                     raise ValueError("artifact relationship references missing content")
@@ -694,20 +806,29 @@ class Artifacts:
             record, old = records[aid], existing.get(aid)
             if old and (old["schema"], old["payload"]) != (record["schema"], record["payload"]):
                 raise TypeError(f"{aid}: source and target artifact schemas differ")
-            if old and (old["metadata"], old["name"]) != (record["metadata"], record["name"]):
+            if (
+                old
+                and (old["metadata"], old["name"]) != (record["metadata"], record["name"])
+                and (
+                    metadata_token(old) not in record.get("history", [])
+                    and metadata_token(record) not in old.get("history", [])
+                )
+            ):
                 raise MetadataConflict(f"{aid}: source and target metadata differ")
         for aid in sorted(wanted):
             record = records[aid]
-            if aid in existing:
-                continue
             for member in record["content"]["files"]:
                 key = f"_blobs/sha256/{member['sha256']}"
-                if not other.store.exists(f"{other.root}/{key}"):
+                info = other.store.stat(f"{other.root}/{key}")
+                if info is None or info["size"] != member["size"]:
                     with tempfile.TemporaryDirectory(prefix="ionflow-sync-") as tmp:
                         p = Path(tmp) / "blob"
                         self.store.download(f"{self.root}/{key}", str(p))
                         with p.open("rb") as f:
-                            if hashlib.file_digest(f, "sha256").hexdigest() != member["sha256"]:
+                            if (
+                                hashlib.file_digest(f, "sha256").hexdigest() != member["sha256"]
+                                or p.stat().st_size != member["size"]
+                            ):
                                 raise ValueError(f"artifact checksum mismatch: {aid}")
                         other.store.upload(f"{other.root}/{key}", str(p))
             other.store.put(other.directory(aid) + "/content.json", _json(record["content"]).encode())
@@ -717,13 +838,18 @@ class Artifacts:
                 row = con.execute("SELECT record FROM lake.artifacts WHERE id = ?", [record["id"]]).fetchone()
                 if row is None:
                     other._insert(con, record)
-                elif (
-                    json.loads(row[0])["metadata"] != record["metadata"] or json.loads(row[0])["name"] != record["name"]
-                ):
-                    raise MetadataConflict(f"{record['id']}: concurrent metadata edit during sync")
+                else:
+                    current = json.loads(row[0])
+                    if metadata_token(current) in record.get("history", []):
+                        con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(record), record["id"]])
+                    elif (current["metadata"], current["name"]) != (record["metadata"], record["name"]) and (
+                        metadata_token(record) not in current.get("history", [])
+                    ):
+                        raise MetadataConflict(f"{record['id']}: concurrent metadata edit during sync")
 
             other.lake.commit(commit)
-            other._export(record if aid not in existing else existing[aid])
+            other.mark_present(aid)
+            other._export(other.get(aid).snapshot())
         target_links = {tuple(values) for values in other.links()}
         for p, c, relation, source in links:
             if p in wanted and c in wanted and (p, c, relation, source) not in target_links:

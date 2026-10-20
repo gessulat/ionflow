@@ -23,5 +23,8 @@ __all__ = [
     "Branch",
     "Collect",
     "Config",
+    "Storage",
+    "MissingPayload",
 ]
-from .artifact import Artifact, ArtifactInputs, Artifacts, MetadataConflict
+from .artifact import Artifact, ArtifactInputs, Artifacts, MetadataConflict, MissingPayload
+from .storage import Storage

@@ -6,7 +6,7 @@ import pyarrow as pa
 
 from . import lake, metrics
 from .arrow import read_parquet_sql
-from .artifact import Artifacts
+from .artifact import Artifacts, MissingPayload
 from .dag import PATH_COL
 from .schema import _q
 from .space import Space, utc_now
@@ -69,12 +69,20 @@ def artifact_binding_rows(flow_id, rows):
 
 def artifact_views(con, registry, activities, inputs=()):
     """Attach metadata views without a second DuckLake attachment name or live writers."""
-    records = registry.records()
+    from .storage import Storage
+
+    records = (
+        Storage(registry.store.cfg).artifacts()
+        if registry.store.local_dir
+        else [r | registry.availability().get(r["id"], {}) for r in registry.records()]
+    )
     _json_view(con, "artifact_inventory", records)
     con.execute("""CREATE VIEW artifacts AS SELECT record->>'id' AS id, record->>'kind' AS kind,
         record->>'name' AS name, record->>'payload' AS payload, record->>'digest' AS digest,
         record->'metadata' AS metadata, (record->>'revision')::BIGINT AS revision,
-        (record->>'created')::TIMESTAMP AS created FROM artifact_inventory""")
+        (record->>'created')::TIMESTAMP AS created,
+        coalesce((record->>'local')::BOOLEAN, false) AS local,
+        coalesce((record->>'s3')::BOOLEAN, false) AS s3 FROM artifact_inventory""")
     files = [{"artifact_id": r["id"], **f} for r in records for f in r["content"]["files"]]
     _json_view(con, "artifact_members", files)
     con.execute("""CREATE VIEW artifact_files AS SELECT record->>'artifact_id' AS artifact_id,
@@ -166,12 +174,30 @@ def _step_view_sql(space, entries):
     )
 
 
-def _ledger_view(con, flow_cls, attached):
-    con.execute(f"CREATE VIEW ledger AS {ledger_sql(flow_cls, 'lake.runs' if attached else _EMPTY_RUNS)}")
+def _ledger_view(con, flow_cls, attached, config=None):
+    body = ledger_sql(flow_cls, "lake.runs" if attached else _EMPTY_RUNS)
+    if attached:
+        peer = None
+        if config and config.remote:
+            from .storage import Storage
+
+            peer = Storage(config).peer
+        flags = lake.Catalog(Space.for_flow(Store.of(config), flow_cls)).availability(peer)
+        _json_view(con, "run_locations", [{"run_id": rid, **v} for rid, v in flags.items()])
+        con.execute(
+            f"CREATE VIEW ledger AS SELECT l.*, coalesce((p.record->>'local')::BOOLEAN, false) AS local, "
+            f"coalesce((p.record->>'s3')::BOOLEAN, false) AS s3 FROM ({body}) l "
+            "LEFT JOIN run_locations p ON p.record->>'run_id' = l.run_id"
+        )
+    else:
+        con.execute(f"CREATE VIEW ledger AS SELECT *, false AS local, false AS s3 FROM ({body})")
 
 
 def step_rows(con, step, run_id, limit=100):
     """Preview of one step's output for one run (via the step's view)."""
+    present = con.execute("SELECT local FROM ledger WHERE run_id = ?", [run_id]).fetchone()
+    if present is not None and not present[0]:
+        raise MissingPayload(f"run {run_id}: download this run before reading outputs")
     return con.sql(f"SELECT * FROM {step} WHERE run_id = '{run_id}' LIMIT {limit}")
 
 
@@ -213,7 +239,7 @@ def is_stale(space, run_id, started):
 
 def _stale_running(con, space):
     """run_ids stuck in `running` whose heartbeat went quiet."""
-    rows = con.sql("SELECT run_id, started FROM ledger WHERE status = 'running'").fetchall()
+    rows = con.sql("SELECT run_id, started FROM ledger WHERE status = 'running' AND local").fetchall()
     return [r for r, s in rows if is_stale(space, r, s)]
 
 
@@ -226,7 +252,7 @@ def ledger_with_liveness(flow_cls, config, con=None):
     space = Space.for_flow(store, flow_cls)
     if con is None:  # ledger-only callers (ls) skip the step views entirely
         con = store.connect()
-        _ledger_view(con, flow_cls, lake.Catalog(space).attach_readonly(con))
+        _ledger_view(con, flow_cls, lake.Catalog(space).attach_readonly(con), config)
     stale = _stale_running(con, space)
     if not stale:
         return con.sql("SELECT * FROM ledger")
@@ -259,7 +285,11 @@ def duck(flow_cls, config):
             for r, v in con.sql("SELECT run_id, record FROM lake.artifact_activity").fetchall()
         ]
         by_step = {}
-        for run_id, step, path in con.sql("SELECT run_id, step, path FROM lake.manifest").fetchall():
+        for run_id, step, path in con.sql(
+            "SELECT m.run_id, m.step, m.path FROM lake.manifest m "
+            "JOIN lake.registered_parts p ON p.path = m.path "
+            "JOIN lake.run_versions v ON v.run_id = m.run_id WHERE v.present"
+        ).fetchall():
             by_step.setdefault(step, []).append((path, run_id))
         for name, step in flow_cls._dag.steps.items():
             if step.is_artifact:
@@ -281,7 +311,7 @@ def duck(flow_cls, config):
                 _artifact_step_view(con, name, step.output_table, [])
                 continue
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
-    _ledger_view(con, flow_cls, attached)
+    _ledger_view(con, flow_cls, attached, config)
     _metrics_view(con, space)
     artifact_views(con, Artifacts(store), activities, inputs)
     return con
