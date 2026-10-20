@@ -1,4 +1,4 @@
-"""The two DuckLakes ionflow keeps: every flow's catalog (decisions 0012/0019)
+"""Run-data DuckLakes: every flow's catalog (decisions 0012/0019)
 and the publish lake (decision 0009).
 
 Both are schrein DuckLakes driven by the same operations — genesis (typed
@@ -34,17 +34,21 @@ PROVENANCE = "publications"  # per-lake provenance table, appended on every publ
 # that the `ledger` view flattens against the flow's declarations at read time.
 RUNS_DDL = (
     "run_id VARCHAR NOT NULL, status VARCHAR NOT NULL, started TIMESTAMP NOT NULL, finished TIMESTAMP, "
-    '"commit" VARCHAR, origin_run_id VARCHAR, params VARCHAR, custom VARCHAR'
+    '"commit" VARCHAR, origin_run_id VARCHAR, params VARCHAR, custom VARCHAR, artifacts VARCHAR'
 )
 MANIFEST_DDL = "run_id VARCHAR NOT NULL, step VARCHAR NOT NULL, item_key VARCHAR NOT NULL, path VARCHAR NOT NULL"
-RUN_COLS = ("run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom")
-_RUNS_SELECT = 'SELECT run_id, status, started, finished, "commit", origin_run_id, params, custom FROM lake.runs'
+RUN_COLS = ("run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom", "artifacts")
+_RUNS_SELECT = (
+    'SELECT run_id, status, started, finished, "commit", origin_run_id, params, custom, artifacts FROM lake.runs'
+)
+ACTIVITY_DDL = "run_id VARCHAR, step VARCHAR, item_key VARCHAR, record VARCHAR"
 
 
 def _decode_run(row):
     row = dict(zip(RUN_COLS, row, strict=True))
     row["params"] = json.loads(row["params"] or "{}")
     row["custom"] = json.loads(row["custom"] or "{}")
+    row["artifacts"] = json.loads(row["artifacts"] or "{}")
     return row
 
 
@@ -102,10 +106,15 @@ class Catalog:
         steps = {
             name: _create(name, f"run_id VARCHAR NOT NULL, {step.output_table.persisted_ddl()}")
             for name, step in flow_cls._dag.steps.items()
+            if not step.is_artifact
         }
-        return steps | {"runs": _create("runs", RUNS_DDL), "manifest": _create("manifest", MANIFEST_DDL)}
+        return steps | {
+            "runs": _create("runs", RUNS_DDL),
+            "manifest": _create("manifest", MANIFEST_DDL),
+            "artifact_activity": _create("artifact_activity", ACTIVITY_DDL),
+        }
 
-    def _apply(self, con, run_id, row=None, rows=()):
+    def _apply(self, con, run_id, row=None, rows=(), activities=()):
         """One run's upsert, inside an open lake transaction: replace its ledger
         row, insert the manifest rows not already present (a replayed commit
         whose predecessor actually landed must not duplicate), and register the
@@ -115,6 +124,10 @@ class Catalog:
         if row is not None:
             con.execute("DELETE FROM lake.runs WHERE run_id = ?", [run_id])
             con.execute(f"INSERT INTO lake.runs VALUES ({', '.join('?' * len(RUN_COLS))})", row)
+        for record in activities:
+            args = [run_id, record["step"], json.dumps(record["key"])]
+            con.execute("DELETE FROM lake.artifact_activity WHERE run_id=? AND step=? AND item_key=?", args)
+            con.execute("INSERT INTO lake.artifact_activity VALUES (?, ?, ?, ?)", [*args, json.dumps(record)])
         if not rows:
             return
         have = set(con.execute("SELECT step, item_key FROM lake.manifest WHERE run_id = ?", [run_id]).fetchall())
@@ -129,7 +142,7 @@ class Catalog:
         for s, uris in files.items():
             _add_files(con, s, uris, hive=True)
 
-    def commit_run(self, run_id, row=None, rows=(), genesis=None):
+    def commit_run(self, run_id, row=None, rows=(), genesis=None, activities=()):
         """One CAS commit of a run's progress: optional genesis (pass the flow
         class), the run's ledger `row`, and `rows` — (step, item key, path)
         manifest triples with their new parts' registration. Atomic, so a
@@ -142,7 +155,7 @@ class Catalog:
             if genesis is not None:
                 for ddl in self._ddls(genesis).values():
                     con.execute(ddl)
-            self._apply(con, run_id, row, rows)
+            self._apply(con, run_id, row, rows, activities)
             con.execute("COMMIT")
 
         self.lake.commit(fn)
@@ -168,7 +181,13 @@ class Catalog:
             if r is None:
                 return None, []
             triples = con.execute("SELECT step, item_key, path FROM lake.manifest WHERE run_id = ?", [r[0]]).fetchall()
-        return _decode_run(r), [(s, json.loads(k), p) for s, k, p in triples]
+            activities = {
+                json.dumps([s, json.loads(k)]): json.loads(v)
+                for s, k, v in con.execute(
+                    "SELECT step, item_key, record FROM lake.artifact_activity WHERE run_id = ?", [r[0]]
+                ).fetchall()
+            }
+        return _decode_run(r) | {"activities": activities}, [(s, json.loads(k), p) for s, k, p in triples]
 
     def attach_readonly(self, con):
         """Download-then-attach the catalog on `con` as `lake` (snapshot-consistent);
@@ -205,6 +224,7 @@ def _meta_row(meta, run_id):
         meta.get("origin_run_id"),
         json.dumps(meta.get("params") or {}),
         json.dumps(meta.get("custom") or {}, default=str),
+        json.dumps(meta.get("artifacts") or {}),
     ]
 
 
@@ -226,14 +246,14 @@ def backfill(flow_cls, space, replace=False):
         meta = space.read_meta(run_id) or {}
         manifest = Manifest.from_meta(meta.get("manifest"))
         rows = [(slot.step, slot.key, path) for slot, path in manifest.slots() if slot.step in steps]
-        runs.append((run_id, _meta_row(meta, run_id), rows))
+        runs.append((run_id, _meta_row(meta, run_id), rows, list(meta.get("activities", {}).values())))
 
     def fn(con):
         con.execute("BEGIN")
         for ddl in cat._ddls(flow_cls).values():
             con.execute(ddl)
-        for run_id, row, rows in runs:
-            cat._apply(con, run_id, row, rows)
+        for run_id, row, rows, activities in runs:
+            cat._apply(con, run_id, row, rows, activities)
         con.execute("COMMIT")
 
     cat.lake.commit(fn)
@@ -249,6 +269,8 @@ def schema_drift(flow_cls, space):
     issues = []
     tables = Catalog(space).tables()
     for name, step in flow_cls._dag.steps.items():
+        if step.is_artifact:
+            continue
         if name not in tables:
             continue
         declared = {n: c.persisted_type() for n, c in step.output_table.columns().items()}
@@ -301,6 +323,8 @@ def publish(flow_cls, config, run_id, step, table, where=None, dest=None):
     """
     if step not in flow_cls._dag.steps:
         raise ValueError(f"unknown step '{step}' (steps: {', '.join(flow_cls._dag.steps)})")
+    if flow_cls._dag.steps[step].is_artifact:
+        raise ValueError("artifacts are already global; publish accepts table outputs only")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or table == PROVENANCE:
         raise ValueError(f"invalid published table name '{table}'")
     store = Store.of(config)

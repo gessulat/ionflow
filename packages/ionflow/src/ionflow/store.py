@@ -1,3 +1,4 @@
+import builtins
 import os
 import shutil
 import tempfile
@@ -97,6 +98,13 @@ class Store:
 
         return Space(self, self.prefix, flow_id)
 
+    def flow_ids(self) -> builtins.list[str]:
+        """Discover flow catalogs without importing their Python definitions."""
+        from .space import flow_id_of_catalog_key
+
+        prefix = self.prefix + "/runs/"
+        return sorted({n for k in self.list(prefix) if (n := flow_id_of_catalog_key(prefix, k)) is not None})
+
     def _client(self):
         raise NotImplementedError
 
@@ -124,6 +132,20 @@ class Store:
 
     def delete(self, key):
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def exists(self, key: str) -> bool:
+        """Whether a complete object is present, without fetching its body."""
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except ClientError as e:
+            if error_code(e) in MISSING_KEY_CODES:
+                return False
+            raise
+
+    def download(self, key: str, path: str) -> None:
+        """Stream an object into a caller-owned staging file."""
+        self.client.download_file(self.bucket, key, path)
 
     def list(self, prefix):
         pages = self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
@@ -211,6 +233,9 @@ class DirStore(Store):
 
     def uri(self, key):
         return f"{self.local_dir}/{key}"
+
+    def download(self, key: str, path: str) -> None:
+        shutil.copyfile(os.path.join(self.local_dir, key), path)
 
     def lake(self, prefix, data_subdir="data"):
         # "local" is a display label only (LocalClient ignores Bucket); it keeps

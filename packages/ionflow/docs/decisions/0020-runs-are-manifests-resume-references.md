@@ -49,5 +49,11 @@ paths under the new run_id — and copies nothing. Mechanics:
 - Step views enumerate part paths inline (DuckDB's `read_parquet` does not
   take subquery arguments), so `duck()` SQL grows with distinct part count.
   Fine at ionflow's scale; revisit with a macro/temp-table form if it hurts.
+
+NOTE (2026-10-20): [0022](0022-runs-and-artifacts-have-separate-namespaces.md)
+changes run directories to `<prefix>/runs/<flow_id>/run_id=<id>`.
+Artifact outputs use typed content IDs in manifests; table outputs retain concrete
+part keys. [0024](0024-artifact-lineage-commits-with-run-progress.md) preserves
+generation provenance when those outputs are reused.
 - Hive pruning by `run_id` on the old views is traded for exact
   manifest-driven membership. Filters inside a part still push down.

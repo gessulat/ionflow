@@ -1,7 +1,12 @@
+import json
+import typing
+
 import duckdb
+import pyarrow as pa
 
 from . import lake, metrics
 from .arrow import read_parquet_sql
+from .artifact import Artifacts
 from .dag import PATH_COL
 from .schema import _q
 from .space import Space, utc_now
@@ -11,7 +16,7 @@ from .store import Store
 _EMPTY_RUNS = (
     "(SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
     'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR AS origin_run_id, '
-    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom WHERE false)"
+    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom, NULL::VARCHAR AS artifacts WHERE false)"
 )
 
 
@@ -36,6 +41,113 @@ def _empty_view_sql(table):
     last, matching its position in the real views.
     """
     return f"SELECT *, NULL::VARCHAR AS run_id FROM ({table.empty()})"
+
+
+def _json_view(con, name, records):
+    """Bind small metadata records with a stable empty schema and JSON projection."""
+    con.register("__ionflow_" + name, pa.table({"body": pa.array([json.dumps(r) for r in records], type=pa.string())}))
+    con.execute(f"CREATE OR REPLACE VIEW {_q(name)} AS SELECT body::JSON AS record FROM __ionflow_{name}")
+
+
+def artifact_binding_rows(flow_id, rows):
+    records = []
+    for run_id, body in rows:
+        for role, value in json.loads(body or "{}").items():
+            many = isinstance(value, list)
+            for position, ref in enumerate(value if many else [value]):
+                records.append(
+                    {
+                        "flow_id": flow_id,
+                        "run_id": run_id,
+                        "role": role,
+                        "position": position if many else None,
+                        "artifact": ref,
+                    }
+                )
+    return records
+
+
+def artifact_views(con, registry, activities, inputs=()):
+    """Attach metadata views without a second DuckLake attachment name or live writers."""
+    records = registry.records()
+    _json_view(con, "artifact_inventory", records)
+    con.execute("""CREATE VIEW artifacts AS SELECT record->>'id' AS id, record->>'kind' AS kind,
+        record->>'name' AS name, record->>'payload' AS payload, record->>'digest' AS digest,
+        record->'metadata' AS metadata, (record->>'revision')::BIGINT AS revision,
+        (record->>'created')::TIMESTAMP AS created FROM artifact_inventory""")
+    files = [{"artifact_id": r["id"], **f} for r in records for f in r["content"]["files"]]
+    _json_view(con, "artifact_members", files)
+    con.execute("""CREATE VIEW artifact_files AS SELECT record->>'artifact_id' AS artifact_id,
+        record->>'path' AS path, record->>'sha256' AS digest, (record->>'size')::BIGINT AS size
+        FROM artifact_members""")
+    _json_view(con, "artifact_selected_inputs", inputs)
+    con.execute("""CREATE VIEW artifact_bindings AS SELECT record->>'flow_id' AS flow_id,
+        record->>'run_id' AS run_id, record->>'role' AS role, (record->>'position')::BIGINT AS position,
+        record->'artifact'->>'id' AS artifact_id, record->'artifact'->'metadata' AS metadata,
+        (record->'artifact'->>'revision')::BIGINT AS revision FROM artifact_selected_inputs""")
+    _json_view(con, "artifact_activity", activities)
+    events = []
+    for a in activities:
+        for u in a["uses"]:
+            events.append(
+                {
+                    "flow_id": a.get("flow_id"),
+                    "run_id": a["run_id"],
+                    "step": a["step"],
+                    "key": a["key"],
+                    "role": u["role"],
+                    "event": "used",
+                    "artifact_id": u["artifact"]["id"],
+                }
+            )
+        for o in a["outputs"]:
+            events.append(
+                {
+                    "flow_id": a.get("flow_id"),
+                    "run_id": a["run_id"],
+                    "step": a["step"],
+                    "key": a["key"],
+                    "role": o["role"],
+                    "event": o["event"],
+                    "artifact_id": o["artifact"]["id"],
+                }
+            )
+    _json_view(con, "artifact_event_records", events)
+    con.execute("""CREATE VIEW artifact_events AS SELECT record->>'flow_id' AS flow_id,
+        record->>'run_id' AS run_id, record->>'step' AS step, record->>'key' AS item_key,
+        record->>'role' AS role, record->>'event' AS event, record->>'artifact_id' AS artifact_id
+        FROM artifact_event_records""")
+
+
+def _artifact_step_view(con, name, schema, activities):
+    rows = [
+        o["artifact"] | {"run_id": a["run_id"], "item_key": a["key"]}
+        for a in activities
+        if a["step"] == name
+        for o in a["outputs"]
+        if o["role"] == "output"
+    ]
+    source = "__ionflow_artifact_output_" + name
+    _json_view(con, source, rows)
+    cols = ["record->>'id' AS id", "record->>'name' AS name", "record->'metadata' AS metadata"]
+    for field, hint in schema._fields.items():
+        typ = _artifact_sql_type(hint)
+        # JSON extraction uses a bound path in a macro-free SELECT; field names are escaped as SQL literals.
+        path = ("$.metadata." + json.dumps(field)).replace("'", "''")
+        cols.append(f"CAST(json_extract_string(record, '{path}') AS {typ}) AS {_q(field)}")
+    cols += ["record->>'item_key' AS item_key", "record->>'run_id' AS run_id"]
+    con.execute(f"CREATE VIEW {_q(name)} AS SELECT {', '.join(cols)} FROM {_q(source)}")
+
+
+def _artifact_sql_type(hint):
+    if typing.get_origin(hint) in (typing.Union, type(str | None)):
+        members = [t for t in typing.get_args(hint) if t is not type(None)]
+        if len(members) != 1:
+            return "JSON"
+        hint = members[0]
+    if typing.get_origin(hint) is list:
+        return _artifact_sql_type(typing.get_args(hint)[0]) + "[]"
+    return {str: "VARCHAR", int: "BIGINT", float: "DOUBLE", bool: "BOOLEAN"}.get(hint, "JSON")
 
 
 def _step_view_sql(space, entries):
@@ -136,11 +248,23 @@ def duck(flow_cls, config):
     store = Store.of(config)
     con = store.connect()
     space = Space.for_flow(store, flow_cls)
+    activities = []
+    inputs = []
     if attached := lake.Catalog(space).attach_readonly(con):
+        inputs = artifact_binding_rows(
+            flow_cls.flow_id(), con.sql("SELECT run_id, artifacts FROM lake.runs").fetchall()
+        )
+        activities = [
+            json.loads(v) | {"run_id": r, "flow_id": flow_cls.flow_id()}
+            for r, v in con.sql("SELECT run_id, record FROM lake.artifact_activity").fetchall()
+        ]
         by_step = {}
         for run_id, step, path in con.sql("SELECT run_id, step, path FROM lake.manifest").fetchall():
             by_step.setdefault(step, []).append((path, run_id))
         for name, step in flow_cls._dag.steps.items():
+            if step.is_artifact:
+                _artifact_step_view(con, name, step.output_table, activities)
+                continue
             entries = by_step.get(name)
             # run_id last either way: one column order between real and empty views
             body = _step_view_sql(space, entries) if entries else _empty_view_sql(step.output_table)
@@ -153,9 +277,13 @@ def duck(flow_cls, config):
         )
     else:  # never ran
         for name, step in flow_cls._dag.steps.items():
+            if step.is_artifact:
+                _artifact_step_view(con, name, step.output_table, [])
+                continue
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
     _ledger_view(con, flow_cls, attached)
     _metrics_view(con, space)
+    artifact_views(con, Artifacts(store), activities, inputs)
     return con
 
 

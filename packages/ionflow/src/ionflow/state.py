@@ -6,10 +6,12 @@ their serialized forms, so the runner never spells them out.
 import datetime as dt
 import json
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # The `runs` table's column names — reserved against params/Ledger collisions.
-BASE_COLS = frozenset({"run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom"})
+BASE_COLS = frozenset(
+    {"run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom", "artifacts"}
+)
 
 
 class Slot(typing.NamedTuple):
@@ -110,6 +112,7 @@ class RunRecord:
     origin_run_id: str | None
     params: dict
     custom: dict
+    artifacts: dict = field(default_factory=dict)
 
     @property
     def _ok(self):
@@ -131,9 +134,10 @@ class RunRecord:
             self.origin_run_id,
             json.dumps(self.params),
             json.dumps(self.custom if self._ok else {}, default=str),
+            json.dumps(self.artifacts),
         ]
 
-    def meta(self, manifest):
+    def meta(self, manifest, activities=None):
         """The `_meta.json` payload; `manifest` is the run's `Manifest`."""
         ok = self._ok
         return {
@@ -146,4 +150,6 @@ class RunRecord:
             "manifest": manifest.meta(),
             "params": self.params,
             "custom": self.custom if ok else {},
+            "artifacts": self.artifacts,
+            "activities": activities or {},
         }

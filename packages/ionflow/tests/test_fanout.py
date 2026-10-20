@@ -55,7 +55,7 @@ def test_failed_branch_keeps_its_metrics(s3cfg, repo, tmp_path, monkeypatch):
     run_id = con.sql("SELECT run_id FROM ledger WHERE status = 'failed'").fetchone()[0]
 
     space = Space.for_flow(Store.of(s3cfg), FlakyFlow)
-    keys = space.store.list(space.root + "/runs/")
+    keys = space.store.list(space.root + "/run_id=")
     # item 1 raised, yet its worker's final (finally) write landed; one object
     # per item, named for the fan-out — a worker covers the item's whole sub-DAG
     assert space.metrics_branch(run_id, "parts", 1) in keys

@@ -2,7 +2,6 @@ import datetime as dt
 import hashlib
 import json
 import os
-import pathlib
 import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -92,11 +91,11 @@ class Space:
 
     >>> s = Space(None, "mf", "ETL")
     >>> s.meta("r1")
-    'mf/ETL/runs/run_id=r1/_meta.json'
+    'mf/runs/ETL/run_id=r1/_meta.json'
     >>> s.part("r1", "raw")
-    'mf/ETL/runs/run_id=r1/raw/part_0.parquet'
+    'mf/runs/ETL/run_id=r1/raw/part_0.parquet'
     >>> s.part("r1", "work", "file-7")
-    'mf/ETL/runs/run_id=r1/work/part_file-7.parquet'
+    'mf/runs/ETL/run_id=r1/work/part_file-7.parquet'
     """
 
     store: Store
@@ -110,17 +109,17 @@ class Space:
 
     @property
     def root(self):
-        return f"{self.prefix}/{self.flow_id}"
+        return f"{self.prefix}/runs/{self.flow_id}"
 
     def run_dir(self, run_id):
-        return f"{self.root}/runs/run_id={run_id}"
+        return f"{self.root}/run_id={run_id}"
 
     def meta(self, run_id):
         return f"{self.run_dir(run_id)}/{META_FILE}"
 
     def run_ids(self):
         """run_ids of every run folder holding a `_meta.json`, from one LIST."""
-        prefix = f"{self.root}/runs/run_id="
+        prefix = f"{self.root}/run_id="
         out = []
         for key in self.store.list(prefix):
             run_id, _, tail = key.removeprefix(prefix).partition("/")
@@ -142,7 +141,7 @@ class Space:
 
     @property
     def metrics_glob(self):
-        return f"{self.root}/runs/*/{METRICS_PREFIX}*.parquet"  # orchestrator + branch objects
+        return f"{self.root}/run_id=*/{METRICS_PREFIX}*.parquet"  # orchestrator + branch objects
 
     def step_dir(self, run_id, step):
         return f"{self.run_dir(run_id)}/{step}"
@@ -213,34 +212,101 @@ class Space:
             self.store.upload(dest(key_value) if callable(dest) else dest, path)
         return key_value
 
-    def sync_to(self, other, flow_cls):
-        """Copy this local space's run folders into `other`, then rebuild the
-        catalog there from the copied `_meta.json` records (decision 0016).
+    def sync_to(self, other, flow_cls, run_id=None):
+        """Copy run reference closures, then merge their exported records atomically.
 
-        The catalog — ledger rows included — is re-derived by `backfill` rather
-        than copied: it stores absolute data-file locations (0019). Returns
-        {copied, runs}.
+        Destination catalogs derive from records, never copied database bytes.
+        `run_id` selects one run and the creating runs of its referenced parts.
         """
-        from .lake import backfill  # lake builds on Space; the import stays local to break the cycle
+        from .artifact import Artifacts
+        from .lake import Catalog, _meta_row
 
-        if not self.store.local_dir:
-            raise ValueError("sync sources a local store; the active config has no local_dir")
         if not self.flow_id == other.flow_id == flow_cls.flow_id():
             raise ValueError(
                 f"sync_to: source, target and flow must name one flow, got "
                 f"{self.flow_id!r} -> {other.flow_id!r} for {flow_cls.flow_id()!r}"
             )
-        root = pathlib.Path(self.store.local_dir)
+        selected = set(self.run_ids() if run_id is None else [run_id])
+        metas = {}
+        while selected - metas.keys():
+            rid = sorted(selected - metas.keys())[0]
+            meta = self.read_meta(rid)
+            if meta is None:
+                raise ValueError(f"run not found: {rid}")
+            metas[rid] = meta
+            for pairs in meta.get("manifest", {}).values():
+                for _, path in pairs:
+                    prefix = self.root + "/run_id="
+                    if path.startswith(prefix):
+                        selected.add(path.removeprefix(prefix).split("/", 1)[0])
+        cat = Catalog(other)
+        target_rows = {row["run_id"]: row for row in cat.runs()}
+        skip = set()
+        for rid, meta in metas.items():
+            if rid not in target_rows:
+                continue
+            current = target_rows[rid]
+            expected = {
+                "commit": meta.get("commit"),
+                "params": meta.get("params") or {},
+                "artifacts": meta.get("artifacts") or {},
+            }
+            if any(current[field] != expected[field] for field in expected):
+                raise ValueError(f"run identity conflicts at destination: {rid}")
+            if current["status"] != "running":
+                if meta["status"] == "running":
+                    skip.add(rid)
+                elif current["status"] != meta["status"]:
+                    raise ValueError(f"run outcome conflicts at destination: {rid}")
+        artifact_ids = set()
+        for meta in metas.values():
+            for value in meta.get("artifacts", {}).values():
+                artifact_ids.update(r["id"] for r in (value if isinstance(value, list) else [value]))
+            for activity in meta.get("activities", {}).values():
+                artifact_ids.update(activity["ancestors"])
+                artifact_ids.update(u["artifact"]["id"] for u in activity["uses"])
+                artifact_ids.update(o["artifact"]["id"] for o in activity["outputs"])
+        if artifact_ids:
+            Artifacts(self.store).sync_to(Artifacts(other.store), sorted(artifact_ids))
         existing = set(other.store.list(other.root + "/"))
         todo = []
-        for key in self.store.list(self.root + "/"):
-            tail = key.removeprefix(self.root)
-            # parts are immutable — a key already on the target is done; a run's
-            # `_meta.json` is not (a run synced mid-flight finishes later)
-            done = other.root + tail in existing and not key.endswith("/" + META_FILE)
-            if self.is_internal(key) or done:
+        for rid in sorted(selected):
+            for key in self.store.list(self.run_dir(rid) + "/"):
+                target = other.root + key.removeprefix(self.root)
+                if target not in existing and key != self.meta(rid):
+                    todo.append((key, target))
+
+        def transfer(pair):
+            source, target = pair
+            with tempfile.TemporaryDirectory(prefix="ionflow-sync-") as tmp:
+                path = os.path.join(tmp, "object")
+                self.store.download(source, path)
+                other.store.upload(target, path)
+
+        with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:
+            list(ex.map(transfer, todo))
+        # Expose records only after the entire reference closure has arrived.
+        for rid, meta in sorted(metas.items()):
+            if rid in skip:
                 continue
-            todo.append((str(root / key), other.root + tail))
-        with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:  # many small objects, latency-bound
-            list(ex.map(lambda t: other.store.upload(t[1], t[0]), todo))
-        return {"copied": len(todo), "runs": backfill(flow_cls, other, replace=True)}
+            meta = meta | {
+                "manifest": {
+                    step: [
+                        [k, other.root + p.removeprefix(self.root) if p.startswith(self.root + "/") else p]
+                        for k, p in pairs
+                    ]
+                    for step, pairs in meta.get("manifest", {}).items()
+                }
+            }
+            from .state import Manifest
+
+            rows = [(s.step, s.key, p) for s, p in Manifest.from_meta(meta["manifest"]).slots()]
+            cat.commit_run(
+                rid,
+                row=_meta_row(meta, rid),
+                rows=rows,
+                genesis=flow_cls,
+                activities=list(meta.get("activities", {}).values()),
+            )
+            other.write_meta(rid, meta)
+        return {"copied": len(todo) + len(metas), "runs": len(cat.runs())}

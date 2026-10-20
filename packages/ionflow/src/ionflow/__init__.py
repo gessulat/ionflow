@@ -5,6 +5,10 @@ from .schema import FlowParams, LedgerColumns, Table, check, fanout_key, field, 
 from .space import ConstraintViolation
 
 __all__ = [
+    "Artifact",
+    "ArtifactInputs",
+    "Artifacts",
+    "MetadataConflict",
     "ConstraintViolation",
     "Flow",
     "Table",
@@ -20,3 +24,4 @@ __all__ = [
     "Collect",
     "Config",
 ]
+from .artifact import Artifact, ArtifactInputs, Artifacts, MetadataConflict
