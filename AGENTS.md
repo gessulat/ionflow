@@ -7,6 +7,10 @@ User docs: `packages/ionflow/README.md`. The *why* behind non-obvious choices
 lives in `packages/ionflow/docs/decisions/` (cited below by number) — check it
 before changing architecture; add a record when you make such a decision.
 
+Run layout: `<prefix>/runs/<flow_id>/{catalog.ducklake,_lake/,run_id=<id>/}`.
+Shared files and bundles live under `<prefix>/artifacts/` (0022–0025). No legacy
+layout compatibility or migration: development stores can be recreated.
+
 ## Repo layout (uv workspace)
 
 The repo root is a **workspace root only** — no package lives there (0017).
@@ -78,6 +82,15 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
 
 ## Architecture (packages/ionflow/src/ionflow/)
 
+- `artifact.py` — `Artifact` schemas/references and `ArtifactInputs`; `Artifacts`
+  owns shared inventory, SHA-256 blobs, bundle descriptors, revision-checked
+  metadata, verified cache materialization, sync and recovery. Explicit stable
+  kinds are independent of Python paths. Run bindings pin metadata snapshots.
+- `provenance.py` — thread-local `ArtifactRuntime` records use and publication;
+  workers report activities and the orchestrator commits them with run progress.
+  Table steps retain artifact ancestry; branch scope stays item-specific. Resume
+  retains original producers. Flow catalogs override portable producer evidence.
+
 - `schema.py` — `Table`/`LedgerColumns`/`FlowParams`: columns as class
   annotations (bare = NOT NULL, `T | None` nullable, `list[T]` array,
   `= primary_key` / `= check(...)` / `= fanout_key` / `= field(...)`); compiles
@@ -119,7 +132,7 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   NEVER copies (0020); keyed resume matches by item key down the whole chain
   (0014/0018), reusing downstream steps only when the key set is unchanged;
   `resume=<run_id>|"latest"` is the single spelling (falls through fresh).
-  Cross-step `self` state = params + `Ledger` columns, exactly (item tasks
+  Cross-step `self` state = params + artifact inputs + `Ledger` columns (item tasks
   never carry `self` back).
 - `state.py` — `Slot(step, key)`: a part named by its ITEM KEY (0018 —
   position ints unkeyed, fanout_key values keyed); `Manifest`: Slot -> path,
@@ -189,7 +202,7 @@ Zero-infrastructure DuckLake catalogs on S3 conditional writes (DuckLake
 only, schrein 0004), or a plain directory via `LocalClient` (single-host,
 schrein 0005); spec in `packages/schrein/docs/specs/`. ionflow depends on
 schrein for ONE thing — `DuckLake` under the per-flow catalog and the publish
-lake (0012/0019); schrein must never import ionflow.
+lake and artifact registry (0012/0019/0023); schrein must never import ionflow.
 
 - Test with `uv run --directory packages/schrein pytest` (`-m ""` = full, incl.
   the CAS-contention hammer). Nothing collects it alongside ionflow's suite.

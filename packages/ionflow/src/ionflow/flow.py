@@ -5,6 +5,7 @@ from . import query, runner
 from .config import Config
 from .dag import build_dag
 from .lake import publish as _publish
+from .provenance import ArtifactRuntime
 from .state import BASE_COLS
 
 
@@ -12,19 +13,24 @@ class Flow:
     """Base class. Subclass it; each public method is a step.
 
     A step's parameter names are its upstream steps; its return annotation is
-    the output table schema. No `self.next()`, no scheduler — just an S3 bucket,
+    the output table or artifact schema. No `self.next()`, no scheduler — just a store,
     which steps can reach through `self.config` (see "side inputs" in the README).
     """
 
     _registry: dict[str, type] = {}
     config = None  # bound by the runner (orchestrator and branch workers)
+    artifacts: ArtifactRuntime  # step-local tracked artifact operations
     Ledger = None  # subclass: `class Ledger(LedgerColumns)` — extra ledger columns
     Params = None  # subclass: `class Params(FlowParams)` — typed run inputs
+    Inputs = None  # subclass: `class Inputs(ArtifactInputs)` — typed artifact inputs
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
         cls._dag = build_dag(cls)
-        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config"}
+        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config", "artifacts"}
+        if cls.Inputs:
+            if collisions := set(cls.Inputs.declarations()) & (taken | set(cls.params_columns())):
+                raise TypeError(f"artifact inputs collide with steps/params/ledger: {sorted(collisions)}")
         if collisions := set(cls.params_columns()) & taken:
             raise TypeError(f"params collide with steps/ledger columns/config: {sorted(collisions)}")
         Flow._registry[cls.flow_id()] = cls

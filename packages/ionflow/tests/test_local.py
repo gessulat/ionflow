@@ -5,8 +5,6 @@ mode-parametrized `anycfg` fixture and by test_lake_contract's local tests; what
 only exists here is the local -> S3 migration.
 """
 
-import pytest
-
 from examples.embed import EmbedDocs
 from ionflow.space import Space
 from ionflow.store import Store
@@ -39,6 +37,5 @@ def test_sync_local_history_to_bucket(localcfg, s3cfg, repo):
     assert con.sql("SELECT count(*) FROM ledger").fetchone() == (2,)
 
 
-def test_sync_requires_local_source(s3cfg):
-    with pytest.raises(ValueError, match="local"):
-        _sync(EmbedDocs, s3cfg, s3cfg)
+def test_sync_empty_store_is_supported(s3cfg, localcfg):
+    assert _sync(EmbedDocs, s3cfg, localcfg) == {"copied": 0, "runs": 0}

@@ -24,7 +24,7 @@ class LedgerFlow(Flow):
 
 
 def _row(run_id, day, status="running", finished=None):
-    return [run_id, status, dt.datetime(2026, 1, day), finished, "abc", None, "{}", "{}"]
+    return [run_id, status, dt.datetime(2026, 1, day), finished, "abc", None, "{}", "{}", "{}"]
 
 
 def test_commit_run_upserts_by_run_id_and_replays_safely(cfg):

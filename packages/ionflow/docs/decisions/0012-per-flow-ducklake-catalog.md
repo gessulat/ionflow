@@ -44,3 +44,8 @@ bookkeeping commits atomically with registrations). Out of the lake:
 export). Costs accepted: the ducklake extension on every run/read path, and
 one CAS round-trip of commit latency per plan node — negligible against
 step runtimes.
+
+NOTE (2026-10-20): [0022](0022-runs-and-artifacts-have-separate-namespaces.md)
+moves flow roots to `<prefix>/runs/<flow_id>` and places `run_id=<id>` directories
+directly there. [0024](0024-artifact-lineage-commits-with-run-progress.md) adds
+artifact bindings and activity records to the same atomic commit boundary.

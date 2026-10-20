@@ -23,7 +23,9 @@ class Planner:
     def __init__(self, dag, origin):
         self.dag = dag
         self.origin = origin
-        self.keyed = {n for n, s in dag.steps.items() if s.is_fanout and s.output_table.fanout_key_column()}
+        self.keyed = {
+            n for n, s in dag.steps.items() if s.is_fanout and (s.is_artifact or s.output_table.fanout_key_column())
+        }
         # Steps downstream of a keyed fan-out can't be reused upfront: the
         # fan-out re-runs first (the work-list may have changed), items are
         # then matched by key, and everything else downstream is reused only

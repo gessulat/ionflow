@@ -2,6 +2,7 @@ import graphlib
 import importlib.util
 import inspect
 import os
+import sys
 import threading
 import typing
 import uuid
@@ -15,9 +16,11 @@ import psutil
 
 from . import lake, metrics
 from .arrow import StepInput
+from .artifact import Artifact, Artifacts
 from .config import Config
 from .git import require_clean
 from .plan import Planner
+from .provenance import ArtifactRuntime, activity_key, bindings, reused_activity
 from .space import Space, key_slug, utc_now
 from .state import Manifest, RunRecord, Slot
 from .store import Store
@@ -49,10 +52,16 @@ class _Ctx(typing.NamedTuple):
 
 def _call(ctx, step, key):
     dag = ctx.flow.__class__._dag
-    kwargs = {
-        dep: StepInput(ctx.resolve(ctx.con, dep, kind, key, dag.steps[dep].output_table))
-        for dep, kind in step.param_kinds.items()
-    }
+    kwargs = {}
+    for dep, kind in step.param_kinds.items():
+        if kind == "INPUT":
+            value = ctx.flow._artifact_inputs[dep]
+            for ref in value if isinstance(value, list) else [value]:
+                ctx.flow.artifacts.use(ref, role=dep)
+            kwargs[dep] = value
+        else:
+            value = ctx.resolve(ctx.con, dep, kind, key, dag.steps[dep].output_table)
+            kwargs[dep] = value if dag.steps[dep].is_artifact else StepInput(value)
     return step.method(ctx.flow, **kwargs)
 
 
@@ -67,11 +76,26 @@ def _emit(ctx, step, key=None):
     """
     result = _call(ctx, step, key)
     table = step.output_table
+    runtime = ctx.flow.artifacts
+    if step.is_artifact:
+        seen = set()
+        baseline = runtime.snapshot()
+        for value in result if step.is_fanout else [result]:
+            if not isinstance(value, Artifact) or value._kind != table._kind:
+                raise TypeError(f"step '{step.name}' must return {table._kind} artifacts")
+            ref = runtime.publish(value)
+            k = ref.id if step.is_fanout else 0 if key is None else key
+            if k in seen:
+                raise ValueError(f"fan-out '{step.name}': duplicate artifact {k}")
+            seen.add(k)
+            yield Slot(step.name, k), ref.id, runtime.snapshot(key=k, narrow=step.is_fanout)
+            runtime.restore(baseline)
+        return
     if not step.is_fanout:
         k = 0 if key is None else key
         dest = ctx.space.part(ctx.run_id, step.name, k)
         ctx.space.write_part(dest, result, table, threads=ctx.threads, memory_mb=ctx.memory_mb)
-        yield Slot(step.name, k), dest
+        yield Slot(step.name, k), dest, runtime.snapshot(key=k)
         return
     key_col = table.fanout_key_column()
     seen = set()
@@ -91,14 +115,19 @@ def _emit(ctx, step, key=None):
             dest, item, table, threads=ctx.threads, memory_mb=ctx.memory_mb, fanout_key=key_col
         )
         k = value if key_col else i
-        yield Slot(step.name, k), ctx.space.part(ctx.run_id, step.name, k)
+        yield Slot(step.name, k), ctx.space.part(ctx.run_id, step.name, k), runtime.snapshot(key=k)
 
 
-def _import(file, name):
-    spec = importlib.util.spec_from_file_location("_mf_flow", file)
+def _import(file, name, module_name):
+    spec = importlib.util.spec_from_file_location(module_name, file)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     return getattr(mod, name)
 
 
@@ -118,7 +147,7 @@ class _Bound(typing.NamedTuple):
 
 _RUN: dict[str, dict] = {}  # run_id -> the run's shared payload (pool initializer)
 _BOUND: dict[str, _Bound] = {}  # run_id -> this process's binding
-_DEPS: dict[tuple, Manifest] = {}  # (run_id, node) -> the node's manifest snapshot
+_DEPS: dict[tuple, dict] = {}  # (run_id, node, phase) -> manifest and provenance snapshot
 _BOUND_LOCK = threading.Lock()  # thread mode submits tasks concurrently into one process
 
 
@@ -146,9 +175,9 @@ def _bound(shared, threads):
             for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
                 os.environ.setdefault(var, str(threads))
         cfg = Config(**shared["config"])
-        flow_cls = _import(shared["file"], shared["flow"])
+        flow_cls = _import(shared["file"], shared["flow"], "_ionflow_" + shared["run_id"].replace("-", "_"))
         # identity travels in the payload, never derived here: the re-imported
-        # class's __module__ is the loader's ("_mf_flow"), so its own flow_id() is wrong
+        # The isolated loader's module name is not the flow's durable identity.
         space = Store.of(cfg).space(shared["flow_id"])
         _BOUND[shared["run_id"]] = bound = _Bound(cfg, flow_cls, space)
         return bound
@@ -162,7 +191,7 @@ def _node_manifest(space, run_id, node, phase):
     snapshot predates the fan-out's parts).
     """
     if (key := (run_id, node, phase)) not in _DEPS:
-        _DEPS[key] = Manifest.from_meta((space.read_meta(run_id) or {}).get("manifest"))
+        _DEPS[key] = space.read_meta(run_id) or {}
     return _DEPS[key]
 
 
@@ -177,18 +206,37 @@ def _task_worker(task):
     flow_cls, space = bound.flow_cls, bound.space
     flow = flow_cls()  # per task: thread-mode tasks share this process, not their `self`
     flow.config = bound.cfg
+    registry = Artifacts(space.store)
+    flow.artifacts = ArtifactRuntime(registry, shared["flow_id"], shared["run_id"])
+    declarations = flow_cls.Inputs.declarations() if flow_cls.Inputs else {}
+    flow._artifact_inputs = bindings(registry, shared["artifacts"], declarations)
+    for name, value in flow._artifact_inputs.items():
+        setattr(flow, name, value)
     for k, v in {**shared["params"], **task["custom"]}.items():
         setattr(flow, k, v)
     run_id, node, key, pending = task["run_id"], task["node"], task["key"], task["steps"]
-    manifest = _node_manifest(space, run_id, node, "step" if key is None else "items")
+    meta = _node_manifest(space, run_id, node, "step" if key is None else "items")
+    manifest = Manifest.from_meta(meta.get("manifest"))
+    activities = dict(meta.get("activities") or {})
+    reported = {}
     written = {}  # step -> part path, as this task completes them
 
     def resolve(rcon, dep, kind, k, table):
         """Inputs come from the node's manifest snapshot; `written` overlays the
         members this task produced itself (BRANCH = this item's part only)."""
+        keys = [k] if kind == "BRANCH" else manifest.keys(dep)
+        paths = [written.get(dep) or manifest.get(dep, k)] if kind == "BRANCH" else manifest.paths(dep)
+        refs = []
+        for dep_key, path in zip(keys, paths, strict=True):
+            activity = activities.get(activity_key(dep, dep_key), {})
+            flow.artifacts.inherit(activity.get("ancestors", []))
+            if issubclass(table, Artifact):
+                output = next(o for o in activity["outputs"] if o["role"] == "output" and o["artifact"]["id"] == path)
+                refs.append(flow.artifacts.use(registry.get(path, table, snapshot=output["artifact"]), role=dep))
+        if issubclass(table, Artifact):
+            return refs if kind == "COLLECT" or flow_cls._dag.steps[dep].is_fanout and kind != "BRANCH" else refs[0]
         if kind == "BRANCH":
-            return space.relation(rcon, [written.get(dep) or manifest.get(dep, k)])
-        paths = manifest.paths(dep)
+            return space.relation(rcon, paths)
         return space.relation(rcon, paths) if paths else table.empty(rcon)
 
     # this task's OWN DuckDB instance: private catalog and spill dir, capped to
@@ -230,15 +278,25 @@ def _task_worker(task):
             relabel()
         try:
             for attempt in range(tries):
+                flow.artifacts.begin(name, 0 if key is None else key)
                 try:
-                    for slot, path in _emit(ctx._replace(con=cur), step, key):
+                    for slot, path, activity in _emit(ctx._replace(con=cur), step, key):
                         written[name] = path
                         parts.append((slot.step, slot.key, path))
+                        ak = activity_key(slot.step, slot.key)
+                        if activity["ancestors"] or activity["outputs"]:
+                            activities[ak] = reported[ak] = activity
                     return
                 except Exception:
                     if attempt == tries - 1:
                         raise
         finally:
+            if not step.is_fanout or not parts:
+                ak = activity_key(name, 0 if key is None else key)
+                if ak not in reported:
+                    activity = flow.artifacts.snapshot()
+                    if activity["ancestors"] or activity["outputs"]:
+                        activities[ak] = reported[ak] = activity
             with label_lock:
                 active.discard(name)
                 relabel()
@@ -262,7 +320,7 @@ def _task_worker(task):
     custom = {c: getattr(flow, c) for c in flow_cls.ledger_columns() if hasattr(flow, c)} if key is None else {}
     # progress travels with the failure: resume restarts an item at its first
     # incomplete sub-step, not at the top
-    return {"parts": parts, "error": error, "custom": custom}
+    return {"parts": parts, "error": error, "custom": custom, "activities": reported}
 
 
 def _run_sub_dag(group, pending, run_member):
@@ -323,6 +381,7 @@ def run(
     branch_retries=0,
     params=None,
     allow_commit_drift=False,
+    artifacts=None,
 ):
     """Execute `flow_cls`; returns the new run_id.
 
@@ -336,8 +395,8 @@ def run(
     """
     if allow_commit_drift and not resume:
         raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
-    if resume and params:
-        raise ValueError("resume reuses the origin run's params; do not pass params")
+    if resume and (params or artifacts):
+        raise ValueError("resume reuses the origin run's params and artifacts; do not pass params or artifacts")
     commit = require_clean(repo)
     started = utc_now()
     run_id = _new_run_id(started)
@@ -361,6 +420,7 @@ def run(
     planner = Planner(dag, origin)  # ALL reuse decisions; inert on a fresh run
     pending = []  # manifest triples written since the last catalog commit
     custom = {}  # declared Ledger columns, merged from whole-step task results
+    activities, pending_activities = {}, {}
 
     def note(slot, path):
         """Record one part: in the live manifest and in the next catalog commit."""
@@ -373,6 +433,9 @@ def run(
         computed it; reuse is manifest rows pointing at the origin's objects."""
         for s in slots:
             note(s, origin.get(s.step, s.key))
+            ak = activity_key(s.step, s.key)
+            if origin_row and ak in origin_row.get("activities", {}):
+                activities[ak] = pending_activities[ak] = reused_activity(origin_row["activities"][ak])
 
     if origin_row:
         if origin_row["commit"] != commit:
@@ -391,6 +454,9 @@ def run(
             params = {k: v for k, v in params.items() if k not in dropped}
     reuse_slots(planner.upfront())
     params = flow_cls.resolve_params(params)
+    declarations = flow_cls.Inputs.declarations() if flow_cls.Inputs else {}
+    artifact_inputs = origin_row["artifacts"] if origin_row else Artifacts(store).bind(declarations, artifacts)
+    bindings(Artifacts(store), artifact_inputs, declarations)
 
     record = RunRecord(
         run_id=run_id,
@@ -401,15 +467,23 @@ def run(
         origin_run_id=origin_run_id,
         params=params,
         custom={},
+        artifacts=artifact_inputs,
     )
 
     def flush(row=False, genesis=None):
         """One catalog commit + the meta recovery export; no-op when unchanged."""
-        if not (pending or row or genesis):
+        if not (pending or pending_activities or row or genesis):
             return
-        cat.commit_run(run_id, row=record.row() if row else None, rows=list(pending), genesis=genesis)
+        cat.commit_run(
+            run_id,
+            row=record.row() if row else None,
+            rows=list(pending),
+            genesis=genesis,
+            activities=list(pending_activities.values()),
+        )
         pending.clear()
-        space.write_meta(run_id, record.meta(manifest))
+        pending_activities.clear()
+        space.write_meta(run_id, record.meta(manifest, activities))
 
     # genesis + the running row + upfront reuse, atomically, before any part
     # object exists: a run implies a catalog
@@ -430,6 +504,7 @@ def run(
         "sample": use_processes,
         "retries": branch_retries,
         "params": params,
+        "artifacts": artifact_inputs,
     }
     if use_processes:
         # spawn, never fork: this process is multi-threaded (the sampler, DuckDB
@@ -497,6 +572,8 @@ def run(
             result = fut.result()
             parts, err = result["parts"], result["error"]
             custom.update(result["custom"])
+            for ak, activity in result["activities"].items():
+                activities[ak] = pending_activities[ak] = activity
         except Exception as e:  # noqa: BLE001 — a worker that died without reporting
             parts, err = [], e
         # all-or-nothing: a partial fan-out must not look resumable, or resume
@@ -542,7 +619,10 @@ def run(
         # thread mode: the pool has joined, so nothing still holds the binding
         # (a no-op in process mode, where only the dead children ever bound)
         _RUN.pop(run_id, None)
-        _BOUND.pop(run_id, None)
+        bound = _BOUND.pop(run_id, None)
+        if bound is not None:
+            sys.modules.pop(bound.flow_cls.__module__, None)
+            flow_cls._registry.pop(bound.flow_cls.flow_id(), None)
         for k in [k for k in _DEPS if k[0] == run_id]:
             del _DEPS[k]
         try:

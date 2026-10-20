@@ -111,6 +111,8 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
         "manifest",
         "params",
         "custom",
+        "artifacts",
+        "activities",
     ]
     # the manifest maps (step, item key) -> the part object holding it
     assert {s: [k for k, _ in pairs] for s, pairs in meta["manifest"].items()} == {

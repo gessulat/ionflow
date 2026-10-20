@@ -4,6 +4,9 @@ import inspect
 import typing
 from dataclasses import dataclass
 
+from .artifact import Artifact
+from .schema import Table
+
 
 class Fanout[T]:
     """Return marker: step yields N branch outputs."""
@@ -27,7 +30,11 @@ class Step:
 
     @property
     def deps(self):
-        return list(self.param_kinds)
+        return [n for n, k in self.param_kinds.items() if k != "INPUT"]
+
+    @property
+    def is_artifact(self):
+        return issubclass(self.output_table, Artifact)
 
 
 @dataclass
@@ -171,7 +178,21 @@ def _plan(steps, roots):
         ) from None
 
 
-RESERVED_STEP_NAMES = {"ledger", "metrics", "runs", "manifest"}  # duck()'s views + the lake's system tables
+RESERVED_STEP_NAMES = {
+    "ledger",
+    "metrics",
+    "runs",
+    "manifest",
+    "artifacts",
+    "artifact_files",
+    "artifact_activity",
+    "artifact_events",
+    "artifact_inventory",
+    "artifact_members",
+    "artifact_event_records",
+    "artifact_bindings",
+    "artifact_selected_inputs",
+}
 PATH_COL = "__ionflow_path"  # the step views' filename join column (query.py)
 RESERVED_COLUMNS = {
     "run_id": "the catalog's partition column",
@@ -180,7 +201,11 @@ RESERVED_COLUMNS = {
 
 
 def build_dag(cls) -> Dag:
+    input_schema = getattr(cls, "Inputs", None)
+    inputs = input_schema.declarations() if input_schema else {}
     funcs = {n: o for n, o in vars(cls).items() if _is_step(n, o)}
+    if overlap := set(inputs) & (set(funcs) | RESERVED_STEP_NAMES):
+        raise ValueError(f"artifact inputs collide with steps or system names: {sorted(overlap)}")
     for name in RESERVED_STEP_NAMES & set(funcs):
         raise ValueError(f"step '{name}' is reserved (system view)")
     steps = {}
@@ -190,7 +215,12 @@ def build_dag(cls) -> Dag:
         kinds = {}
         for p in list(sig.parameters)[1:]:  # drop self
             origin = typing.get_origin(hints.get(p))
-            kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
+            if p in inputs:
+                if hints.get(p) != inputs[p]:
+                    raise TypeError(f"step '{name}': artifact input '{p}' must be annotated {inputs[p]}")
+                kinds[p] = "INPUT"
+            else:
+                kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
         ret = hints.get("return")
         if ret is type(None):  # `-> None` counts as untyped
             ret = None
@@ -198,8 +228,10 @@ def build_dag(cls) -> Dag:
         table = typing.get_args(ret)[0] if is_fanout else ret
         if table is None:
             raise ValueError(f"step '{name}' has no output table annotation")
+        if not isinstance(table, type) or not issubclass(table, (Table, Artifact)):
+            raise TypeError(f"step '{name}': output annotation must be a Table or Artifact")
         for col, why in RESERVED_COLUMNS.items():
-            if col in table.columns():
+            if not issubclass(table, Artifact) and col in table.columns():
                 raise ValueError(f"step '{name}': column '{col}' is reserved ({why})")
         steps[name] = Step(name, fn, kinds, table, is_fanout)
 

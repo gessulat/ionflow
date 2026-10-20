@@ -23,7 +23,7 @@ from textual.widgets import (
 from . import git, lake, query
 from .config import SETUP_FIELDS, Config, ConfigMissing, config_from_setup, write_config
 from .flow import discover_flows
-from .space import Space, flow_id_of_catalog_key
+from .space import Space
 from .store import Store
 
 LEDGER_COLS = ["run_id", "status", "started", "finished"]  # display subset of the ledger
@@ -207,8 +207,7 @@ class SetupScreen(Screen):
 
 def scan_runs(store):
     """Flow names with a catalog in the store — one LIST of the prefix."""
-    prefix = store.prefix + "/"
-    return {name for key in store.list(prefix) if (name := flow_id_of_catalog_key(prefix, key)) is not None}
+    return set(store.flow_ids())
 
 
 def startup_warnings(flows, store, with_data):

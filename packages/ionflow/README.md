@@ -9,8 +9,9 @@
 # ionflow
 
 A barebones [Metaflow](https://metaflow.org) alternative. A **flow is a class**, a
-**step is a method**, and every step returns a **typed table** that ionflow persists
-as Parquet on S3. No Kubernetes, no scheduler, no metadata server — the only thing you
+**step is a method**, and each step returns a **typed table or artifact**. Tables
+persist as Parquet; artifacts are shared files or bundles. No Kubernetes, no
+scheduler, no metadata server — the only thing you
 configure is one S3-compatible bucket.
 
 - **The DAG is the method signatures.** A step's parameters name its upstream steps.
@@ -68,7 +69,7 @@ region   = "us-east-1"
 ionflow setup --local
 ```
 
-Local mode stores **everything** — runs, ledger, catalog, metrics, the publish
+Local mode stores **everything** — runs, artifacts, ledger, catalog, metrics, the publish
 lake — in a plain directory (default `.ionflow/data/`, gitignored) instead of a
 bucket. No credentials, no endpoint, no infrastructure at all; every other
 command (`run`, `query`, `stats`, `publish`, resume, the TUI) works identically:
@@ -87,12 +88,135 @@ ionflow sync mymodule:EmbedDocs --to s3://my-bucket        # repeatable; add --e
 ionflow setup                                              # point the config at the bucket
 ```
 
-`sync` copies the immutable run folders and rebuilds the flow's catalog —
-ledger rows, manifests, registrations — from their recovery records on the
-bucket, so re-running it after more local runs is safe. The local store is
-left untouched.
+`sync` copies referenced artifacts and immutable run folders, then merges the
+receiving catalog from recovery records. It follows cross-run table references
+and preserves existing destination history. Re-running it is safe. The source
+store is left untouched.
 Local mode is single-machine by design: CAS commits serialize on a file lock,
 which coordinates processes on one host, not a team on a shared drive.
+
+## Shared artifacts
+
+Artifacts live independently of runs. A file's identity is its complete SHA-256.
+A bundle's identity hashes a canonical manifest of relative filenames and file
+digests. Shared files upload once, including files shared between bundles.
+Names and metadata can change without changing an artifact's ID.
+
+Run history lives at `<prefix>/runs/<flow_id>/run_id=<id>/`. Flow catalogs live
+directly under their flow roots. Shared content lives at `<prefix>/artifacts/`;
+the publish lake remains at `<prefix>/published/`. This pre-production layout
+replaces the earlier layout without migration.
+
+Declare stable types and named inputs:
+
+```python
+from ionflow import Artifact, ArtifactInputs, Artifacts, Config, Flow
+
+class Fasta(Artifact, kind="fasta"):
+    organism: str | None
+
+class Library(Artifact, kind="example-library", payload="bundle"):
+    model: str
+
+class Predict(Flow):
+    class Inputs(ArtifactInputs):
+        fasta: Fasta
+
+    def library(self, fasta: Fasta) -> Library:
+        output = predict(fasta.local_path())
+        return Library.from_path(output, model="7.2")
+
+config = Config.load()
+inventory = Artifacts(config)
+fasta = inventory.put(Fasta.from_path("human.fasta", organism="human"))
+run_id = Predict.run(config, artifacts={"fasta": fasta.id})
+```
+
+`predict` is application code that writes a library directory. The runner persists
+the candidate before committing its output and lineage. Use
+`members={"relative/name": source_path}` to select bundle members explicitly.
+File symlinks resolve to shared content. Directory symlinks and unsafe relative
+names are refused.
+
+Metadata supports JSON scalars, optional values, lists, and dictionaries with
+string keys. Class values supply defaults. Type identifiers, payload kinds, and
+metadata schemas are stable contracts; use a new type for an incompatible schema.
+Conflicting duplicate imports raise `MetadataConflict`. Edit metadata explicitly:
+
+```python
+renamed = inventory.update(fasta.id, revision=fasta.revision, name="reference")
+assert renamed.id == fasta.id
+```
+
+Inputs support `list[ArtifactType]` and retain collection order.
+`Fanout[ArtifactType]` keys items by full artifact ID;
+`Branch[ArtifactType]` receives one reference; `Collect[ArtifactType]` receives
+ordered references. Duplicate fan-out IDs are refused.
+
+References expose `.id`, `.name`, `.metadata`, `.revision`, `.uri`, and
+`.local_path()`. File URIs name the blob; bundle URIs name its descriptor.
+Materialized paths are verified and read-only. Build into a work directory.
+`inventory.evict(id)` removes only the disposable local cache entry.
+
+Table-producing steps can track dynamic inputs and side outputs:
+
+```python
+library = self.artifacts.use(library_ref, role="library")
+index = self.artifacts.publish(index_candidate, role="index", parents=[library])
+```
+
+Publish inside a temporary-directory context before deleting its source files.
+Returning that published reference from an artifact step retains its generation
+record. Declared input references are also available as attributes on `self`.
+Call `self.artifacts.use(ref)` when dynamically selecting one of those inputs.
+
+Runs pin IDs and metadata snapshots. Lineage records use, generation, and reuse
+per step and item. Ancestry survives intermediate tables. Several executions can
+produce the same content; all production records remain. Resume inherits the
+original bindings. Changed inputs require a fresh run. Sharing content does not
+automatically cache arbitrary computations.
+
+```python
+inventory.parents(artifact_id)
+inventory.producers(artifact_id)
+inventory.consumers(artifact_id)
+inventory.duck().sql("SELECT kind, count(*) FROM artifacts GROUP BY kind").show()
+```
+
+`Flow.duck()` also exposes `artifacts`, `artifact_files`, `artifact_bindings`,
+`artifact_activity`, and `artifact_events`. Artifact-producing step views contain
+IDs, names, typed metadata fields, item keys, and run IDs. Bindings describe
+selected inputs; activities describe declared dependencies, not observed file reads.
+
+The runnable [artifact example](examples/artifacts.py) counts shared documents
+and produces a report:
+
+```bash
+ionflow artifacts add examples.artifacts:TextFile document.txt
+ionflow run examples.artifacts:CountWords --artifact documents=TYPE:HASH
+ionflow artifacts ls
+ionflow artifacts show TYPE:HASH
+ionflow artifacts path TYPE:HASH
+ionflow artifacts lineage TYPE:HASH
+ionflow artifacts update TYPE:HASH --revision 1 --name reference
+ionflow artifacts query 'SELECT * FROM artifact_bindings'
+ionflow artifacts sync TYPE:HASH --to s3://bucket/prefix
+ionflow sync examples.artifacts:CountWords --run RUN_ID --to s3://bucket/prefix
+ionflow artifacts recover
+```
+
+Repeat `--artifact NAME=ID` for collections. Import schemas use `module:ClassName`;
+`--metadata` accepts a JSON object. Inventory queries need no consuming flow.
+
+Sync supports local and S3 stores and different prefixes. It copies referenced
+artifact parents and cross-run table parts before exposing receiving run records.
+Metadata conflicts are reported, not overwritten. Artifact-only sync carries
+producer evidence even when its flow history is absent. Run catalogs take
+precedence over those portable producer records.
+
+`artifacts recover` rebuilds inventory from descriptors and immutable revision
+exports. Use `--replace` to rebuild an existing registry. Run recovery also restores
+bindings and lineage. Permanent deletion and automatic recipe caching are deferred.
 
 ## A complete flow
 

@@ -1,10 +1,13 @@
 import importlib
+import json
 import sys
+import typing
 from pathlib import Path
 
 import typer
 
 from . import git
+from .artifact import Artifacts
 from .config import (
     CONFIG_DIR,
     CONFIG_FILE,
@@ -21,6 +24,8 @@ from .space import Space
 from .store import Store, parse_dest
 
 app = typer.Typer(add_completion=False, help="ionflow: minimal flows on S3 (or a local directory)")
+artifact_app = typer.Typer(help="Shared, typed files and bundles")
+app.add_typer(artifact_app, name="artifacts")
 
 
 @app.callback(invoke_without_command=True)
@@ -132,6 +137,25 @@ def _parse_params(cols, pairs):
     return out
 
 
+def _parse_artifacts(cls, pairs):
+    declared = cls.Inputs.declarations() if cls.Inputs else {}
+    out = {}
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or name not in declared:
+            raise typer.BadParameter(f"expected declared artifact NAME=ID, got {pair!r}")
+        if typing.get_origin(declared[name]) is list:
+            out.setdefault(name, []).append(value)
+        elif name in out:
+            raise typer.BadParameter(f"artifact {name!r} accepts one ID")
+        else:
+            out[name] = value
+    for name, hint in declared.items():
+        if typing.get_origin(hint) is list:
+            out.setdefault(name, [])
+    return out
+
+
 @app.command()
 def run(
     flow: str,
@@ -161,12 +185,15 @@ def run(
         True, "--processes/--threads", help="Run fan-out items in worker processes or threads"
     ),
     branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch sub-step"),
+    artifact: list[str] = typer.Option([], "--artifact", "-a", help="Artifact NAME=ID; repeat for collection inputs"),
 ):
     """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     from . import runner as _runner
 
     cls = _load(flow)
     if dry_run:
+        if artifact or param:
+            raise typer.BadParameter("resume inherits its params and artifacts; omit -p and -a")
         if not resume:
             raise typer.BadParameter("--dry-run previews a resume; pass --resume as well")
         origin, table = _runner.preview(cls, _config_or_setup(), resume)
@@ -179,6 +206,7 @@ def run(
         cls.run(
             _config_or_setup(),
             params=params,
+            artifacts=_parse_artifacts(cls, artifact) if artifact or not resume else None,
             resume=resume,
             allow_commit_drift=allow_commit_drift,
             max_workers=max_workers,
@@ -239,26 +267,120 @@ def sync(
     to: str = typer.Option(..., "--to", help="Target bucket as s3://bucket[/prefix] (prefix defaults to the config's)"),
     endpoint: str = typer.Option(None, "--endpoint", help="S3 endpoint URL (blank for AWS)"),
     region: str = typer.Option("us-east-1", "--region"),
+    run_id: str = typer.Option(None, "--run", help="Copy one run and its complete reference closure"),
 ):
-    """Push FLOW's local-store history (runs + ledger) to an S3 bucket and rebuild its catalog there.
-
-    Idempotent: re-run it as more local runs accumulate. The local store stays
-    untouched; switch the config to the bucket (`ionflow setup`) when ready.
-    """
+    """Copy FLOW's history and dependencies to a store without changing the source."""
     cfg = _config_or_setup()
-    if not cfg.local_dir:
-        typer.echo("sync pushes a LOCAL store to S3, but this config already uses a bucket.")
-        raise typer.Exit(1)
-    if not Store.credentials():
-        typer.echo("No AWS credentials found for the target bucket (env / ~/.aws / IAM).")
-        raise typer.Exit(1)
-    bucket, prefix = parse_dest(to)
-    target = Config(bucket=bucket, prefix=prefix or cfg.prefix, endpoint_url=endpoint, region=region)
+    target = _destination(cfg, to, endpoint, region)
     cls = _load(flow)
     src = Space.for_flow(Store.of(cfg), cls)
     dst = Space.for_flow(Store.of(target), cls)
-    n = src.sync_to(dst, cls)
-    typer.echo(f"synced {n['copied']} objects, {n['runs']} ledger run(s) to s3://{bucket}/{target.prefix}")
+    n = src.sync_to(dst, cls, run_id=run_id)
+    typer.echo(f"synced {n['copied']} objects, {n['runs']} ledger run(s) to {dst.store.uri(target.prefix)}")
+
+
+def _destination(cfg, to, endpoint=None, region="us-east-1"):
+    if not to.startswith("s3://"):
+        return Config(local_dir=str(Path(to).expanduser().resolve()), prefix=cfg.prefix)
+    bucket, prefix = parse_dest(to)
+    if not cfg.access_key and not Store.credentials():
+        raise typer.BadParameter("No AWS credentials found for the target bucket")
+    return Config(
+        bucket=bucket,
+        prefix=prefix or cfg.prefix,
+        endpoint_url=endpoint,
+        region=region,
+        access_key=cfg.access_key,
+        secret_key=cfg.secret_key,
+    )
+
+
+@artifact_app.command("add")
+def artifact_add(
+    schema: str,
+    path: Path,
+    metadata: str = typer.Option("{}", "--metadata", help="JSON object matching the artifact schema"),
+    name: str = typer.Option(None, "--name"),
+):
+    """Publish PATH using an artifact schema given as module:ClassName."""
+    candidate = _load(schema).from_path(path, name=name, **json.loads(metadata))
+    typer.echo(Artifacts(_config_or_setup()).put(candidate).id)
+
+
+@artifact_app.command("ls")
+def artifact_ls(kind: str = typer.Option(None, "--kind")):
+    """List inventory without importing a consuming flow."""
+    typer.echo(json.dumps(Artifacts(_config_or_setup()).records(kind), indent=2))
+
+
+@artifact_app.command("show")
+def artifact_show(artifact_id: str):
+    """Show a reference and its current metadata."""
+    typer.echo(json.dumps(Artifacts(_config_or_setup()).get(artifact_id).snapshot(), indent=2))
+
+
+@artifact_app.command("update")
+def artifact_update(
+    artifact_id: str,
+    revision: int = typer.Option(..., "--revision"),
+    name: str = typer.Option(None, "--name"),
+    metadata: str = typer.Option(None, "--metadata"),
+):
+    """Edit metadata only if the supplied revision is still current."""
+    ref = Artifacts(_config_or_setup()).update(
+        artifact_id, revision=revision, name=name, metadata=json.loads(metadata) if metadata is not None else None
+    )
+    typer.echo(json.dumps(ref.snapshot(), indent=2))
+
+
+@artifact_app.command("path")
+def artifact_path(artifact_id: str):
+    """Materialize and print a verified local path."""
+    typer.echo(Artifacts(_config_or_setup()).get(artifact_id).local_path())
+
+
+@artifact_app.command("lineage")
+def artifact_lineage(artifact_id: str):
+    """Show parents, original producers, and step-scoped consumers."""
+    registry = Artifacts(_config_or_setup())
+    typer.echo(
+        json.dumps(
+            {
+                "parents": registry.parents(artifact_id),
+                "producers": registry.producers(artifact_id),
+                "consumers": registry.consumers(artifact_id),
+            },
+            indent=2,
+        )
+    )
+
+
+@artifact_app.command("query")
+def artifact_query(sql: str):
+    """Query artifact inventory, files, and cross-flow activity views."""
+    Artifacts(_config_or_setup()).duck().sql(sql).show()
+
+
+@artifact_app.command("sync")
+def artifact_sync(
+    artifact_id: list[str] = typer.Argument(None),
+    to: str = typer.Option(..., "--to"),
+    endpoint: str = typer.Option(None, "--endpoint"),
+    region: str = typer.Option("us-east-1", "--region"),
+):
+    """Copy selected artifacts and their parents; omit IDs to copy the inventory."""
+    cfg = _config_or_setup()
+    n = Artifacts(cfg).sync_to(Artifacts(_destination(cfg, to, endpoint, region)), artifact_id or None)
+    typer.echo(f"synced {n} artifact(s)")
+
+
+@artifact_app.command("recover")
+def artifact_recover(replace: bool = typer.Option(False, "--replace")):
+    """Rebuild the registry from descriptors and revision exports."""
+    registry = Artifacts(_config_or_setup())
+    if registry.lake.register.read()[0] is not None and not replace:
+        raise typer.BadParameter("registry exists; pass --replace to rebuild")
+    typer.echo(f"recovered {registry.recover()} artifact(s)")
 
 
 @app.command("catalog-backfill")
