@@ -78,6 +78,34 @@ def test_artifact_edits_merge_and_concurrent_edits_conflict(workspaces, tmp_path
     assert Artifacts(a.config).get(ref.id).name == "two"
 
 
+def test_run_download_can_exclude_unavailable_artifact_payloads(workspaces, repo, tmp_path):
+    a, b = workspaces
+    path = tmp_path / "input.fa"
+    path.write_text(">p\nPEPTIDE\n")
+    fasta = Artifacts(a.config).put(Fasta.from_path(path))
+    rid = BuildLibrary.run(
+        a.config, repo=repo, use_processes=False, artifacts={"fasta": fasta.id}, params={"work_dir": str(tmp_path)}
+    )
+    library = next(r["id"] for r in a.artifacts() if r["kind"] == "flow-library")
+    a.transfer(a.plan("up", BuildLibrary.flow_id(), rid, include_artifacts=[library]))
+    b.refresh()
+    with pytest.raises(MissingPayload):
+        b.plan("down", BuildLibrary.flow_id(), rid)
+    results = b.plan("down", BuildLibrary.flow_id(), rid, include_artifacts=[])
+    assert results.artifacts == []
+    b.transfer(results)
+    assert all(not r["local"] for r in b.artifacts())
+    assert {r["id"] for r in b.artifacts()} == {fasta.id, library}
+    assert b.runs(BuildLibrary.flow_id())[0]["local"]
+    with BuildLibrary.duck(b.config) as con:
+        assert con.sql("SELECT n FROM digest").fetchone() == (len(path.read_bytes()),)
+    b.transfer(b.plan("down", artifact_ids=[library], include_artifacts=[library]))
+    assert Artifacts(b.config).availability()[library]["local"]
+    assert not Artifacts(b.config).availability()[fasta.id]["local"]
+    with pytest.raises(ValueError, match="not a referenced artifact"):
+        b.plan("down", artifact_ids=[library], include_artifacts=["unknown"])
+
+
 def test_offline_refresh_retains_inventory_and_presence(workspaces, tmp_path, monkeypatch):
     a, _ = workspaces
     path = tmp_path / "input.fa"

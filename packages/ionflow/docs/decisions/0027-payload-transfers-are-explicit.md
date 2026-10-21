@@ -13,6 +13,11 @@ Run transfers include reused table parts, required artifacts and their parents.
 Artifact transfers include required parents, not arbitrary descendants. Callers
 may explicitly select additional related artifacts, such as Snage indexes.
 
+Callers may select artifact payloads within the reference closure with
+`include_artifacts`. Unselected artifacts retain metadata and lineage, but
+their payloads need not exist at the source. An empty selection transfers run
+results only. Presence is recorded only for selected, verified payloads.
+
 Transfers stage and verify files before registration. An interrupted transfer
 does not claim complete availability. Retries reuse verified files. A run's
 presence refers to its committed revision; newer progress invalidates an older
