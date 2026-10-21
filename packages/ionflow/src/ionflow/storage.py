@@ -132,8 +132,14 @@ def plan_transfer(
     flow_id: str | None = None,
     run_id: str | None = None,
     artifact_ids: list[str] | None = None,
+    *,
+    include_artifacts: list[str] | None = None,
 ) -> TransferPlan:
-    """Plan a reference closure using catalogs, never recovery exports."""
+    """Plan a reference closure; optionally select artifact payloads within it.
+
+    Unselected artifacts retain their metadata and lineage without requiring
+    their payloads at either endpoint.
+    """
     registry = Artifacts(source)
     runs, tables = [], {}
     ids = set(artifact_ids or [])
@@ -162,6 +168,9 @@ def plan_transfer(
                 wanted.add(path.split("/", 1)[0].removeprefix("run_id="))
         tables = cat.tables()
     ids = _closure(registry, ids)
+    payload_ids = ids if include_artifacts is None else sorted(set(include_artifacts))
+    if unknown := set(payload_ids) - set(ids):
+        raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
     files = {}
 
     def add(relative: str, size: int, digest: str | None) -> None:
@@ -172,7 +181,7 @@ def plan_transfer(
             files[target_key] = {"source": source_key, "target": target_key, "size": size, "sha256": digest}
 
     source_records = {r["id"]: r for r in registry.records()}
-    for aid in ids:
+    for aid in payload_ids:
         for member in source_records[aid]["content"]["files"]:
             key = f"artifacts/_blobs/sha256/{member['sha256']}"
             info = source.stat(f"{source.prefix}/{key}")
@@ -205,7 +214,7 @@ def plan_transfer(
         target,
         flow_id,
         runs,
-        ids,
+        payload_ids,
         list(files.values()),
         tables,
         [source_records[aid] for aid in ids],
@@ -241,7 +250,7 @@ def execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None
             done += f["size"]
             if progress:
                 progress({"file": f["target"], "bytes": done, "total": total})
-    if plan.artifacts:
+    if plan.artifact_records:
         registry = Artifacts(target)
         conflicts = registry.merge_metadata(plan.artifact_records)
         if conflicts:
@@ -253,6 +262,8 @@ def execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None
                 registry.link(p, c, relation=relation, source=origin)
         for activity in plan.activities:
             outputs = [o for o in activity["outputs"] if o["artifact"]["id"] in plan.artifacts]
+            if not outputs:
+                continue
             parents = {p for o in outputs for p in o["parents"]}
             registry._import_activity(
                 activity
@@ -414,6 +425,8 @@ class Storage:
         flow_id: str | None = None,
         run_id: str | None = None,
         artifact_ids: list[str] | None = None,
+        *,
+        include_artifacts: list[str] | None = None,
     ) -> TransferPlan:
         """Plan an upload or download; neither direction is implicit."""
         if self.remote is None:
@@ -421,7 +434,7 @@ class Storage:
         if direction not in ("up", "down"):
             raise ValueError("direction must be up or down")
         source, target = (self.local, self.remote) if direction == "up" else (self.remote, self.local)
-        return plan_transfer(source, target, flow_id, run_id, artifact_ids)
+        return plan_transfer(source, target, flow_id, run_id, artifact_ids, include_artifacts=include_artifacts)
 
     def transfer(self, plan: TransferPlan, progress: Callable[[dict], None] | None = None) -> dict:
         """Execute an approved plan and refresh the metadata indicators."""
