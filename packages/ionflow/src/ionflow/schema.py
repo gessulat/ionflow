@@ -467,11 +467,11 @@ class FlowParams(BaseModel):
         out = {}
         for name, field_info in cls.model_fields.items():
             hint, nullable = _strip_optional(field_info.annotation)
-            if typing.get_origin(hint) is dict:
+            try:
+                col = Column(hint, nullable=nullable)
+            except TypeError:
                 col = _JsonParam(str, nullable=nullable)
                 col.dtype = hint
-            else:
-                col = Column(hint, nullable=nullable)
             out[name] = col
         return out
 
