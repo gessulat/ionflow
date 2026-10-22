@@ -10,8 +10,11 @@ hashes do not identify completed content.
 
 ## Decision
 
-Artifact schemas declare explicit stable type names and metadata fields. Each
-kind has one payload kind and metadata schema; incompatible schemas need a new
+Artifact schemas declare metadata fields. Their stored type names default to
+the lowercase class name, with underscores replaced by hyphens. Each subclass
+derives its own name; optional `kind=` supplies a stable override for renames or
+name collisions. Each kind has one payload kind and metadata schema;
+incompatible schemas need a new
 kind. File identity is its complete SHA-256. Bundle identity hashes a canonical,
 versioned manifest of relative member names, sizes and SHA-256 values.
 IDs combine type and digest; blobs are shared across types and

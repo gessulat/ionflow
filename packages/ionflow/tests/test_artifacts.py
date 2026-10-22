@@ -13,6 +13,27 @@ class Library(Artifact, kind="test-library", payload="bundle"):
     model: str
 
 
+def test_kind_defaults_to_the_class_name_and_can_be_overridden():
+    class RawDB(Artifact):
+        pass
+
+    class Derived_RawDB(RawDB):
+        pass
+
+    class Renamed(Artifact, kind="original-kind"):
+        pass
+
+    assert RawDB._kind == "rawdb"
+    assert Derived_RawDB._kind == "derived-rawdb"
+    assert Renamed._kind == "original-kind"
+
+
+@pytest.mark.parametrize("kind", ["", "RawDB", "raw_db", "raw/db"])
+def test_explicit_kind_still_requires_a_valid_slug(kind):
+    with pytest.raises(ValueError, match="lowercase slug"):
+        type("Invalid", (Artifact,), {}, kind=kind)
+
+
 def test_deduplication_ignores_names_and_reuses_blobs(anycfg, tmp_path, monkeypatch):
     registry = Artifacts(anycfg)
     a, b = tmp_path / "human.fasta", tmp_path / "renamed.fa"

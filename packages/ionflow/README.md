@@ -129,7 +129,7 @@ Declare stable types and named inputs:
 ```python
 from ionflow import Artifact, ArtifactInputs, Artifacts, Config, Flow
 
-class Fasta(Artifact, kind="fasta"):
+class Fasta(Artifact):
     organism: str | None
 
 class Library(Artifact, kind="example-library", payload="bundle"):
@@ -548,10 +548,10 @@ it does not read catalog internals or reconstruct payload paths.
 ```python
 from ionflow import Artifact, Browser, Filter, Table, View
 
-class Fasta(Artifact, kind="fasta"):
+class Fasta(Artifact):
     View = View(label="FASTA", plural="FASTAs", columns=("name", "size", "local"))
 
-class Library(Artifact, kind="library", payload="bundle"):
+class Library(Artifact, payload="bundle"):
     fasta_id: str
     View = View(plural="Libraries", references={"fasta_id": Fasta})
 
@@ -611,10 +611,10 @@ storage.transfer(plan)              # execute only after interface approval
 Artifact classes can declare separate upload and download defaults:
 
 ```python
-class Raw(Artifact, kind="raw", sync_up=False, sync_down=False):
+class Raw(Artifact, sync_up=False, sync_down=False):
     pass
 
-class RawDB(Artifact, kind="rawdb", sync_up=True, sync_down=False):
+class RawDB(Artifact, sync_up=True, sync_down=False):
     pass
 ```
 
@@ -624,6 +624,11 @@ the parent artifact type. They are payload-selection hints, not metadata fields
 or permissions. Defaults are captured at first publication and travel with the
 artifact record, so generic clients do not need the application's Python classes.
 Changing a declaration does not rewrite published records.
+
+The stored artifact kind defaults to the lowercase class name, with underscores
+replaced by hyphens (`RawDB` becomes `rawdb`). Each subclass derives its own kind.
+Use optional `kind="stable-name"` to retain identity across class renames or to
+distinguish classes with the same name.
 
 `Browser.describe()` exposes both defaults under each artifact kind's `sync`
 field. `Storage.preview()` sets each input's `chosen` flag using the direction.

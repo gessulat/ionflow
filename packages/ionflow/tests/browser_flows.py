@@ -24,11 +24,11 @@ class Rows(Table):
     View = View(columns=("text", "score"), labels={"score": "Confidence"}, references={"document_id": Document})
 
 
-class Raw(Artifact, kind="sync-raw", sync_up=False, sync_down=False):
+class Raw(Artifact, sync_up=False, sync_down=False):
     pass
 
 
-class RawDB(Artifact, kind="sync-rawdb", sync_up=True, sync_down=False):
+class RawDB(Artifact, sync_up=True, sync_down=False):
     pass
 
 

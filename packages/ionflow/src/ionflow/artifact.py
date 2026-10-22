@@ -167,10 +167,12 @@ def _stage(source: Path, target: Path) -> tuple[str, int]:
 class Artifact:
     """Payload schema, candidate, or persisted reference.
 
-    >>> class Fasta(Artifact, kind="example-fasta"):
+    >>> class Fasta(Artifact):
     ...     organism: str | None
     >>> Fasta.metadata_values({})
     {'organism': None}
+    >>> Fasta._kind
+    'fasta'
     """
 
     _kind: typing.ClassVar[str]
@@ -187,13 +189,15 @@ class Artifact:
     def __init_subclass__(
         cls,
         *,
-        kind: str,
+        kind: str | None = None,
         payload: str = "file",
         sync_up: bool | None = None,
         sync_down: bool | None = None,
         **kw: typing.Any,
     ) -> None:
         super().__init_subclass__(**kw)
+        if kind is None:
+            kind = cls.__name__.replace("_", "-").lower()
         if any(value is not None and type(value) is not bool for value in (sync_up, sync_down)):
             raise TypeError("sync_up and sync_down must be booleans")
         cls._sync = {

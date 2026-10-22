@@ -4,8 +4,9 @@ Status: accepted (2026-10-22).
 
 ## Decision
 
-Artifact declarations accept boolean `sync_up` and `sync_down` keywords. Both
-default to true and inherit from the parent type. Publication captures the defaults
+Artifact declarations accept boolean `sync_up` and `sync_down` keywords.
+The type name is derived from the class when `kind=` is omitted (0023).
+Both flags default to true and inherit from the parent type. Publication captures the defaults
 in the portable artifact record, outside payload identity and domain metadata.
 Changing a declaration does not rewrite existing records.
 
