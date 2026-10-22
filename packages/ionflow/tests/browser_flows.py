@@ -24,6 +24,27 @@ class Rows(Table):
     View = View(columns=("text", "score"), labels={"score": "Confidence"}, references={"document_id": Document})
 
 
+class Raw(Artifact, sync_up=False, sync_down=False):
+    pass
+
+
+class RawDB(Artifact, sync_up=True, sync_down=False):
+    pass
+
+
+class Sizes(Table):
+    size: int
+
+
+class Archive(Flow):
+    class Inputs(ArtifactInputs):
+        raw: Raw
+        rawdb: RawDB
+
+    def sizes(self, rawdb: RawDB) -> Sizes:
+        return pa.table({"size": [rawdb.local_path().stat().st_size]})
+
+
 class Observe(Flow):
     class Inputs(ArtifactInputs):
         document: Document

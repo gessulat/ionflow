@@ -197,6 +197,25 @@ class TransferPlan:
         }
 
 
+def _choose_artifacts(
+    records: dict[str, dict],
+    ids: list[str],
+    included: list[str] | None,
+    direction: str | None,
+) -> list[str]:
+    """Use type defaults unless the caller supplies an exact checkbox selection."""
+    if direction not in (None, "up", "down"):
+        raise ValueError("direction must be up or down")
+    chosen = (
+        [aid for aid in ids if direction is None or records[aid]["sync"][direction]]
+        if included is None
+        else sorted(set(included))
+    )
+    if unknown := set(chosen) - set(ids):
+        raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
+    return chosen
+
+
 def plan_transfer(
     source: Store,
     target: Store,
@@ -205,6 +224,7 @@ def plan_transfer(
     artifact_ids: list[str] | None = None,
     *,
     include_artifacts: list[str] | None = None,
+    direction: str | None = None,
 ) -> TransferPlan:
     """Plan a reference closure; optionally select artifact payloads within it.
 
@@ -212,9 +232,10 @@ def plan_transfer(
     their payloads at either endpoint.
     """
     registry, runs, tables, ids = _selection(source, flow_id, run_id, artifact_ids, require_present=True)
-    payload_ids = ids if include_artifacts is None else sorted(set(include_artifacts))
-    if unknown := set(payload_ids) - set(ids):
-        raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
+    if direction is None and bool(source.local_dir) != bool(target.local_dir):
+        direction = "up" if source.local_dir else "down"
+    source_records = {r["id"]: r for r in registry.records()}
+    payload_ids = _choose_artifacts(source_records, ids, include_artifacts, direction)
     files = {}
 
     def add(relative: str, size: int, digest: str | None) -> None:
@@ -224,7 +245,6 @@ def plan_transfer(
         if info is None or info["size"] != size:
             files[target_key] = {"source": source_key, "target": target_key, "size": size, "sha256": digest}
 
-    source_records = {r["id"]: r for r in registry.records()}
     for aid in payload_ids:
         for member in source_records[aid]["content"]["files"]:
             key = f"artifacts/_blobs/sha256/{member['sha256']}"
@@ -309,8 +329,9 @@ def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | Non
         for p, c, relation, origin in plan.links:
             if [p, c, relation, origin] not in registry.links():
                 registry.link(p, c, relation=relation, source=origin)
+        metadata_ids = {record["id"] for record in plan.artifact_records}
         for activity in plan.activities:
-            outputs = [o for o in activity["outputs"] if o["artifact"]["id"] in plan.artifacts]
+            outputs = [o for o in activity["outputs"] if o["artifact"]["id"] in metadata_ids]
             if not outputs:
                 continue
             parents = {p for o in outputs for p in o["parents"]}
@@ -483,7 +504,9 @@ class Storage:
         if direction not in ("up", "down"):
             raise ValueError("direction must be up or down")
         source, target = (self.local, self.remote) if direction == "up" else (self.remote, self.local)
-        return plan_transfer(source, target, flow_id, run_id, artifact_ids, include_artifacts=include_artifacts)
+        return plan_transfer(
+            source, target, flow_id, run_id, artifact_ids, include_artifacts=include_artifacts, direction=direction
+        )
 
     def preview(
         self,
@@ -500,10 +523,8 @@ class Storage:
         if self.peer is None:
             raise ValueError("no remote configured")
         registry, runs, _, ids = _selection(self.local, flow_id, run_id, artifact_ids, require_present=False)
-        chosen = ids if include_artifacts is None else sorted(set(include_artifacts))
-        if unknown := set(chosen) - set(ids):
-            raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
         records = {r["id"]: r for r in registry.records()}
+        chosen = _choose_artifacts(records, ids, include_artifacts, direction)
         if self._remote is not None:
             peer = self._remote.uri(self._remote.prefix)
         else:

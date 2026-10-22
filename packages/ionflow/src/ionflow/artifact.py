@@ -102,6 +102,9 @@ def _metadata(record: dict, values: dict) -> dict:
 
 
 def _check_record(record: dict) -> None:
+    sync = record["sync"]
+    if not isinstance(sync, dict) or set(sync) != {"up", "down"} or any(type(v) is not bool for v in sync.values()):
+        raise ValueError("invalid artifact sync defaults")
     match = _ID.fullmatch(record["id"])
     content = record["content"]
     if match is None or match[1] != record["kind"] or match[2] != record["digest"]:
@@ -164,15 +167,18 @@ def _stage(source: Path, target: Path) -> tuple[str, int]:
 class Artifact:
     """Payload schema, candidate, or persisted reference.
 
-    >>> class Fasta(Artifact, kind="example-fasta"):
+    >>> class Fasta(Artifact):
     ...     organism: str | None
     >>> Fasta.metadata_values({})
     {'organism': None}
+    >>> Fasta._kind
+    'fasta'
     """
 
     _kind: typing.ClassVar[str]
     _payload: typing.ClassVar[str]
     _fields: typing.ClassVar[dict]
+    _sync: typing.ClassVar[dict[str, bool]] = {"up": True, "down": True}
     _path: Path
     _name: str | None
     _members: typing.Mapping[str, str | Path] | None
@@ -180,8 +186,24 @@ class Artifact:
     _record: dict | None = None
     _registry: typing.Any = None
 
-    def __init_subclass__(cls, *, kind: str, payload: str = "file", **kw: typing.Any) -> None:
+    def __init_subclass__(
+        cls,
+        *,
+        kind: str | None = None,
+        payload: str = "file",
+        sync_up: bool | None = None,
+        sync_down: bool | None = None,
+        **kw: typing.Any,
+    ) -> None:
         super().__init_subclass__(**kw)
+        if kind is None:
+            kind = cls.__name__.replace("_", "-").lower()
+        if any(value is not None and type(value) is not bool for value in (sync_up, sync_down)):
+            raise TypeError("sync_up and sync_down must be booleans")
+        cls._sync = {
+            "up": cls._sync["up"] if sync_up is None else sync_up,
+            "down": cls._sync["down"] if sync_down is None else sync_down,
+        }
         if not re.fullmatch(r"[a-z][a-z0-9-]*", kind) or payload not in ("file", "bundle"):
             raise ValueError("artifact kind must be a lowercase slug; payload must be file or bundle")
         cls._kind, cls._payload = kind, payload
@@ -423,6 +445,7 @@ class Artifacts:
             "created": utc_now().isoformat(),
             "content": content,
             "schema": {k: _spec(v) for k, v in candidate._fields.items()},
+            "sync": dict(candidate._sync),
             "history": [],
         }
 
@@ -804,86 +827,24 @@ class Artifacts:
             self._import_activity(json.loads(self.store.get(key)))
         return len(records)
 
-    def sync_to(self, other: "Artifacts", ids: list[str] | None = None) -> int:
-        """Copy an artifact closure before any receiving run references it."""
+    def sync_to(
+        self,
+        other: "Artifacts",
+        ids: list[str] | None = None,
+        *,
+        include_artifacts: list[str] | None = None,
+        direction: str | None = None,
+    ) -> int:
+        """Sync closure metadata and the payloads selected by directional defaults."""
+        from .storage import execute_transfer, plan_transfer
+
         with payload_lock(self.store, other.store):
-            return self._sync_to(other, ids)
-
-    def _sync_to(self, other: "Artifacts", ids: list[str] | None) -> int:
-        records = {r["id"]: r for r in self.records()}
-        wanted, links = set(records if ids is None else ids), self.links()
-        activities = self.activities()
-        while True:
-            parents = {p for p, c, _, _ in links if c in wanted}
-            parents.update(
-                p for a in activities for o in a["outputs"] if o["artifact"]["id"] in wanted for p in o["parents"]
+            plan = plan_transfer(
+                self.store,
+                other.store,
+                artifact_ids=ids if ids is not None else [r["id"] for r in self.records()],
+                include_artifacts=include_artifacts,
+                direction=direction,
             )
-            if not parents - wanted:
-                break
-            wanted.update(parents)
-        existing = {r["id"]: r for r in other.records()}
-        for aid in wanted:
-            record, old = records[aid], existing.get(aid)
-            if old and (old["schema"], old["payload"]) != (record["schema"], record["payload"]):
-                raise TypeError(f"{aid}: source and target artifact schemas differ")
-            if (
-                old
-                and (old["metadata"], old["name"]) != (record["metadata"], record["name"])
-                and (
-                    metadata_token(old) not in record.get("history", [])
-                    and metadata_token(record) not in old.get("history", [])
-                )
-            ):
-                raise MetadataConflict(f"{aid}: source and target metadata differ")
-        for aid in sorted(wanted):
-            record = records[aid]
-            for member in record["content"]["files"]:
-                key = f"_blobs/sha256/{member['sha256']}"
-                info = other.store.stat(f"{other.root}/{key}")
-                if info is None or info["size"] != member["size"]:
-                    with tempfile.TemporaryDirectory(prefix="ionflow-sync-") as tmp:
-                        p = Path(tmp) / "blob"
-                        self.store.download(f"{self.root}/{key}", str(p))
-                        with p.open("rb") as f:
-                            if (
-                                hashlib.file_digest(f, "sha256").hexdigest() != member["sha256"]
-                                or p.stat().st_size != member["size"]
-                            ):
-                                raise ValueError(f"artifact checksum mismatch: {aid}")
-                        other.store.upload(f"{other.root}/{key}", str(p))
-            other.store.put(other.directory(aid) + "/content.json", _json(record["content"]).encode())
-
-            def commit(con: typing.Any, record: dict = record) -> None:
-                other._genesis(con)
-                row = con.execute("SELECT record FROM lake.artifacts WHERE id = ?", [record["id"]]).fetchone()
-                if row is None:
-                    other._insert(con, record)
-                else:
-                    current = json.loads(row[0])
-                    if metadata_token(current) in record.get("history", []):
-                        con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(record), record["id"]])
-                    elif (current["metadata"], current["name"]) != (record["metadata"], record["name"]) and (
-                        metadata_token(record) not in current.get("history", [])
-                    ):
-                        raise MetadataConflict(f"{record['id']}: concurrent metadata edit during sync")
-
-            other.lake.commit(commit)
-            other.mark_present(aid)
-            other._export(other.get(aid).snapshot())
-        target_links = {tuple(values) for values in other.links()}
-        for p, c, relation, source in links:
-            if p in wanted and c in wanted and (p, c, relation, source) not in target_links:
-                other.link(p, c, relation=relation, source=source)
-        for activity in activities:
-            outputs = [o for o in activity["outputs"] if o["artifact"]["id"] in wanted]
-            if outputs:
-                parents = {p for o in outputs for p in o["parents"]}
-                other._import_activity(
-                    activity
-                    | {
-                        "outputs": outputs,
-                        "uses": [u for u in activity["uses"] if u["artifact"]["id"] in parents],
-                        "ancestors": sorted(parents | {o["artifact"]["id"] for o in outputs}),
-                    }
-                )
-        return len(wanted)
+            execute_transfer(plan)
+            return len(plan.artifact_records)

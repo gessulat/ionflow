@@ -71,6 +71,7 @@ class Browser:
                 {
                     "kind": kind,
                     "payload": schema._payload,
+                    "sync": dict(schema._sync),
                     "fields": {name: _spec(hint) for name, hint in fields.items()},
                     "view": _description(schema, fields),
                 }
