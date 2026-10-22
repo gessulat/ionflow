@@ -152,6 +152,8 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   Metadata refresh merges logical records without reading outputs or registering
   absent files. Explicit transfer plans pin revisions, direction and bytes.
   Runs have one execution origin; divergent artifact edits require resolution.
+  Parent transfer selections include child results and resume history (0031);
+  one approval pins versions across their separate flow catalogs.
 - `store.py` — `Store.of(cfg)` selects one physical local/S3 endpoint; fresh
   connections, never memoized; builds DuckLakes. `s3_client` stays
   module-level — the documented side-input hatch.

@@ -8,11 +8,11 @@ import pyarrow as pa
 from ionflow import Artifact, ArtifactInputs, Branch, Call, Fanout, Flow, FlowParams, Table, subflow
 
 
-class Raw(Artifact, kind="composition-raw"):
+class Raw(Artifact, kind="composition-raw", sync_up=False, sync_down=False):
     pass
 
 
-class RawDB(Artifact, kind="composition-rawdb"):
+class RawDB(Artifact, kind="composition-rawdb", sync_up=True, sync_down=False):
     pass
 
 
@@ -63,6 +63,12 @@ class TablePipeline(Flow):
     @subflow(Convert, output="checked")
     def result(self, raw: Raw) -> Call[Result]:
         return Call(artifacts={"raw": raw}, params={"work_dir": self.work_dir})
+
+
+class ArtifactPipeline(Flow):
+    Inputs = Pipeline.Inputs
+    Params = Pipeline.Params
+    converted = Pipeline.converted
 
 
 class Batch(Flow):

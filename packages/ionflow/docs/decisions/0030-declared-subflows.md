@@ -41,3 +41,6 @@ collected in the child first. Tables materialize as parent parts; artifacts rema
 shared references. Additional child tables and telemetry transfer separately.
 This contract adds no takeover of running children, cancellation protocol,
 cross-store execution, or historical-store migration.
+
+2026-10-22: decision 0031 extends parent transfer scope to include child results,
+telemetry, and resume history. Separate transfers are no longer required.
