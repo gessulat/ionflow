@@ -113,6 +113,10 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
 - `flow.py` — `Flow` base; subclasses register under `flow_id()` =
   module-qualified class name, ALSO the S3 namespace (rename/move a class = new
   flow). No scratch mode (0012). `discover_flows` imports a package's flows.
+- `composition.py` — `@subflow(Child, output="step")` and `Call[OutputSchema]`
+  declare child nodes (0030). The runner records each child's parent before
+  execution; resume finds attempts through the parent's origin chain. Children
+  keep independent manifests and producers. Browser registration includes them.
 - `runner.py` — a scheduler and nothing else (0021): one pool per run (spawn
   processes or threads) executes every task — a whole plain/fan-out step, or
   one item's pending sub-steps — so independent chains run concurrently and NO

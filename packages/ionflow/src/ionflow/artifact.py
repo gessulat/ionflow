@@ -661,7 +661,10 @@ class Artifacts:
             values = given[name]
             if many and not isinstance(values, list):
                 raise TypeError(f"artifact input {name!r} must be a list")
-            refs = [self.get(v.id if isinstance(v, Artifact) else v, schema) for v in (values if many else [values])]
+            refs = [
+                self.get(v.id, schema, snapshot=v.snapshot()) if isinstance(v, Artifact) else self.get(v, schema)
+                for v in (values if many else [values])
+            ]
             out[name] = [r.snapshot() for r in refs] if many else refs[0].snapshot()
         return out
 

@@ -16,7 +16,7 @@ from .store import Store
 _EMPTY_RUNS = (
     "(SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
     'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR AS origin_run_id, '
-    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom, NULL::VARCHAR AS artifacts WHERE false)"
+    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom, NULL::VARCHAR AS artifacts, NULL::VARCHAR AS parent WHERE false)"
 )
 
 

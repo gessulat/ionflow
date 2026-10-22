@@ -36,6 +36,54 @@ scheduler, no metadata server. Execution is local-first, with an optional S3 pee
 uv add ionflow    # or: pip install ionflow
 ```
 
+## Compose flows
+
+Declare a child flow on a parent step. Return its arguments with `Call`.
+The return annotation names the schema of the selected child output:
+
+```python
+from ionflow import ArtifactInputs, Call, Flow, subflow
+
+class SearchRun(Flow):
+    class Inputs(ArtifactInputs):
+        raw: Raw
+        fasta: Fasta
+
+    @subflow(ConvertRaw, output="rawdb")
+    def rawdb(self, raw: Raw) -> Call[RawDB]:
+        return Call(artifacts={"raw": raw})
+
+    @subflow(BuildLibrary, output="library")
+    def library(self, fasta: Fasta) -> Call[SpectralLibrary]:
+        return Call(artifacts={"fasta": fasta}, params={"model": "fragmentation"})
+
+    @subflow(BuildIndex, output="index")
+    def index(self, library: SpectralLibrary) -> Call[SpectralIndex]:
+        return Call(artifacts={"library": library}, params={"method": "HCD"})
+
+    @subflow(Search, output="summary")
+    def results(self, rawdb: RawDB, library: SpectralLibrary, index: SpectralIndex) -> Call[Summary]:
+        return Call(artifacts={"rawdb": rawdb, "library": library, "index": index})
+```
+
+The child classes and schemas above belong to the application. Each child also
+runs independently with its existing `run()` API. A subflow runs to completion
+before the parent receives its selected whole table or artifact output.
+Artifact outputs retain their child producer; table outputs become parent parts.
+Subflow nodes can run per branch and can themselves contain subflows.
+
+Child runs record their parent flow, run, step, and branch before executing work.
+Parent resume retains completed nodes. An incomplete node finds its recorded
+child: completed children are reused, and failed children resume their completed
+steps. Changed invocation arguments are rejected. A child still marked running
+is not started again. Child workers inherit the parent task's resource limits.
+
+`Browser(config, flows=[SearchRun])` also registers its child flows.
+`describe()` exposes subflow edges; `children(flow_id, run_id)` lists attempts,
+including children retained through parent resume. Metadata refresh carries these
+links. Payload transfer remains scoped to the selected run and its dependencies;
+transfer a child run separately to retain its additional tables and telemetry.
+
 ## Configure (the only setup)
 
 Run the wizard once per repo:

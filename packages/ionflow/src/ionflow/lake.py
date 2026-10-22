@@ -36,12 +36,24 @@ PROVENANCE = "publications"  # per-lake provenance table, appended on every publ
 # that the `ledger` view flattens against the flow's declarations at read time.
 RUNS_DDL = (
     "run_id VARCHAR NOT NULL, status VARCHAR NOT NULL, started TIMESTAMP NOT NULL, finished TIMESTAMP, "
-    '"commit" VARCHAR, origin_run_id VARCHAR, params VARCHAR, custom VARCHAR, artifacts VARCHAR'
+    '"commit" VARCHAR, origin_run_id VARCHAR, params VARCHAR, custom VARCHAR, artifacts VARCHAR, parent VARCHAR'
 )
 MANIFEST_DDL = "run_id VARCHAR NOT NULL, step VARCHAR NOT NULL, item_key VARCHAR NOT NULL, path VARCHAR NOT NULL"
-RUN_COLS = ("run_id", "status", "started", "finished", "commit", "origin_run_id", "params", "custom", "artifacts")
+RUN_COLS = (
+    "run_id",
+    "status",
+    "started",
+    "finished",
+    "commit",
+    "origin_run_id",
+    "params",
+    "custom",
+    "artifacts",
+    "parent",
+)
 _RUNS_SELECT = (
-    'SELECT run_id, status, started, finished, "commit", origin_run_id, params, custom, artifacts FROM lake.runs'
+    'SELECT run_id, status, started, finished, "commit", origin_run_id, '
+    "params, custom, artifacts, parent FROM lake.runs"
 )
 ACTIVITY_DDL = "run_id VARCHAR, step VARCHAR, item_key VARCHAR, record VARCHAR"
 SYSTEM_DDLS = {
@@ -64,6 +76,7 @@ def _decode_run(row):
     row["params"] = json.loads(row["params"] or "{}")
     row["custom"] = json.loads(row["custom"] or "{}")
     row["artifacts"] = json.loads(row["artifacts"] or "{}")
+    row["parent"] = json.loads(row["parent"] or "null")
     return row
 
 
@@ -449,6 +462,7 @@ def _meta_row(meta, run_id):
         json.dumps(meta.get("params") or {}),
         json.dumps(meta.get("custom") or {}, default=str),
         json.dumps(meta.get("artifacts") or {}),
+        json.dumps(meta.get("parent")),
     ]
 
 

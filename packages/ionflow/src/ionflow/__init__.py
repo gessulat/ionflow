@@ -1,3 +1,4 @@
+from .composition import Call, subflow
 from .config import Config
 from .dag import Branch, Collect, Fanout
 from .flow import Flow
@@ -11,6 +12,8 @@ __all__ = [
     "MetadataConflict",
     "ConstraintViolation",
     "Flow",
+    "Call",
+    "subflow",
     "Table",
     "LedgerColumns",
     "FlowParams",

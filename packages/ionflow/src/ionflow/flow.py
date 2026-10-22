@@ -47,7 +47,7 @@ class Flow:
         Renaming a flow class OR moving it to another module makes it a new flow
         (old runs stay under the old id); `__main__`/REPL flows have no stable id.
         """
-        return f"{cls.__module__}.{cls.__name__}"
+        return cls.__dict__.get("_flow_identity", f"{cls.__module__}.{cls.__name__}")
 
     @classmethod
     def run(cls, config=None, repo=".", **kw):
