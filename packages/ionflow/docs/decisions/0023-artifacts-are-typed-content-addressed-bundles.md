@@ -40,3 +40,6 @@ symlinks on import; reject escaping member names and directory symlinks.
 Storage reuse does not imply computation reuse. Bundles share file bytes without
 depending on the original host. Full-file hashing and staging are intentional
 ingestion costs. Permanent deletion and automatic recipe caching are deferred.
+
+2026-10-22: decision 0032 permits declared property identity instead of content
+identity. File checksums remain integrity and storage information.

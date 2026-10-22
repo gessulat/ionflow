@@ -81,8 +81,9 @@ is not started again. Child workers inherit the parent task's resource limits.
 `Browser(config, flows=[SearchRun])` also registers its child flows.
 `describe()` exposes subflow edges; `children(flow_id, run_id)` lists attempts,
 including children retained through parent resume. Metadata refresh carries these
-links. Payload transfer remains scoped to the selected run and its dependencies;
-transfer a child run separately to retain its additional tables and telemetry.
+links. Parent transfer plans include child results and telemetry, including retained
+children and origin records after resume. One approval pins all selected run revisions.
+Artifact payload defaults and explicit checkboxes apply across the combined selection.
 
 ## Embed the browser
 
@@ -179,10 +180,65 @@ or configuration migration; recreate development stores.
 
 ## Shared artifacts
 
-Artifacts live independently of runs. A file's identity is its complete SHA-256.
-A bundle's identity hashes a canonical manifest of relative filenames and file
-digests. Shared files upload once, including files shared between bundles.
-Names and metadata can change without changing an artifact's ID.
+Artifacts live independently of runs. By default, a file's identity is its SHA-256
+and a bundle's identity hashes its canonical file manifest. A type can instead
+declare the properties that make two builds interchangeable. Each artifact still
+has one ID. File checksums verify bytes and deduplicate storage in either case.
+Names and non-identity metadata can change; declared identity fields are immutable.
+
+Declare predictable output identity directly on the artifact:
+
+```python
+class Index(Artifact, payload="bundle", identity=("library", "method", "nces", "losses")):
+    library: Library
+    method: str
+    nces: list[int]
+    losses: list[str]
+
+class BuildIndex(Flow):
+    class Inputs(ArtifactInputs):
+        library: Library
+
+    class Params(FlowParams):
+        method: str = "HCD"
+        nces: list[int] = [30]
+        losses: list[str] = []
+
+    def index(self, library: Library) -> Index:
+        output = build_index(library.local_path(), self.method, self.nces, self.losses)
+        return Index.from_path(output, library=library, method=self.method,
+                               nces=self.nces, losses=self.losses)
+```
+
+Identity fields resolve by exact name from artifact inputs, parameters, or artifact
+step dependencies. Missing fields or incompatible types fail when defining the flow.
+Before executing `index`, ionflow checks local storage, then the configured peer.
+A remote hit downloads and verifies the output without requiring the build inputs
+locally. A miss executes the body. Returning a different identity fails the step.
+Use branch producers for fan-outs: each invocation must identify one output first.
+
+`Index.identity(library=library, method="HCD", nces=[30], losses=[])` calculates the
+same ID before any index files exist. Lists preserve their declared order; use
+Pydantic parameter validators to normalize values such as NCE sets once. Include
+all output-defining settings and a version field when build semantics change.
+
+```python
+BuildIndex.run(config, artifacts={"library": library.id}, reuse="auto")
+BuildIndex.run(config, artifacts={"library": library.id}, reuse="local")
+BuildIndex.run(config, artifacts={"library": library.id}, reuse="never")
+```
+
+`auto` permits local reuse or a verified output download. `local` never downloads
+for reuse. `never` executes every step, including resumed steps and all child flows.
+The CLI provides `--reuse auto|local|never` and `--no-reuse`. This execution policy
+is separate from artifact upload/download checkbox defaults. Input validation and
+payload integrity checks still apply when reuse is disabled.
+
+A CPU build and a GPU build may have the same declared identity and different
+checksums. Forced execution uses its newly built local files. Shared storage keeps
+its first complete copy; each run pins the exact file manifest it actually used.
+Archiving and restoring that run preserves those files. Steps with required side
+effects should not declare reusable artifact identity.
 
 Run history lives at `<prefix>/runs/<flow_id>/run_id=<id>/`. Flow catalogs live
 directly under their flow roots. Shared content lives at `<prefix>/artifacts/`;
@@ -510,8 +566,10 @@ EmbedDocs.run(params={"min_len": 12})
 
 Every param becomes a **ledger column** (queryable per run, recorded from the moment
 the run starts — see the `min_len` column in the ledger query below); `resume` always
-reuses the origin run's params. Types are limited to `int`/`float`/`str`/`bool` so
-params round-trip JSON and the command line.
+reuses the origin run's params. `FlowParams` is a strict Pydantic model: scalar,
+list, and string-keyed dictionary values round-trip as JSON. Use Pydantic fields
+and validators for constraints and normalization. Supply lists and dictionaries
+as JSON in CLI `-p` values. Table rows retain Arrow/DuckDB validation.
 
 ## Query every run as one database
 

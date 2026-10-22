@@ -34,3 +34,6 @@ Query views expose local data only. Run-specific reads reject unavailable data.
 The TUI and Snage use the same transfer API. No default preview reads remote
 step tables. Automatic eviction, deletion propagation and multiple remotes remain
 outside this decision.
+
+2026-10-22: decision 0032 permits verified output downloads when a run explicitly
+uses the auto reuse policy. Browsing and ordinary materialization remain unchanged.

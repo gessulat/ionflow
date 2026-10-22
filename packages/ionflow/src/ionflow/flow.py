@@ -38,6 +38,8 @@ class Flow:
                 raise TypeError(f"artifact inputs collide with steps/params/ledger: {sorted(collisions)}")
         if collisions := set(cls.params_columns()) & taken:
             raise TypeError(f"params collide with steps/ledger columns/config: {sorted(collisions)}")
+        if cls.Params and "_phases" in cls.Params.__private_attributes__:
+            raise TypeError("reserved parameter: _phases")
         Flow._registry[cls.flow_id()] = cls
 
     @classmethod

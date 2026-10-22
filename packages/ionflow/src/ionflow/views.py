@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args, get_origin
 
 if TYPE_CHECKING:
     from .artifact import Artifact
@@ -39,11 +39,16 @@ class View:
                 raise TypeError(f"reference {name!r} must target an Artifact type")
             if fields[name] not in (str, list[str]):
                 raise TypeError(f"reference {name!r} requires a string or string-list field")
+        references = {name: target._kind for name, target in self.references.items()}
+        for name, hint in fields.items():
+            target = get_args(hint)[0] if get_origin(hint) is list else hint
+            if isinstance(target, type) and issubclass(target, Artifact):
+                references[name] = target._kind
         return {
             "label": self.label,
             "plural": self.plural,
             "columns": list(self.columns or fields),
             "labels": dict(self.labels),
             "formats": dict(self.formats),
-            "references": {name: target._kind for name, target in self.references.items()},
+            "references": references,
         }

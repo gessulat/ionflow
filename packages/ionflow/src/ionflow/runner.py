@@ -25,6 +25,7 @@ from .git import require_clean
 from .phases import Phases
 from .plan import Planner
 from .provenance import ArtifactRuntime, activity_key, bindings, reused_activity
+from .reuse import Reuse, lookup
 from .space import Space, key_slug, utc_now
 from .state import Manifest, RunRecord, Slot
 from .store import Store
@@ -69,7 +70,35 @@ def _call(ctx, step, key):
         else:
             value = ctx.resolve(ctx.con, dep, kind, key, dag.steps[dep].output_table)
             kwargs[dep] = value if dag.steps[dep].is_artifact else StepInput(value)
+    expected = None
+    if step.is_artifact and step.output_table._identity and not step.subflow:
+        values = {
+            name: kwargs[name] if name in kwargs else getattr(ctx.flow, name) for name in step.output_table._identity
+        }
+        for name, value in values.items():
+            for ref in value if isinstance(value, list) else [value]:
+                if isinstance(ref, Artifact):
+                    ctx.flow.artifacts.use(ref, role=name)
+        expected = step.output_table.identity(**values)
+        found = lookup(step.output_table, values, ctx.flow.artifacts.registry, _RUN[ctx.run_id]["reuse"])
+        if found:
+            ref, source, size = found
+            ctx.flow.artifacts.reused(ref, source=source, size=size)
+            return ref
+    if not step.subflow:
+        for value in kwargs.values():
+            for ref in value if isinstance(value, list) else [value]:
+                if isinstance(ref, Artifact) and not ctx.flow.artifacts.registry.has_payload(ref):
+                    from .artifact import MissingPayload
+
+                    raise MissingPayload(f"{ref.id}: download this artifact before executing step '{step.name}'")
     result = step.method(ctx.flow, **kwargs)
+    if expected is not None:
+        if not isinstance(result, step.output_table):
+            raise TypeError(f"step '{step.name}' must return {step.output_table.__name__}")
+        actual = step.output_table.identity(**{k: result.metadata[k] for k in step.output_table._identity})
+        if actual != expected:
+            raise ValueError(f"step '{step.name}': output identity differs from its resolved inputs")
     return _call_subflow(ctx, step, key, result) if step.subflow else result
 
 
@@ -91,7 +120,7 @@ def _call_subflow(ctx: _Ctx, step: Step, key: str | int | None, call: Call) -> t
         and link["step"] == parent["step"]
         and link["key"] == parent["key"]
     ]
-    origin = max(candidates, key=lambda row: row["run_id"], default=None)
+    origin = max(candidates, key=lambda row: row["run_id"], default=None) if shared["reuse"] != "never" else None
     if origin:
         declarations = child.Inputs.declarations() if child.Inputs else {}
         expected = Artifacts(ctx.space.store).bind(declarations, call.artifacts)
@@ -115,6 +144,7 @@ def _call_subflow(ctx: _Ctx, step: Step, key: str | int | None, call: Call) -> t
             allow_commit_drift=shared["allow_commit_drift"] if origin else False,
             _parent=parent,
             _limits=(ctx.threads, ctx.memory_mb),
+            reuse=shared["reuse"],
         )
     row, triples = cat.run_state(child_id)
     selected = [(k, path) for name, k, path in triples if name == step.subflow.output]
@@ -438,14 +468,16 @@ class CommitDriftError(RuntimeError):
     """Resume refused: HEAD differs from the origin run's commit."""
 
 
-def preview(flow_cls, config, resume):
+def preview(flow_cls, config, resume, reuse: Reuse = "auto"):
     """(origin run_id, {step: (reused, computed)}) for a would-be `resume`,
     assuming unchanged keyed work-lists — see `Planner.preview`. Runs nothing."""
     cat = lake.Catalog(Space.for_flow(Store.of(config), flow_cls))
     row, rows = cat.run_state(resume)
     if row is None:
         raise RuntimeError("no complete run to resume" if resume == "latest" else f"origin run not found: {resume}")
-    return row["run_id"], Planner(flow_cls._dag, Manifest.from_rows(rows)).preview()
+    if reuse not in ("auto", "local", "never"):
+        raise ValueError("reuse must be auto, local, or never")
+    return row["run_id"], Planner(flow_cls._dag, Manifest.from_rows(rows if reuse != "never" else [])).preview()
 
 
 def run(
@@ -459,6 +491,7 @@ def run(
     params=None,
     allow_commit_drift=False,
     artifacts=None,
+    reuse: Reuse = "auto",
     _parent=None,
     _limits=None,
 ):
@@ -474,6 +507,8 @@ def run(
     """
     if not config.local_dir:
         raise ValueError("runs require a local store; configure local_dir and optional remote")
+    if reuse not in ("auto", "local", "never"):
+        raise ValueError("reuse must be auto, local, or never")
     if allow_commit_drift and not resume:
         raise ValueError("allow_commit_drift only applies to a resumed run; pass resume= as well")
     if resume and (params or artifacts):
@@ -497,11 +532,11 @@ def run(
     origin_run_id = origin_row["run_id"] if origin_row else None  # "latest" with no origin: fresh
     from .artifact import MissingPayload
 
-    if origin_row and not cat.availability()[origin_row["run_id"]]["local"]:
+    if origin_row and reuse != "never" and not cat.availability()[origin_row["run_id"]]["local"]:
         raise MissingPayload(f"run {origin_run_id}: download this run before resuming")
 
     manifest = Manifest()
-    origin = Manifest.from_rows(origin_rows)  # the origin run's parts, empty on a fresh run
+    origin = Manifest.from_rows(origin_rows if reuse != "never" else [])
     planner = Planner(dag, origin)  # ALL reuse decisions; inert on a fresh run
     pending = []  # manifest triples written since the last catalog commit
     custom = {}  # declared Ledger columns, merged from whole-step task results
@@ -523,7 +558,7 @@ def run(
                 activities[ak] = pending_activities[ak] = reused_activity(origin_row["activities"][ak])
 
     if origin_row:
-        if origin_row["commit"] != commit:
+        if origin_row["commit"] != commit and reuse != "never":
             # a mixed-commit run must be a visible, deliberate choice
             if not allow_commit_drift:
                 raise CommitDriftError(
@@ -532,7 +567,7 @@ def run(
                     "allow_commit_drift=True (CLI: --allow-commit-drift) to resume anyway."
                 )
             warnings.warn(f"resuming {origin_run_id} at a different commit; reused steps keep old code", stacklevel=2)
-        custom = dict(origin_row["custom"])  # reused steps won't reset these
+        custom = dict(origin_row["custom"]) if reuse != "never" else {}
         params = origin_row["params"]
         if dropped := set(params) - set(flow_cls.params_columns()):
             warnings.warn(f"origin params no longer declared, ignored: {sorted(dropped)}", stacklevel=2)
@@ -541,13 +576,6 @@ def run(
     params = flow_cls.resolve_params(params)
     declarations = flow_cls.Inputs.declarations() if flow_cls.Inputs else {}
     artifact_inputs = origin_row["artifacts"] if origin_row else Artifacts(store).bind(declarations, artifacts)
-    for value in artifact_inputs.values():
-        for ref in value if isinstance(value, list) else [value]:
-            if any(
-                not store.exists(f"{config.prefix}/artifacts/_blobs/sha256/{f['sha256']}")
-                for f in ref["content"]["files"]
-            ):
-                raise MissingPayload(f"{ref['id']}: download this artifact before starting a run")
     bindings(Artifacts(store), artifact_inputs, declarations)
 
     record = RunRecord(
@@ -561,6 +589,7 @@ def run(
         custom={},
         artifacts=artifact_inputs,
         parent=_parent,
+        reuse=reuse,
     )
 
     def flush(row=False, genesis=None):
@@ -594,7 +623,7 @@ def run(
 
     workers = max_workers or os.cpu_count() or 1
     shared = {
-        "config": asdict(config) | {"remote": None},
+        "config": asdict(config),
         "file": inspect.getfile(flow_cls),
         "flow": flow_cls.__name__,  # for getattr after the file import
         "flow_id": flow_cls.flow_id(),  # for the Space; see _bound
@@ -607,6 +636,7 @@ def run(
         "module": flow_cls.flow_id().rsplit(".", 1)[0],
         "origins": [run_id],
         "allow_commit_drift": allow_commit_drift,
+        "reuse": reuse,
     }
     ancestor = origin_row
     while ancestor and ancestor["run_id"] not in shared["origins"]:

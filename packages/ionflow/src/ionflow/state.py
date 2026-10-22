@@ -23,6 +23,7 @@ BASE_COLS = frozenset(
         "local",
         "s3",
         "parent",
+        "reuse",
     }
 )
 
@@ -127,6 +128,7 @@ class RunRecord:
     custom: dict
     artifacts: dict = field(default_factory=dict)
     parent: dict | None = None
+    reuse: str = "auto"
 
     @property
     def _ok(self):
@@ -148,6 +150,7 @@ class RunRecord:
             json.dumps(self.custom if self._ok else {}, default=str),
             json.dumps(self.artifacts),
             json.dumps(self.parent),
+            self.reuse,
         ]
 
     def meta(self, manifest, activities=None):
@@ -165,5 +168,6 @@ class RunRecord:
             "custom": self.custom if ok else {},
             "artifacts": self.artifacts,
             "parent": self.parent,
+            "reuse": self.reuse,
             "activities": activities or {},
         }

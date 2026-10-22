@@ -13,3 +13,5 @@ Write it when the decision is made, while the "why not" is still fresh.
 AGENTS.md, at the repo root, stays the operational cheat sheet (how things work today); records
 here hold the *why*, so AGENTS.md should link to a record rather than inline
 its reasoning.
+
+- [0032 — Declared artifact identity and execution reuse](0032-declared-artifact-identity-and-reuse.md)

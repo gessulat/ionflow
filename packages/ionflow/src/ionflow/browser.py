@@ -78,6 +78,7 @@ class Browser:
                     "kind": kind,
                     "payload": schema._payload,
                     "sync": dict(schema._sync),
+                    "identity": list(schema._identity),
                     "fields": {name: _spec(hint) for name, hint in fields.items()},
                     "view": _description(schema, fields),
                 }
@@ -91,6 +92,7 @@ class Browser:
                 "finished": str,
                 "commit": str,
                 "origin_run_id": str,
+                "reuse": str,
                 "local": bool,
                 "s3": bool,
                 **{name: col.dtype for name, col in (flow.params_columns() | flow.ledger_columns()).items()},
