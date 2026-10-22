@@ -637,7 +637,7 @@ $ ionflow query mymodule:EmbedDocs "SELECT * FROM metrics WHERE step='vectors'"
 
 The same summary appears in the TUI run drill-down ("stats" entry), and the raw
 time series is the `metrics` SQL view (`ts, step, branch, rss, threads, cpu_user,
-cpu_system, run_id`). Failed runs keep their metrics.
+cpu_system, process_id, run_id`). Failed runs keep their metrics.
 
 The buffer is flushed to S3 every 60s while the run executes, so metrics survive
 hard kills (OOM, SIGKILL) up to the last minute and you can watch a running step's
@@ -661,7 +661,7 @@ def matches(self, inputs: Inputs) -> Matches:
         return search(inputs, calibration)
 ```
 
-Phases can nest. The `phases` view records their step, branch, parent span,
+Phases can nest. The `phases` view records their step, branch, process ID, parent span,
 UTC boundaries, and status. Exceptions close spans as failed and propagate.
 Worker telemetry survives failed steps in both process and thread mode.
 Process workers flush phases with their metrics heartbeat; thread workers flush

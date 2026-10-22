@@ -22,9 +22,18 @@ Local removal preserves metadata, remote copies, dependencies, and shared blobs.
 It refuses active runs and removal of table parts used by other available runs.
 Cache eviction remains distinct from canonical payload removal.
 
+Local publication and transfers hold a shared filesystem lock through payload
+checks and presence registration. Removal holds the exclusive lock through
+reference validation and deletion. These locks coordinate threads and processes
+independently of catalog CAS. Transfers reject plans whose skipped payloads have
+since disappeared. Run removal exports a metadata-only inventory snapshot before
+deleting run files, so catalog backfill retains its ledger, manifest, and lineage.
+
 Flows can record named phases inside a step. Ionflow stores their boundaries,
 nesting, branch identity, and success or failure alongside resource telemetry.
 Phases are observations, not steps, resumable units, or application output tables.
+Spans and resource samples carry their producing process ID. Phase summaries join
+by run, process, and time; concurrent threads share process memory measurements.
 
 ## Application boundary: Snage
 

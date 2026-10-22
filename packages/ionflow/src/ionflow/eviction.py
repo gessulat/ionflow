@@ -9,7 +9,7 @@ from .artifact import Artifacts
 from .lake import Catalog
 from .schema import _q
 from .storage import _safe_path
-from .store import Store
+from .store import Store, payload_lock
 
 
 def _paths(store: Store, keys: list[str]) -> list[Path]:
@@ -34,6 +34,11 @@ def remove_local(
     """Remove one payload after checking active runs and references to shared data."""
     if not store.local_dir:
         raise ValueError("payload removal requires a local store")
+    with payload_lock(store, exclusive=True):
+        _remove_local(store, artifact_id=artifact_id, flow_id=flow_id, run_id=run_id)
+
+
+def _remove_local(store: Store, *, artifact_id: str | None, flow_id: str | None, run_id: str | None) -> None:
     artifact = artifact_id is not None and flow_id is None and run_id is None
     run = artifact_id is None and flow_id is not None and run_id is not None
     if not (artifact or run):
@@ -69,7 +74,8 @@ def remove_local(
         assert flow_id is not None and run_id is not None
         _safe_path(f"runs/{flow_id}/run_id={run_id}")
         catalog = Catalog(store.space(flow_id))
-        if not any(r["run_id"] == run_id for r in catalog.inventory()):
+        record = next((r for r in catalog.inventory() if r["run_id"] == run_id), None)
+        if record is None:
             raise ValueError(f"unknown run: {run_id}")
         prefix = catalog.space.run_dir(run_id) + "/"
         paths = _paths(store, store.list(prefix))
@@ -108,5 +114,6 @@ def remove_local(
             con.execute("UPDATE lake.run_versions SET present = false WHERE run_id = ?", [run_id])
 
         catalog.lake.commit(unregister)
+        catalog.export_metadata(record)
     for path in paths:
         path.unlink(missing_ok=True)

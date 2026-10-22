@@ -26,6 +26,7 @@ class Sample(Table):
     threads: int  # native threads (includes DuckDB's)
     cpu_user: float  # cumulative process seconds
     cpu_system: float
+    process_id: int
 
 
 SCHEMA = Sample.arrow_schema()
@@ -89,7 +90,7 @@ class Sampler:
             threads = self._proc.num_threads()
             cpu = self._proc.cpu_times()
         step, branch = self._label
-        row = (time.time(), step, branch, rss, threads, cpu.user, cpu.system)
+        row = (time.time(), step, branch, rss, threads, cpu.user, cpu.system, self._proc.pid)
         with self._lock:
             self._rows.append(row)
             if len(self._rows) >= MAX_SAMPLES:
@@ -100,7 +101,7 @@ class Sampler:
         while i < len(rows) - 1:
             a, b = rows[i], rows[i + 1]
             if (a[1], a[2]) == (b[1], b[2]):  # never merge across a step boundary
-                folded.append((b[0], b[1], b[2], max(a[3], b[3]), max(a[4], b[4]), b[5], b[6]))
+                folded.append((b[0], b[1], b[2], max(a[3], b[3]), max(a[4], b[4]), b[5], b[6], b[7]))
                 i += 2
             else:
                 folded.append(a)
@@ -132,7 +133,7 @@ class Sampler:
 def to_table(rows):
     """Sample rows (from one or more samplers) as a pyarrow Table.
 
-    >>> to_table([(1.0, "a", None, 1, 2, 0.1, 0.2)]).schema.equals(SCHEMA)
+    >>> to_table([(1.0, "a", None, 1, 2, 0.1, 0.2, 123)]).schema.equals(SCHEMA)
     True
     """
     columns = list(zip(*rows, strict=True))

@@ -18,7 +18,7 @@ from .artifact import Artifacts, MetadataConflict, MissingPayload, metadata_toke
 from .config import Config
 from .lake import Catalog
 from .space import utc_now
-from .store import COPY_WORKERS, Store, parse_dest
+from .store import COPY_WORKERS, Store, parse_dest, payload_lock
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,11 @@ def plan_transfer(
 
 def execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None = None) -> dict:
     """Copy approved files, verify them, then expose receiving registrations."""
+    with payload_lock(plan.source, plan.target):
+        return _execute_transfer(plan, progress)
+
+
+def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None) -> dict:
     source, target = plan.source, plan.target
     if plan.flow_id:
         current = {r["run_id"]: r for r in Catalog(source.space(plan.flow_id)).inventory()}

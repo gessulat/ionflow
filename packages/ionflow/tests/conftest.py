@@ -71,6 +71,26 @@ def cfg(localcfg):
 
 
 @pytest.fixture
+def shared_blob_publication(localcfg, tmp_path):
+    """A receiving store and incoming bundle sharing the receiver's only file."""
+    from browser_flows import Bundle, Document
+
+    from ionflow import Artifacts, Config
+
+    target = Artifacts(localcfg)
+    path = tmp_path / "shared"
+    path.write_text("shared content")
+    original = target.put(Document.from_path(path))
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "shared").write_text("shared content")
+    (bundle / "unique").write_text("new content")
+    source = Artifacts(Config(local_dir=str(tmp_path / "source"), prefix="mf"))
+    incoming = source.put(Bundle.from_path(bundle, document_id=original.id))
+    return target, original, source, incoming, bundle
+
+
+@pytest.fixture
 def localcfg(tmp_path):
     """Local-mode config: the whole store is a directory, no S3 involved."""
     from ionflow.config import Config

@@ -347,8 +347,12 @@ class Catalog:
 
         self.lake.commit(commit)
         for record in records:
-            key = f"{self.space.root}/_inventory/run_id={record['run_id']}/{record['version']['token']}.json"
-            self.space.store.put(key, json.dumps(record | {"present": False}).encode())
+            self.export_metadata(record)
+
+    def export_metadata(self, record: dict) -> None:
+        """Keep a recoverable ledger, manifest, and lineage without requiring payloads."""
+        key = f"{self.space.root}/_inventory/run_id={record['run_id']}/{record['version']['token']}.json"
+        self.space.store.put(key, json.dumps(record | {"present": False}).encode())
 
     def mark_present(self, record: dict) -> None:
         """Register a verified receiving snapshot without advancing its execution."""

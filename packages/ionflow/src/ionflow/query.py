@@ -348,7 +348,7 @@ def phase_stats(con: duckdb.DuckDBPyConnection, run_id: str) -> duckdb.DuckDBPyR
                epoch(coalesce(p.ended, timezone('UTC', now())) - p.started) AS seconds,
                greatest(max(p.rss_start), max(p.rss_end), coalesce(max(m.rss), 0)) / 1048576.0 AS peak_rss_mb
         FROM phases p LEFT JOIN metrics m
-          ON m.run_id = p.run_id AND (m.branch = p.branch OR m.branch IS NULL)
+          ON m.run_id = p.run_id AND m.process_id = p.process_id
          AND m.ts BETWEEN p.started AND coalesce(p.ended, timezone('UTC', now()))
         WHERE p.run_id = ? GROUP BY ALL ORDER BY p.started, p.span_id
     """,

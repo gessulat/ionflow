@@ -13,7 +13,7 @@ import typing
 from pathlib import Path, PurePosixPath
 
 from .space import utc_now
-from .store import Store
+from .store import Store, payload_lock
 
 CHUNK = 8 * 2**20
 _KINDS: dict[str, type["Artifact"]] = {}
@@ -366,6 +366,10 @@ class Artifacts:
 
     def put[A: Artifact](self, candidate: A) -> A:
         """Publish staged content before making an artifact visible in the registry."""
+        with payload_lock(self.store):
+            return self._put(candidate)
+
+    def _put[A: Artifact](self, candidate: A) -> A:
         if candidate._record is not None:
             if candidate._registry is self:
                 return candidate
@@ -494,7 +498,13 @@ class Artifacts:
             con.execute("DELETE FROM lake.artifact_presence WHERE id = ?", [artifact_id])
             con.execute("INSERT INTO lake.artifact_presence VALUES (?, true)", [artifact_id])
 
-        self.lake.commit(commit)
+        with payload_lock(self.store):
+            record = self.get(artifact_id, Artifact).snapshot()
+            for member in record["content"]["files"]:
+                info = self.store.stat(f"{self.root}/_blobs/sha256/{member['sha256']}")
+                if info is None or info["size"] != member["size"]:
+                    raise MissingPayload(f"{artifact_id}: payload unavailable; review a new transfer plan")
+            self.lake.commit(commit)
 
     def merge_metadata(self, records: list[dict], peer: str | None = None, presence: dict | None = None) -> list[str]:
         """Import descriptors without blobs; return divergent metadata IDs."""
@@ -751,6 +761,10 @@ class Artifacts:
 
     def recover(self) -> int:
         """Restore inventory and edits from immutable revision exports; no payload deletion."""
+        with payload_lock(self.store):
+            return self._recover()
+
+    def _recover(self) -> int:
         records = {}
         for key in self._revision_keys():
             record = json.loads(self.store.get(key))
@@ -792,6 +806,10 @@ class Artifacts:
 
     def sync_to(self, other: "Artifacts", ids: list[str] | None = None) -> int:
         """Copy an artifact closure before any receiving run references it."""
+        with payload_lock(self.store, other.store):
+            return self._sync_to(other, ids)
+
+    def _sync_to(self, other: "Artifacts", ids: list[str] | None) -> int:
         records = {r["id"]: r for r in self.records()}
         wanted, links = set(records if ids is None else ids), self.links()
         activities = self.activities()

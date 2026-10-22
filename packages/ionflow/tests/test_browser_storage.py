@@ -1,11 +1,15 @@
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import pytest
 from browser_flows import Bundle, Observe
 
 from ionflow import Artifacts, Config, MissingPayload, Storage
-from ionflow.lake import Catalog
+from ionflow.lake import Catalog, backfill
+from ionflow.storage import execute_transfer, plan_transfer
 from ionflow.store import Store
 
 
@@ -78,11 +82,95 @@ def test_remove_run_refuses_reused_parts_and_can_restore(observed, repo, tmp_pat
     workspace.remove_local(flow_id=Observe.flow_id(), run_id=original)
     records = Catalog(workspace.local.space(Observe.flow_id())).inventory()
     assert len(records) == 2 and all(not r["present"] for r in records)
+    assert backfill(Observe, workspace.local.space(Observe.flow_id()), replace=True) == 2
+    assert Catalog(workspace.local.space(Observe.flow_id())).inventory() == records
     assert observed.browser.artifacts(Bundle._kind)[0]["local"]
     with Observe.duck(observed.config) as con:
         assert con.sql("SELECT count(*) FROM rows").fetchone() == (0,)
     workspace.transfer(workspace.plan("down", Observe.flow_id(), original, include_artifacts=[]))
     assert observed.browser.table(Observe.flow_id(), original, "rows")["total"] == 3
+
+
+def test_evicted_local_run_retains_recovery_metadata(observed):
+    space = observed.storage.local.space(Observe.flow_id())
+    before = Catalog(space).inventory()[0]
+    assert not space.store.list(space.root + "/_inventory/")
+    assert before["manifest"] and before["activities"] and before["artifacts"]
+    observed.storage.remove_local(flow_id=Observe.flow_id(), run_id=observed.run_id)
+    assert not space.store.list(space.run_dir(observed.run_id) + "/")
+    assert backfill(Observe, space, replace=True) == 1
+    assert Catalog(space).inventory() == [before | {"present": False}]
+    with Observe.duck(observed.config) as con:
+        assert con.sql("SELECT count(*) FROM rows").fetchone() == (0,)
+
+
+def _evict_artifact(config, artifact_id, started, finished):
+    storage = Storage(config)
+    started.set()
+    storage.remove_local(artifact_id=artifact_id)
+    finished.set()
+
+
+@pytest.mark.parametrize("operation", ["publish", "sync", "transfer"])
+def test_eviction_waits_for_shared_blob_publication(shared_blob_publication, monkeypatch, operation):
+    target, original, source, ref, bundle = shared_blob_publication
+    if operation == "publish":
+
+        def publish():
+            target.put(Bundle.from_path(bundle, document_id=original.id))
+    else:
+        plan = plan_transfer(source.store, target.store, artifact_ids=[ref.id])
+
+        def publish():
+            if operation == "sync":
+                source.sync_to(target, [ref.id])
+            else:
+                execute_transfer(plan)
+
+    publishing, release = Event(), Event()
+    mark_present = Artifacts.mark_present
+
+    def pause(self, artifact_id):
+        if self.store.identity == target.store.identity and artifact_id != original.id:
+            publishing.set()
+            assert release.wait(15)
+        mark_present(self, artifact_id)
+
+    monkeypatch.setattr(Artifacts, "mark_present", pause)
+    ctx = multiprocessing.get_context("spawn")
+    started, finished = ctx.Event(), ctx.Event()
+    worker = ctx.Process(target=_evict_artifact, args=(target.store.cfg, original.id, started, finished))
+    with ThreadPoolExecutor(1) as pool:
+        publication = pool.submit(publish)
+        try:
+            assert publishing.wait(15)
+            worker.start()
+            assert started.wait(15)
+            assert not finished.wait(0.5), "eviction overtook artifact publication"
+        finally:
+            release.set()
+            if worker.pid is not None:
+                worker.join(15)
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join()
+        publication.result()
+    assert worker.exitcode == 0
+    record = next(r for r in target.records() if r["kind"] == Bundle._kind)
+    assert target.availability()[record["id"]]["local"]
+    assert target.get(record["id"]).local_path().joinpath("shared").read_text() == "shared content"
+    assert not target.availability()[original.id]["local"]
+
+
+def test_transfer_rejects_blobs_evicted_after_planning(shared_blob_publication):
+    target, original, source, ref, _ = shared_blob_publication
+    plan = plan_transfer(source.store, target.store, artifact_ids=[ref.id])
+    Storage(target.store.cfg).remove_local(artifact_id=original.id)
+    with pytest.raises(MissingPayload, match="new transfer plan"):
+        execute_transfer(plan)
+    assert not target.availability()[ref.id]["local"]
+    execute_transfer(plan_transfer(source.store, target.store, artifact_ids=[ref.id]))
+    assert target.get(ref.id).local_path().joinpath("shared").read_text() == "shared content"
 
 
 def test_removal_rejects_active_runs_and_path_escapes(observed, tmp_path):

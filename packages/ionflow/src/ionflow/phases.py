@@ -26,6 +26,7 @@ class Phase(Table):
     status: str
     rss_start: int
     rss_end: int | None
+    process_id: int
 
 
 class Phases:
@@ -68,6 +69,7 @@ class Phases:
             "status": "running",
             "rss_start": self._process.memory_info().rss,
             "rss_end": None,
+            "process_id": self._process.pid,
         }
         with self._lock:
             self._rows.append(row)
