@@ -93,38 +93,77 @@ def _selection(
     artifact_ids: list[str] | None,
     *,
     require_present: bool,
-) -> tuple[Artifacts, list[dict], dict, list[str]]:
-    """Resolve references from metadata, shared by previews and exact plans."""
+) -> tuple[Artifacts, dict[str, dict], list[str]]:
+    """Resolve table reuse and declared child calls from metadata at one endpoint."""
     registry = Artifacts(source)
-    runs, tables = [], {}
+    groups, inventories, catalogs = {}, {}, {}
     ids = set(artifact_ids or [])
     if run_id is not None and flow_id is None:
         raise ValueError("run_id requires flow_id")
-    if flow_id is not None:
-        cat = Catalog(source.space(flow_id))
-        inventory = {r["run_id"]: r for r in cat.inventory()}
-        wanted = set(inventory if run_id is None else [run_id])
-        seen = set()
-        while remaining := wanted - seen:
-            rid = sorted(remaining)[0]
-            if rid not in inventory:
-                raise ValueError(f"run not found: {rid}")
-            record = inventory[rid]
-            if require_present and not record["present"]:
-                raise MissingPayload(f"run {rid}: payload unavailable at source; upload it from its originating store")
-            seen.add(rid)
-            runs.append(record)
-            ids.update(_artifact_ids(record))
-            for _, _, path in record["manifest"]:
-                _safe_path(path)
-                if ":" in path and "/" not in path:
-                    ids.add(path)
-                elif path.startswith("run_id="):
-                    wanted.add(path.split("/", 1)[0].removeprefix("run_id="))
-                else:
-                    raise ValueError(f"unexpected run part path: {path}")
-        tables = cat.tables()
-    return registry, runs, tables, _closure(registry, ids)
+    if flow_id is None:
+        return registry, groups, _closure(registry, ids)
+
+    def inventory(identifier: str) -> dict:
+        if identifier not in inventories:
+            catalogs[identifier] = Catalog(source.space(identifier))
+            inventories[identifier] = {r["run_id"]: r for r in catalogs[identifier].inventory()}
+        return inventories[identifier]
+
+    children = {}
+    for identifier in source.flow_ids():
+        for record in inventory(identifier).values():
+            if parent := record.get("parent"):
+                children.setdefault((parent["flow_id"], parent["run_id"]), []).append((identifier, record))
+    pending = [(flow_id, rid) for rid in (inventory(flow_id) if run_id is None else [run_id])]
+    selected = {}
+    while pending:
+        identifier, rid = pending.pop()
+        records = inventory(identifier)
+        if rid in selected.get(identifier, {}):
+            continue
+        if rid not in records:
+            raise ValueError(f"run not found: {rid}")
+        record = records[rid]
+        if require_present and not record["present"] and record["files"]:
+            raise MissingPayload(f"run {rid}: payload unavailable at source; upload it from its originating store")
+        selected.setdefault(identifier, {})[rid] = record
+        if record.get("origin_run_id"):
+            pending.append((identifier, record["origin_run_id"]))
+        ids.update(_artifact_ids(record))
+        for _, _, path in record["manifest"]:
+            _safe_path(path)
+            if ":" in path and "/" not in path:
+                ids.add(path)
+            elif path.startswith("run_id="):
+                pending.append((identifier, path.split("/", 1)[0].removeprefix("run_id=")))
+            else:
+                raise ValueError(f"unexpected run part path: {path}")
+        # The nearest parent attempt wins per call site. A resumed parent can
+        # retain a child completed before its own output was persisted.
+        calls, ancestors, ancestor = {}, set(), rid
+        while ancestor and ancestor not in ancestors:
+            ancestors.add(ancestor)
+            for child_flow, child in sorted(
+                children.get((identifier, ancestor), []), key=lambda item: item[1]["run_id"], reverse=True
+            ):
+                link = child["parent"]
+                calls.setdefault((link["step"], json.dumps(link["key"])), (child_flow, child["run_id"]))
+            ancestor = records.get(ancestor, {}).get("origin_run_id")
+        pending.extend(calls.values())
+    for identifier, records in selected.items():
+        dependencies = {
+            rid: {
+                p.split("/", 1)[0].removeprefix("run_id=")
+                for _, _, p in records[rid]["manifest"]
+                if p.startswith("run_id=") and not p.startswith(f"run_id={rid}/")
+            }
+            for rid in sorted(records)
+        }
+        groups[identifier] = {
+            "runs": [records[rid] for rid in graphlib.TopologicalSorter(dependencies).static_order()],
+            "tables": catalogs[identifier].tables(),
+        }
+    return registry, groups, _closure(registry, ids)
 
 
 @dataclass
@@ -141,6 +180,11 @@ class TransferPlan:
     artifact_records: list[dict] = field(default_factory=list)
     links: list[list] = field(default_factory=list)
     activities: list[dict] = field(default_factory=list)
+    run_groups: dict[str, dict] = field(default_factory=dict)
+
+    def _groups(self) -> dict[str, dict]:
+        """Child catalogs first, then the selected parent catalog."""
+        return self.run_groups | ({self.flow_id: {"runs": self.runs, "tables": self.tables}} if self.flow_id else {})
 
     def summary(self) -> dict:
         """Describe exactly which missing payload files need approval."""
@@ -153,12 +197,17 @@ class TransferPlan:
             "files": len(self.files),
             "bytes": sum(f["size"] for f in self.files),
         }
+        if self.run_groups:
+            body["children"] = [
+                {"flow_id": identifier, "runs": [r["run_id"] for r in group["runs"]]}
+                for identifier, group in sorted(self.run_groups.items())
+            ]
         token = hashlib.sha256(
             json.dumps(
                 [
                     body,
                     self.files,
-                    [r["version"] for r in self.runs],
+                    {identifier: [r["version"] for r in group["runs"]] for identifier, group in self._groups().items()},
                     [metadata_token(r) for r in self.artifact_records],
                 ],
                 sort_keys=True,
@@ -231,7 +280,7 @@ def plan_transfer(
     Unselected artifacts retain their metadata and lineage without requiring
     their payloads at either endpoint.
     """
-    registry, runs, tables, ids = _selection(source, flow_id, run_id, artifact_ids, require_present=True)
+    registry, groups, ids = _selection(source, flow_id, run_id, artifact_ids, require_present=True)
     if direction is None and bool(source.local_dir) != bool(target.local_dir):
         direction = "up" if source.local_dir else "down"
     source_records = {r["id"]: r for r in registry.records()}
@@ -252,38 +301,31 @@ def plan_transfer(
             if info is None or info["size"] != member["size"]:
                 raise MissingPayload(f"{aid}: payload unavailable at source")
             add(key, member["size"], member["sha256"])
-    for record in runs:
-        for f in record["files"]:
-            add(f"runs/{flow_id}/{f['path']}", f["size"], f["sha256"])
-        # Telemetry is optional data, transferred only after explicit approval.
-        space = source.space(flow_id)
-        for key in source.list(space.run_dir(record["run_id"]) + "/"):
-            if PurePosixPath(key).name.startswith(("_metrics", "_phases")):
-                info = source.stat(key)
-                if info is not None:
-                    add(key.removeprefix(source.prefix + "/"), info["size"], None)
+    for identifier, group in groups.items():
+        for record in group["runs"]:
+            for f in record["files"]:
+                add(f"runs/{identifier}/{f['path']}", f["size"], f["sha256"])
+            # Telemetry is optional data, transferred only after explicit approval.
+            space = source.space(identifier)
+            for key in source.list(space.run_dir(record["run_id"]) + "/"):
+                if PurePosixPath(key).name.startswith(("_metrics", "_phases")):
+                    info = source.stat(key)
+                    if info is not None:
+                        add(key.removeprefix(source.prefix + "/"), info["size"], None)
     selected = set(ids)
-    by_id = {r["run_id"]: r for r in runs}
-    dependencies = {
-        rid: {
-            p.split("/", 1)[0].removeprefix("run_id=")
-            for _, _, p in r["manifest"]
-            if p.startswith("run_id=") and not p.startswith(f"run_id={rid}/")
-        }
-        for rid, r in by_id.items()
-    }
-    runs = [by_id[rid] for rid in graphlib.TopologicalSorter(dependencies).static_order()]
+    root = groups.pop(flow_id, {"runs": [], "tables": {}})
     return TransferPlan(
         source,
         target,
         flow_id,
-        runs,
+        root["runs"],
         payload_ids,
         list(files.values()),
-        tables,
+        root["tables"],
         [source_records[aid] for aid in ids],
         [link for link in registry.links() if link[0] in selected and link[1] in selected],
         [a for a in registry.activities() if any(o["artifact"]["id"] in selected for o in a["outputs"])],
+        groups,
     )
 
 
@@ -295,9 +337,9 @@ def execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None
 
 def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None) -> dict:
     source, target = plan.source, plan.target
-    if plan.flow_id:
-        current = {r["run_id"]: r for r in Catalog(source.space(plan.flow_id)).inventory()}
-        if any(current[r["run_id"]]["version"] != r["version"] for r in plan.runs):
+    for identifier, group in plan._groups().items():
+        current = {r["run_id"]: r for r in Catalog(source.space(identifier)).inventory()}
+        if any(current.get(r["run_id"], {}).get("version") != r["version"] for r in group["runs"]):
             raise ValueError("source changed; review a new transfer plan")
 
     def copy(f: dict) -> dict:
@@ -343,23 +385,23 @@ def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | Non
                     "ancestors": sorted(parents | {o["artifact"]["id"] for o in outputs}),
                 }
             )
-    if plan.flow_id:
-        cat = Catalog(target.space(plan.flow_id))
-        cat.merge_metadata(plan.runs, plan.tables)
-        for record in plan.runs:
+    for identifier, group in plan._groups().items():
+        cat = Catalog(target.space(identifier))
+        cat.merge_metadata(group["runs"], group["tables"])
+        for record in group["runs"]:
             cat.mark_present(record)
             from .state import Manifest
 
             meta = record | {
                 "manifest": Manifest.from_rows(
                     [
-                        (s, k, target.space(plan.flow_id).root + "/" + p if p.startswith("run_id=") else p)
+                        (s, k, target.space(identifier).root + "/" + p if p.startswith("run_id=") else p)
                         for s, k, p in record["manifest"]
                     ]
                 ).meta(),
                 "activities": {json.dumps([a["step"], a["key"]]): a for a in record["activities"]},
             }
-            target.space(plan.flow_id).write_meta(record["run_id"], meta)
+            target.space(identifier).write_meta(record["run_id"], meta)
     return plan.summary() | {"copied": len(plan.files), "transferred_bytes": done}
 
 
@@ -522,7 +564,7 @@ class Storage:
             raise ValueError("direction must be up or down")
         if self.peer is None:
             raise ValueError("no remote configured")
-        registry, runs, _, ids = _selection(self.local, flow_id, run_id, artifact_ids, require_present=False)
+        registry, groups, ids = _selection(self.local, flow_id, run_id, artifact_ids, require_present=False)
         records = {r["id"]: r for r in registry.records()}
         chosen = _choose_artifacts(records, ids, include_artifacts, direction)
         if self._remote is not None:
@@ -572,10 +614,11 @@ class Storage:
                     member["sha256"],
                     f"{r['name']}/{member['path']}",
                 )
-        for run in runs:
-            for member in run["files"]:
-                path = f"runs/{flow_id}/{member['path']}"
-                add(path, member["size"], member["sha256"], path)
+        for identifier, group in groups.items():
+            for run in group["runs"]:
+                for member in run["files"]:
+                    path = f"runs/{identifier}/{member['path']}"
+                    add(path, member["size"], member["sha256"], path)
         return {
             "preview": True,
             "source": source,

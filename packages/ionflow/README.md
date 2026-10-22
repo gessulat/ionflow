@@ -81,8 +81,9 @@ is not started again. Child workers inherit the parent task's resource limits.
 `Browser(config, flows=[SearchRun])` also registers its child flows.
 `describe()` exposes subflow edges; `children(flow_id, run_id)` lists attempts,
 including children retained through parent resume. Metadata refresh carries these
-links. Payload transfer remains scoped to the selected run and its dependencies;
-transfer a child run separately to retain its additional tables and telemetry.
+links. Parent transfer plans include child results and telemetry, including retained
+children and origin records after resume. One approval pins all selected run revisions.
+Artifact payload defaults and explicit checkboxes apply across the combined selection.
 
 ## Embed the browser
 
