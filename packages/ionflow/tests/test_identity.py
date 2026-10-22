@@ -232,6 +232,8 @@ def test_cli_validates_json_params_and_exposes_force_execution(identity_build, m
         'digest={"charges":[2,3]}',
         "-p",
         "nces=[31,29]",
+        "-p",
+        'assignments=[{"file":"sample","nces":[29,31]}]',
     ]
     for flags in [["--reuse", "local"], ["--no-reuse"]]:
         result = runner.invoke(cli.app, args + flags)
@@ -242,6 +244,7 @@ def test_cli_validates_json_params_and_exposes_force_execution(identity_build, m
         ("[2,3]", [29, 31], "local"),
         ("[2,3]", [29, 31], "never"),
     ]
+    assert con.sql("SELECT DISTINCT json_extract(assignments, '$[0].nces') FROM ledger").fetchall() == [("[29,31]",)]
     con.close()
     assert runner.invoke(cli.app, args + ["--reuse", "invalid"]).exit_code != 0
 

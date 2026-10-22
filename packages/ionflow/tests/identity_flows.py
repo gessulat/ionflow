@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AfterValidator
 
@@ -73,6 +73,7 @@ class DictionaryBuild(Flow):
 
     class Params(Build.Params):
         digest: dict[str, list[int]]
+        assignments: list[dict[str, Any]]
 
     index = Build.index
 
