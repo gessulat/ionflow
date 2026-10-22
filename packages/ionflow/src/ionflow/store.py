@@ -3,7 +3,10 @@ import hashlib
 import os
 import shutil
 import tempfile
+import threading
 import weakref
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -18,6 +21,51 @@ from schrein.ducklake import CATALOG_KEY, load_extension
 
 MULTIPART_THRESHOLD = 8 * 2**20  # boto3's default; below it, skip TransferManager churn
 COPY_WORKERS = 16  # sync uploads are latency-bound, not CPU-bound
+
+if os.name == "nt":  # pragma: no cover — Windows
+    import msvcrt
+else:
+    import fcntl
+
+_payload_locks = threading.local()
+
+
+@contextmanager
+def _payload_lock(root: Path, exclusive: bool) -> Iterator[None]:
+    held = getattr(_payload_locks, "held", None)
+    if held is None:
+        held = _payload_locks.held = {}
+    if root in held:
+        if exclusive and not held[root]:
+            raise RuntimeError("cannot upgrade a payload lock during publication")
+        yield
+        return
+    # Separate from the catalog CAS lock; schrein hides .schrein-* files from LIST.
+    with (root / ".schrein-ionflow-payloads.lock").open("a+b") as stream:
+        if os.name == "nt":  # pragma: no cover — Windows serializes readers too
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        held[root] = exclusive
+        try:
+            yield
+        finally:
+            del held[root]
+            if os.name == "nt":  # pragma: no cover
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def payload_lock(*stores: "Store", exclusive: bool = False) -> Iterator[None]:
+    """Keep local payload checks, publication, and removal atomic across processes."""
+    roots = sorted({Path(s.local_dir).expanduser().resolve() for s in stores if s.local_dir})
+    with ExitStack() as stack:
+        for root in roots:
+            stack.enter_context(_payload_lock(root, exclusive))
+        yield
 
 
 def s3_client(cfg):

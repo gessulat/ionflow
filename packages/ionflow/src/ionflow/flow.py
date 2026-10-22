@@ -1,5 +1,6 @@
 import importlib
 import pkgutil
+from contextlib import AbstractContextManager
 
 from . import query, runner
 from .config import Config
@@ -27,9 +28,11 @@ class Flow:
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
         cls._dag = build_dag(cls)
-        if collisions := set(cls.ledger_columns()) & {"local", "s3"}:
-            raise TypeError(f"reserved ledger availability columns: {sorted(collisions)}")
-        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config", "artifacts"}
+        if collisions := set(cls.ledger_columns()) & {"local", "s3", "phase", "_phases"}:
+            raise TypeError(f"reserved ledger columns: {sorted(collisions)}")
+        taken = (
+            set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config", "artifacts", "phase", "_phases"}
+        )
         if cls.Inputs:
             if collisions := set(cls.Inputs.declarations()) & (taken | set(cls.params_columns())):
                 raise TypeError(f"artifact inputs collide with steps/params/ledger: {sorted(collisions)}")
@@ -59,6 +62,12 @@ class Flow:
     def publish(cls, run_id, step, table, config=None, where=None, dest=None):
         """Bless `step`'s output from `run_id` as `table` in the publish DuckLake."""
         return _publish(cls, config or Config.load(), run_id, step, table, where=where, dest=dest)
+
+    def phase(self, name: str) -> AbstractContextManager[None]:
+        """Record a named span inside the current step, including nested spans and failures."""
+        from .phases import phase
+
+        return phase(self, name)
 
     @classmethod
     def ledger_columns(cls):

@@ -69,7 +69,7 @@ uv run --directory packages/ionflow ionflow run examples.embed:EmbedDocs   # als
 ## Performance analysis (start here when optimizing a step)
 
 Every run records CPU/memory for every step and item — always on, exposed as
-the `metrics` view (`ts, step, branch, rss, threads, cpu_user, cpu_system,
+the `metrics` view (`ts, step, branch, rss, threads, cpu_user, cpu_system, process_id,
 run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
 
 - CPU values are cumulative per process — diff over a window; effective cores =
@@ -168,7 +168,8 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   system tables; `commit_run` = genesis + row upsert + manifest inserts +
   registration of NEWLY CREATED parts (own-folder path = created here, else a
   reference, 0020), one replay-safe CAS commit. `backfill()` restores
-  everything from `_meta.json` records — the recovery path, and how `sync`
+  everything from `_meta.json` records and metadata-only `_inventory` snapshots
+  retained during transfer and eviction — the recovery path, and how `sync`
   derives its target. No schema-migration workflow, deliberately (new flow name
   or `backfill --replace`). `publish()` blesses a step's output into the
   publish lake (atomic replace, snapshot history, `publications` provenance).

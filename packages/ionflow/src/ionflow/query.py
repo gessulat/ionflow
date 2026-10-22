@@ -313,6 +313,7 @@ def duck(flow_cls, config):
             con.execute(f"CREATE VIEW {name} AS {_empty_view_sql(step.output_table)}")
     _ledger_view(con, flow_cls, attached, config)
     _metrics_view(con, space)
+    _phases_view(con, space)
     artifact_views(con, Artifacts(store), activities, inputs)
     return con
 
@@ -327,3 +328,29 @@ def _metrics_view(con, space):
         con.execute(f"CREATE VIEW metrics AS {read_parquet_sql(space.uri(space.metrics_glob))}")
     except duckdb.IOException:
         con.execute(f"CREATE VIEW metrics AS {_empty_view_sql(metrics.Sample)}")
+
+
+def _phases_view(con: duckdb.DuckDBPyConnection, space: Space) -> None:
+    from .phases import Phase
+
+    try:
+        glob = space.uri(f"{space.root}/run_id=*/_phases*.parquet")
+        con.execute(f"CREATE VIEW phases AS {read_parquet_sql(glob)}")
+    except duckdb.IOException:
+        con.execute(f"CREATE VIEW phases AS {_empty_view_sql(Phase)}")
+
+
+def phase_stats(con: duckdb.DuckDBPyConnection, run_id: str) -> duckdb.DuckDBPyRelation:
+    """Phase boundaries and process memory, including spans shorter than a sampling interval."""
+    return con.sql(
+        """
+        SELECT p.* EXCLUDE (rss_start, rss_end),
+               epoch(coalesce(p.ended, timezone('UTC', now())) - p.started) AS seconds,
+               greatest(max(p.rss_start), max(p.rss_end), coalesce(max(m.rss), 0)) / 1048576.0 AS peak_rss_mb
+        FROM phases p LEFT JOIN metrics m
+          ON m.run_id = p.run_id AND m.process_id = p.process_id
+         AND m.ts BETWEEN p.started AND coalesce(p.ended, timezone('UTC', now()))
+        WHERE p.run_id = ? GROUP BY ALL ORDER BY p.started, p.span_id
+    """,
+        params=[run_id],
+    )

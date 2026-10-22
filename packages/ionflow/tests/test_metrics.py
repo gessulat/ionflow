@@ -7,12 +7,13 @@ from ionflow.store import Store
 
 def test_fold_preserves_peaks_and_doubles_interval():
     s = metrics.Sampler()
-    s._rows = [(float(i), "a", None, 100 + (1000 if i == 3 else 0), 2, 0.1 * i, 0.0) for i in range(8)]
+    s._rows = [(float(i), "a", None, 100 + (1000 if i == 3 else 0), 2, 0.1 * i, 0.0, 123) for i in range(8)]
     s._fold()
     assert len(s._rows) == 4
     assert max(r[3] for r in s._rows) == 1100  # the rss spike survives folding
     assert s._interval == metrics.BASE_INTERVAL * 2
     assert s._rows[-1][0] == 7.0  # latest timestamp kept
+    assert {r[7] for r in s._rows} == {123}
 
 
 def test_flush_errors_do_not_kill_sampling():
@@ -30,7 +31,7 @@ def test_stale_running_detection(cfg):
     store = Store.of(cfg)
     space = store.space("F")
     # a fresh metrics flush is the heartbeat; "dead" never wrote one
-    metrics.write_parquet(space, space.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0)])
+    metrics.write_parquet(space, space.metrics("alive"), [(1.0, "a", None, 1, 1, 0.0, 0.0, 123)])
 
     con = store.connect()
     con.execute(

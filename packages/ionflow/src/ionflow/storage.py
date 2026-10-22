@@ -18,7 +18,7 @@ from .artifact import Artifacts, MetadataConflict, MissingPayload, metadata_toke
 from .config import Config
 from .lake import Catalog
 from .space import utc_now
-from .store import COPY_WORKERS, Store, parse_dest
+from .store import COPY_WORKERS, Store, parse_dest, payload_lock
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,47 @@ def _closure(registry: Artifacts, ids: set[str]) -> list[str]:
     return sorted(wanted)
 
 
+def _selection(
+    source: Store,
+    flow_id: str | None,
+    run_id: str | None,
+    artifact_ids: list[str] | None,
+    *,
+    require_present: bool,
+) -> tuple[Artifacts, list[dict], dict, list[str]]:
+    """Resolve references from metadata, shared by previews and exact plans."""
+    registry = Artifacts(source)
+    runs, tables = [], {}
+    ids = set(artifact_ids or [])
+    if run_id is not None and flow_id is None:
+        raise ValueError("run_id requires flow_id")
+    if flow_id is not None:
+        cat = Catalog(source.space(flow_id))
+        inventory = {r["run_id"]: r for r in cat.inventory()}
+        wanted = set(inventory if run_id is None else [run_id])
+        seen = set()
+        while remaining := wanted - seen:
+            rid = sorted(remaining)[0]
+            if rid not in inventory:
+                raise ValueError(f"run not found: {rid}")
+            record = inventory[rid]
+            if require_present and not record["present"]:
+                raise MissingPayload(f"run {rid}: payload unavailable at source; upload it from its originating store")
+            seen.add(rid)
+            runs.append(record)
+            ids.update(_artifact_ids(record))
+            for _, _, path in record["manifest"]:
+                _safe_path(path)
+                if ":" in path and "/" not in path:
+                    ids.add(path)
+                elif path.startswith("run_id="):
+                    wanted.add(path.split("/", 1)[0].removeprefix("run_id="))
+                else:
+                    raise ValueError(f"unexpected run part path: {path}")
+        tables = cat.tables()
+    return registry, runs, tables, _closure(registry, ids)
+
+
 @dataclass
 class TransferPlan:
     """A pinned directional selection. ``summary`` is safe to expose to interfaces."""
@@ -125,6 +166,36 @@ class TransferPlan:
         ).hexdigest()
         return body | {"token": token}
 
+    def details(self) -> dict:
+        """Expose member names and artifact choices without exposing credentials."""
+        names: dict[str, list[str]] = {}
+        missing = {f["target"]: f["size"] for f in self.files}
+        for record in self.artifact_records:
+            for member in record["content"]["files"]:
+                key = f"{self.target.prefix}/artifacts/_blobs/sha256/{member['sha256']}"
+                names.setdefault(key, []).append(f"{record['name']}/{member['path']}")
+                if key not in missing:
+                    info = self.target.stat(key)
+                    missing[key] = member["size"] if info is None or info["size"] != member["size"] else 0
+        return self.summary() | {
+            "file_details": [f | {"names": sorted(set(names.get(f["target"], [f["target"]])))} for f in self.files],
+            "inputs": [
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "name": r["name"],
+                    "chosen": r["id"] in self.artifacts,
+                    "bytes": sum(
+                        missing.get(k, 0)
+                        for k in {
+                            f"{self.target.prefix}/artifacts/_blobs/sha256/{m['sha256']}" for m in r["content"]["files"]
+                        }
+                    ),
+                }
+                for r in self.artifact_records
+            ],
+        }
+
 
 def plan_transfer(
     source: Store,
@@ -140,34 +211,7 @@ def plan_transfer(
     Unselected artifacts retain their metadata and lineage without requiring
     their payloads at either endpoint.
     """
-    registry = Artifacts(source)
-    runs, tables = [], {}
-    ids = set(artifact_ids or [])
-    if flow_id is not None:
-        cat = Catalog(source.space(flow_id))
-        inventory = {r["run_id"]: r for r in cat.inventory()}
-        wanted = set(inventory if run_id is None else [run_id])
-        seen = set()
-        while remaining := wanted - seen:
-            rid = sorted(remaining)[0]
-            if rid not in inventory:
-                raise ValueError(f"run not found: {rid}")
-            record = inventory[rid]
-            if not record["present"]:
-                raise MissingPayload(f"run {rid}: payload unavailable at source; upload it from its originating store")
-            seen.add(rid)
-            runs.append(record)
-            ids.update(_artifact_ids(record))
-            for _, _, path in record["manifest"]:
-                _safe_path(path)
-                if ":" in path and "/" not in path:
-                    ids.add(path)
-                    continue
-                if not path.startswith("run_id="):
-                    raise ValueError(f"unexpected run part path: {path}")
-                wanted.add(path.split("/", 1)[0].removeprefix("run_id="))
-        tables = cat.tables()
-    ids = _closure(registry, ids)
+    registry, runs, tables, ids = _selection(source, flow_id, run_id, artifact_ids, require_present=True)
     payload_ids = ids if include_artifacts is None else sorted(set(include_artifacts))
     if unknown := set(payload_ids) - set(ids):
         raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
@@ -194,7 +238,7 @@ def plan_transfer(
         # Telemetry is optional data, transferred only after explicit approval.
         space = source.space(flow_id)
         for key in source.list(space.run_dir(record["run_id"]) + "/"):
-            if PurePosixPath(key).name.startswith("_metrics"):
+            if PurePosixPath(key).name.startswith(("_metrics", "_phases")):
                 info = source.stat(key)
                 if info is not None:
                     add(key.removeprefix(source.prefix + "/"), info["size"], None)
@@ -225,6 +269,11 @@ def plan_transfer(
 
 def execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None = None) -> dict:
     """Copy approved files, verify them, then expose receiving registrations."""
+    with payload_lock(plan.source, plan.target):
+        return _execute_transfer(plan, progress)
+
+
+def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | None) -> dict:
     source, target = plan.source, plan.target
     if plan.flow_id:
         current = {r["run_id"]: r for r in Catalog(source.space(plan.flow_id)).inventory()}
@@ -435,6 +484,111 @@ class Storage:
             raise ValueError("direction must be up or down")
         source, target = (self.local, self.remote) if direction == "up" else (self.remote, self.local)
         return plan_transfer(source, target, flow_id, run_id, artifact_ids, include_artifacts=include_artifacts)
+
+    def preview(
+        self,
+        direction: str,
+        flow_id: str | None = None,
+        run_id: str | None = None,
+        artifact_ids: list[str] | None = None,
+        *,
+        include_artifacts: list[str] | None = None,
+    ) -> dict:
+        """Estimate a transfer from local metadata, without remote access or an approval token."""
+        if direction not in ("up", "down"):
+            raise ValueError("direction must be up or down")
+        if self.peer is None:
+            raise ValueError("no remote configured")
+        registry, runs, _, ids = _selection(self.local, flow_id, run_id, artifact_ids, require_present=False)
+        chosen = ids if include_artifacts is None else sorted(set(include_artifacts))
+        if unknown := set(chosen) - set(ids):
+            raise ValueError(f"not a referenced artifact: {', '.join(sorted(unknown))}")
+        records = {r["id"]: r for r in registry.records()}
+        if self._remote is not None:
+            peer = self._remote.uri(self._remote.prefix)
+        else:
+            cfg = self._remote_config
+            assert cfg is not None
+            peer = (
+                f"{Path(cfg.local_dir).expanduser().resolve()}/{cfg.prefix}"
+                if cfg.local_dir
+                else f"s3://{cfg.bucket}/{cfg.prefix}"
+            )
+        local = self.local.uri(self.local.prefix)
+        source, target = (local, peer) if direction == "up" else (peer, local)
+        files: dict[str, dict] = {}
+
+        def is_missing(path: str, size: int) -> bool:
+            if direction == "down":
+                info = self.local.stat(f"{self.local.prefix}/{path}")
+                if info is not None and info["size"] == size:
+                    return False
+            return True
+
+        def add(path: str, size: int, digest: str | None, name: str) -> None:
+            _safe_path(path)
+            if not is_missing(path, size):
+                return
+            entry = files.setdefault(
+                path,
+                {
+                    "source": source + "/" + path,
+                    "target": target + "/" + path,
+                    "size": size,
+                    "sha256": digest,
+                    "names": [],
+                },
+            )
+            if name not in entry["names"]:
+                entry["names"].append(name)
+
+        for aid in chosen:
+            r = records[aid]
+            for member in r["content"]["files"]:
+                add(
+                    f"artifacts/_blobs/sha256/{member['sha256']}",
+                    member["size"],
+                    member["sha256"],
+                    f"{r['name']}/{member['path']}",
+                )
+        for run in runs:
+            for member in run["files"]:
+                path = f"runs/{flow_id}/{member['path']}"
+                add(path, member["size"], member["sha256"], path)
+        return {
+            "preview": True,
+            "source": source,
+            "target": target,
+            "files": len(files),
+            "bytes": sum(f["size"] for f in files.values()),
+            "file_details": list(files.values()),
+            "inputs": [
+                {
+                    "id": aid,
+                    "kind": records[aid]["kind"],
+                    "name": records[aid]["name"],
+                    "chosen": aid in chosen,
+                    "bytes": sum(
+                        size
+                        for digest, size in {m["sha256"]: m["size"] for m in records[aid]["content"]["files"]}.items()
+                        if is_missing(f"artifacts/_blobs/sha256/{digest}", size)
+                    ),
+                }
+                for aid in ids
+            ],
+        }
+
+    def remove_local(
+        self,
+        *,
+        artifact_id: str | None = None,
+        flow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        """Remove one local payload, preserving metadata, remote copies, and shared data."""
+        from .eviction import remove_local
+
+        remove_local(self.local, artifact_id=artifact_id, flow_id=flow_id, run_id=run_id)
 
     def transfer(self, plan: TransferPlan, progress: Callable[[dict], None] | None = None) -> dict:
         """Execute an approved plan and refresh the metadata indicators."""

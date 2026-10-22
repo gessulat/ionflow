@@ -179,6 +179,8 @@ def _plan(steps, roots):
 
 
 RESERVED_STEP_NAMES = {
+    "phase",
+    "phases",
     "ledger",
     "metrics",
     "runs",
