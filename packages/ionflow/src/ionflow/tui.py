@@ -15,6 +15,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    SelectionList,
     Static,
     TabbedContent,
     TabPane,
@@ -58,32 +59,71 @@ class TransferScreen(Screen):
     """Review an explicit direction before any payload is copied."""
 
     BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
+    CSS = "#transfer-info { height: 8; } #artifact-choices { height: 1fr; min-height: 4; max-height: 12; }"
 
     def __init__(self, storage, direction, flow_id=None, run_id=None, artifact_ids=None):
         super().__init__()
         self.storage = storage
         self.selection = (direction, flow_id, run_id, artifact_ids)
         self.plan: TransferPlan | None = None
+        self._generation = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("Preparing transfer plan…", id="transfer-info")
+        yield Label("Artifact payloads (Space to toggle; metadata is always included)")
+        yield SelectionList[str](id="artifact-choices")
         yield Button("Confirm transfer", id="confirm-transfer", disabled=True)
         yield Button("Back", id="back-transfer")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.prepare()
+        self.load_choices()
 
-    @work(thread=True, exclusive=True)
-    def prepare(self) -> None:
+    @work(thread=True)
+    def load_choices(self) -> None:
         try:
-            plan = self.storage.plan(*self.selection)
-            self.app.call_from_thread(self.ready, plan)
+            preview = self.storage.preview(*self.selection)
+            self.app.call_from_thread(self.choices_ready, preview)
         except Exception as error:  # noqa: BLE001
             self.app.call_from_thread(self.query_one("#transfer-info", Static).update, str(error))
 
-    def ready(self, plan) -> None:
+    def choices_ready(self, preview: dict) -> None:
+        choices = self.query_one("#artifact-choices", SelectionList)
+        with choices.prevent(SelectionList.SelectedChanged):
+            choices.add_options(
+                [
+                    (f"{item['name']} ({item['kind']}, {item['bytes']:,} bytes)", item["id"], item["chosen"])
+                    for item in preview["inputs"]
+                ]
+            )
+        self.replan()
+
+    def on_selection_list_selected_changed(self, event: SelectionList.SelectedChanged) -> None:
+        self.replan()
+
+    def replan(self) -> None:
+        self._generation += 1
+        self.plan = None
+        self.query_one("#confirm-transfer", Button).disabled = True
+        self.query_one("#transfer-info", Static).update("Preparing transfer plan…")
+        self.prepare(self.query_one("#artifact-choices", SelectionList).selected, self._generation)
+
+    @work(thread=True, exclusive=True)
+    def prepare(self, chosen: list[str], generation: int) -> None:
+        try:
+            plan = self.storage.plan(*self.selection, include_artifacts=chosen)
+            self.app.call_from_thread(self.ready, plan, generation)
+        except Exception as error:  # noqa: BLE001
+            self.app.call_from_thread(self.plan_failed, str(error), generation)
+
+    def plan_failed(self, error: str, generation: int) -> None:
+        if generation == self._generation:
+            self.query_one("#transfer-info", Static).update(error)
+
+    def ready(self, plan: TransferPlan, generation: int) -> None:
+        if generation != self._generation:
+            return
         self.plan = plan
         summary = plan.summary()
         self.query_one("#transfer-info", Static).update(
@@ -99,6 +139,7 @@ class TransferScreen(Screen):
             self.app.pop_screen()
         elif event.button.id == "confirm-transfer" and self.plan:
             event.button.disabled = True
+            self.query_one("#artifact-choices", SelectionList).disabled = True
             self.transfer()
 
     @work(thread=True, exclusive=True)

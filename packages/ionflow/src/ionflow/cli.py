@@ -255,6 +255,12 @@ def sync(
     region: str = typer.Option("us-east-1", "--region"),
     run_id: str = typer.Option(None, "--run", help="Copy one run and its complete reference closure"),
     artifact: list[str] = typer.Option([], "--artifact", help="Artifact ID to transfer (repeatable)"),
+    include_artifact: list[str] | None = typer.Option(
+        None, "--include-artifact", help="Exact artifact payload selection, overriding defaults (repeatable)"
+    ),
+    metadata_only: bool = typer.Option(
+        False, "--metadata-only", help="Exclude all artifact payloads; run tables still copy"
+    ),
     down: bool = typer.Option(False, "--down", help="Download from the configured remote"),
     plan: bool = typer.Option(False, "--plan", help="Print the transfer plan without copying payloads"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Approve the displayed transfer direction"),
@@ -265,12 +271,23 @@ def sync(
         raise typer.BadParameter("select a flow or at least one --artifact")
     if down and to:
         raise typer.BadParameter("--to selects an upload; omit it with --down")
+    if metadata_only and include_artifact:
+        raise typer.BadParameter("--metadata-only and --include-artifact cannot be combined")
+    included = [] if metadata_only else include_artifact
     flow_id = _load(flow).flow_id() if flow else None
     workspace = Storage(cfg)
     selection = (
-        plan_transfer(workspace.local, Store.of(_destination(cfg, to, endpoint, region)), flow_id, run_id, artifact)
+        plan_transfer(
+            workspace.local,
+            Store.of(_destination(cfg, to, endpoint, region)),
+            flow_id,
+            run_id,
+            artifact,
+            include_artifacts=included,
+            direction="up",
+        )
         if to
-        else workspace.plan("down" if down else "up", flow_id, run_id, artifact)
+        else workspace.plan("down" if down else "up", flow_id, run_id, artifact, include_artifacts=included)
     )
     typer.echo(json.dumps(selection.summary()))
     if plan:
@@ -397,13 +414,25 @@ def artifact_sync(
     to: str = typer.Option(..., "--to"),
     endpoint: str = typer.Option(None, "--endpoint"),
     region: str = typer.Option("us-east-1", "--region"),
+    include_artifact: list[str] | None = typer.Option(
+        None, "--include-artifact", help="Exact artifact payload selection, overriding defaults (repeatable)"
+    ),
+    metadata_only: bool = typer.Option(False, "--metadata-only", help="Copy artifact metadata without payloads"),
     plan: bool = typer.Option(False, "--plan", help="Show the transfer without copying payloads"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Approve this upload"),
 ):
     """Copy selected artifacts and their parents; omit IDs to copy the inventory."""
     cfg = _config_or_setup()
+    if metadata_only and include_artifact:
+        raise typer.BadParameter("--metadata-only and --include-artifact cannot be combined")
     ids = artifact_id or [r["id"] for r in Artifacts(cfg).records()]
-    selection = plan_transfer(Store.of(cfg), Store.of(_destination(cfg, to, endpoint, region)), artifact_ids=ids)
+    selection = plan_transfer(
+        Store.of(cfg),
+        Store.of(_destination(cfg, to, endpoint, region)),
+        artifact_ids=ids,
+        include_artifacts=[] if metadata_only else include_artifact,
+        direction="up",
+    )
     typer.echo(json.dumps(selection.summary()))
     if plan:
         return

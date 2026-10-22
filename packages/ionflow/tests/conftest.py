@@ -145,6 +145,28 @@ def workspaces(s3cfg, tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def archive(workspaces, repo, tmp_path):
+    """A run with large inputs and opposite archive/client payload defaults."""
+    from types import SimpleNamespace
+
+    from browser_flows import Archive, Raw, RawDB
+
+    from ionflow import Artifacts
+
+    a, b = workspaces
+    registry = Artifacts(a.local)
+    path = tmp_path / "input.raw"
+    path.write_text("original raw data")
+    raw = registry.put(Raw.from_path(path))
+    path = tmp_path / "input.raw.db"
+    path.write_text("preferred rawdb data")
+    rawdb = registry.put(RawDB.from_path(path))
+    registry.link(raw.id, rawdb.id)
+    rid = Archive.run(a.config, repo=repo, use_processes=False, artifacts={"raw": raw.id, "rawdb": rawdb.id})
+    return SimpleNamespace(source=a, client=b, registry=registry, raw=raw, rawdb=rawdb, run_id=rid)
+
+
+@pytest.fixture
 def executioncfg(s3cfg, localcfg):
     """Local execution with explicit S3 credentials for user-code side effects."""
     from dataclasses import replace

@@ -606,6 +606,43 @@ details = plan.details()             # review the exact plan before transfer
 storage.transfer(plan)              # execute only after interface approval
 ```
 
+### Default artifact payload selection
+
+Artifact classes can declare separate upload and download defaults:
+
+```python
+class Raw(Artifact, kind="raw", sync_up=False, sync_down=False):
+    pass
+
+class RawDB(Artifact, kind="rawdb", sync_up=True, sync_down=False):
+    pass
+```
+
+An upload of a run selects RawDB and excludes Raw. A download selects neither;
+the run's tables still transfer. Both flags default to `True` and inherit from
+the parent artifact type. They are payload-selection hints, not metadata fields
+or permissions. Defaults are captured at first publication and travel with the
+artifact record, so generic clients do not need the application's Python classes.
+Changing a declaration does not rewrite published records.
+
+`Browser.describe()` exposes both defaults under each artifact kind's `sync`
+field. `Storage.preview()` sets each input's `chosen` flag using the direction.
+The transfer dialog shows these choices as checkboxes and rebuilds the exact
+plan when a choice changes. Metadata and lineage always transfer, including for
+unchecked artifacts and their parents. Only selected payloads must exist at the
+source.
+
+Pass `include_artifacts=[id, ...]` to override defaults with an exact selection;
+pass `[]` to exclude all artifact payloads. The override replaces the defaults.
+CLI users can use repeatable `--include-artifact ID` or `--metadata-only` with
+`ionflow sync` and `ionflow artifacts sync`. These options also override defaults.
+`--metadata-only` excludes artifact payloads; selected run tables still transfer.
+
+Low-level `plan_transfer()` and `Artifacts.sync_to()` infer direction between
+local and S3 stores. Pass `direction="up"` or `direction="down"` when both stores
+use the same backend; without a direction, those low-level copies select all
+artifact payloads. `Storage` always supplies its explicit logical direction.
+
 `Storage.remove_local(artifact_id=id)` removes one artifact's local payload.
 `Storage.remove_local(flow_id=id, run_id=id)` removes one run's local payload.
 Interfaces must confirm this destructive action. Metadata, remote copies,
