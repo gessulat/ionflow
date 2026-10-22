@@ -1,5 +1,6 @@
 import pytest
 
+from ionflow import Artifact, StepInput
 from ionflow.dag import Branch, Collect, Fanout, build_dag
 from ionflow.schema import Table
 
@@ -22,7 +23,7 @@ class Final(Table):
 
 class ETL:
     def raw(self) -> Raw: ...
-    def chunks(self, raw: Raw) -> Fanout[Chunk]: ...
+    def chunks(self, raw: StepInput[Raw]) -> Fanout[Chunk]: ...
     def scored(self, chunks: Branch[Chunk]) -> Score: ...
     def result(self, scored: Collect[Score]) -> Final: ...
 
@@ -40,6 +41,33 @@ def test_dag_shape():
     assert dag.steps["scored"].deps == ["chunks"]
     assert dag.steps["chunks"].output_table is Chunk  # unwrapped from Fanout
     assert dag.steps["result"].output_table is Final
+
+
+def test_typed_step_input_refuses_the_wrong_schema():
+    class Wrong:
+        def raw(self) -> Raw: ...
+        def result(self, raw: StepInput[Score]) -> Final: ...
+
+    with pytest.raises(TypeError, match="dependency 'raw' must be annotated"):
+        build_dag(Wrong)
+
+
+def test_step_input_requires_a_table_schema():
+    class File(Artifact):
+        pass
+
+    class WrongArtifact:
+        def source(self) -> File: ...
+        def result(self, source: StepInput[File]) -> Final: ...
+
+    class Unparameterized:
+        def raw(self) -> Raw: ...
+        def result(self, raw: StepInput) -> Final: ...
+
+    with pytest.raises(TypeError, match="requires a table dependency"):
+        build_dag(WrongArtifact)
+    with pytest.raises(TypeError, match=r"needs StepInput\[TableSchema\]"):
+        build_dag(Unparameterized)
 
 
 class Chained:

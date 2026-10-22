@@ -439,6 +439,25 @@ class EmbedDocs(Flow):
             "count(DISTINCT source) AS n_sources, count(*) AS n_docs, avg(norm) AS avg_norm")
 ```
 
+Table dependencies can explicitly name their runtime interface as `StepInput[Schema]`.
+`Branch[Schema]` and `Collect[Schema]` expose the same table methods. Schema-only
+annotations remain supported. Outputs continue to declare their table schema.
+
+```python
+from ionflow import StepInput
+
+def by_source(self, docs: StepInput[Doc]) -> Fanout[Doc]:
+    return docs.partition_by("source")
+```
+
+`partition_by()` reads only distinct keys, then returns one lazy DuckDB relation
+per key in ascending order, with a NULL partition last when present. It quotes
+column names and binds key values as DuckDB expressions. Empty inputs emit no
+branches. Native DuckDB operations remain available directly, including
+`docs.project("text").fetchone()` and `docs.aggregate("count(*)").fetchone()`.
+Relation methods return ordinary DuckDB relations; wrap one in `StepInput(...)`
+to call `partition_by()` after filtering or projecting it.
+
 Columns can also be variable-length lists: `embedding: list[float]` maps to
 DuckDB `DOUBLE[]` / Arrow `list<double>` (nesting works too), so vectors never
 need to be widened into hundreds of scalar columns.

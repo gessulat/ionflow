@@ -1,3 +1,4 @@
+from .arrow import StepInput
 from .composition import Call, subflow
 from .config import Config
 from .dag import Branch, Collect, Fanout
@@ -15,6 +16,7 @@ __all__ = [
     "Call",
     "subflow",
     "Table",
+    "StepInput",
     "LedgerColumns",
     "FlowParams",
     "primary_key",
