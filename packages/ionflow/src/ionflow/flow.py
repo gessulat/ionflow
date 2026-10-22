@@ -28,9 +28,11 @@ class Flow:
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
         cls._dag = build_dag(cls)
-        if collisions := set(cls.ledger_columns()) & {"local", "s3"}:
-            raise TypeError(f"reserved ledger availability columns: {sorted(collisions)}")
-        taken = set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config", "artifacts", "phase"}
+        if collisions := set(cls.ledger_columns()) & {"local", "s3", "phase", "_phases"}:
+            raise TypeError(f"reserved ledger columns: {sorted(collisions)}")
+        taken = (
+            set(cls._dag.steps) | set(cls.ledger_columns()) | BASE_COLS | {"config", "artifacts", "phase", "_phases"}
+        )
         if cls.Inputs:
             if collisions := set(cls.Inputs.declarations()) & (taken | set(cls.params_columns())):
                 raise TypeError(f"artifact inputs collide with steps/params/ledger: {sorted(collisions)}")

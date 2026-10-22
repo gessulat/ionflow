@@ -342,7 +342,8 @@ def _phases_view(con: duckdb.DuckDBPyConnection, space: Space) -> None:
 
 def phase_stats(con: duckdb.DuckDBPyConnection, run_id: str) -> duckdb.DuckDBPyRelation:
     """Phase boundaries and process memory, including spans shorter than a sampling interval."""
-    return con.sql("""
+    return con.sql(
+        """
         SELECT p.* EXCLUDE (rss_start, rss_end),
                epoch(coalesce(p.ended, timezone('UTC', now())) - p.started) AS seconds,
                greatest(max(p.rss_start), max(p.rss_end), coalesce(max(m.rss), 0)) / 1048576.0 AS peak_rss_mb
@@ -350,4 +351,6 @@ def phase_stats(con: duckdb.DuckDBPyConnection, run_id: str) -> duckdb.DuckDBPyR
           ON m.run_id = p.run_id AND (m.branch = p.branch OR m.branch IS NULL)
          AND m.ts BETWEEN p.started AND coalesce(p.ended, timezone('UTC', now()))
         WHERE p.run_id = ? GROUP BY ALL ORDER BY p.started, p.span_id
-    """, params=[run_id])
+    """,
+        params=[run_id],
+    )

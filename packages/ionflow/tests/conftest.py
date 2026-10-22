@@ -93,8 +93,12 @@ def observed(localcfg, repo, tmp_path):
     document = registry.put(Document.from_path(path))
     run_id = Observe.run(localcfg, repo=repo, use_processes=False, artifacts={"document": document.id})
     return SimpleNamespace(
-        config=localcfg, registry=registry, document=document, run_id=run_id,
-        browser=Browser(localcfg, flows=[Observe], artifacts=[Document, Bundle]), storage=Storage(localcfg),
+        config=localcfg,
+        registry=registry,
+        document=document,
+        run_id=run_id,
+        browser=Browser(localcfg, flows=[Observe], artifacts=[Document, Bundle]),
+        storage=Storage(localcfg),
     )
 
 

@@ -3,7 +3,20 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from browser_flows import Observe
 
+from ionflow import ArtifactInputs, Flow, FlowParams, LedgerColumns
 from ionflow.phases import Phases
+
+
+@pytest.mark.parametrize("name", ["phase", "_phases"])
+@pytest.mark.parametrize(
+    "declaration,base", [("Ledger", LedgerColumns), ("Params", FlowParams), ("Inputs", ArtifactInputs)]
+)
+def test_phase_runtime_names_cannot_be_shadowed(name, declaration, base):
+    from browser_flows import Document
+
+    schema = type("Schema", (base,), {"__annotations__": {name: Document if base is ArtifactInputs else str}})
+    with pytest.raises((TypeError, ValueError), match="reserved|collide"):
+        type("Invalid", (Flow,), {declaration: schema})
 
 
 def test_phase_contexts_are_thread_local_and_failures_close_spans():

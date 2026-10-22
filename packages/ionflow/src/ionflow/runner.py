@@ -250,9 +250,7 @@ def _task_worker(task):
     # Each task flushes to its OWN metrics key (one writer per object, no CAS),
     # so its samples survive a run killed mid-task up to the last flush.
     sampler, active, label_lock = None, set(), threading.Lock()
-    metrics_key = (
-        space.metrics_node(run_id, node) if key is None else space.metrics_branch(run_id, node, key_slug(key))
-    )
+    metrics_key = space.metrics_node(run_id, node) if key is None else space.metrics_branch(run_id, node, key_slug(key))
     phases_key = metrics_key.replace("/_metrics", "/_phases")
 
     def relabel():
@@ -261,6 +259,7 @@ def _task_worker(task):
             sampler.mark("+".join(sorted(active)) or None, None if key is None else str(key))
 
     if shared["sample"]:
+
         def flush_metrics(rows):
             metrics.write_parquet(space, metrics_key, rows)
             flow._phases.write(space, phases_key)
