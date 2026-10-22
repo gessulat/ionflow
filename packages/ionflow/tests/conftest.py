@@ -78,6 +78,26 @@ def localcfg(tmp_path):
     return Config(local_dir=str(tmp_path / "store"), prefix="mf")
 
 
+@pytest.fixture
+def observed(localcfg, repo, tmp_path):
+    """One real run with nested phases, a table, and a shared bundle."""
+    from types import SimpleNamespace
+
+    from browser_flows import Bundle, Document, Observe
+
+    from ionflow import Artifacts, Browser, Storage
+
+    path = tmp_path / "source.txt"
+    path.write_text("one's %_content")
+    registry = Artifacts(localcfg)
+    document = registry.put(Document.from_path(path))
+    run_id = Observe.run(localcfg, repo=repo, use_processes=False, artifacts={"document": document.id})
+    return SimpleNamespace(
+        config=localcfg, registry=registry, document=document, run_id=run_id,
+        browser=Browser(localcfg, flows=[Observe], artifacts=[Document, Bundle]), storage=Storage(localcfg),
+    )
+
+
 @pytest.fixture(params=["s3", "local"])
 def anycfg(request):
     """Both storage modes: the mode is one dispatch (Store.of), so most tests want both."""

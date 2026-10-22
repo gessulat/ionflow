@@ -537,6 +537,83 @@ On startup it re-discovers your flows and warns if a flow's declared table schem
 from what's stored on S3, or if there's run data on S3 with no matching Flow in code. If the
 repo isn't configured yet, the TUI opens a setup screen first.
 
+## Browser contracts
+
+Applications declare their artifact kinds and flows. Ionflow supplies inventory,
+lineage, table queries, and storage operations. A browser uses these public APIs;
+it does not read catalog internals or reconstruct payload paths.
+
+`View` optionally selects labels, columns, formats, and artifact-reference targets:
+
+```python
+from ionflow import Artifact, Browser, Filter, Table, View
+
+class Fasta(Artifact, kind="fasta"):
+    View = View(label="FASTA", plural="FASTAs", columns=("name", "size", "local"))
+
+class Library(Artifact, kind="library", payload="bundle"):
+    fasta_id: str
+    View = View(plural="Libraries", references={"fasta_id": Fasta})
+
+class Matches(Table):
+    library_id: str
+    sequence: str
+    q_value: float
+    View = View(
+        columns=("sequence", "q_value"),
+        labels={"q_value": "q-value"},
+        references={"library_id": Library},
+    )
+```
+
+Assign a `View` to a Flow to select its ledger columns. Without hints, the browser
+describes all declared fields. Supported formats are `text`, `integer`, `number`,
+`bytes`, `duration`, and `datetime`. References accept string and string-list fields.
+View references describe navigation. Steps still declare their artifact use explicitly.
+
+```python
+browser = Browser(config, flows=[Search], artifacts=[Fasta, Library])
+description = browser.describe()                 # schemas, views, inputs, DAG
+runs = browser.runs(Search.flow_id())            # ledger values and availability
+libraries = browser.artifacts("library")         # metadata, size, availability
+links = browser.lineage(library_id)              # producers, consumers, parents
+page = browser.table(
+    Search.flow_id(), run_id, "matches",
+    columns=["sequence", "q_value"],
+    filters=[Filter("q_value", "le", 0.01)],
+    sort="q_value", offset=0, limit=100,
+)
+timing = browser.steps(Search.flow_id(), run_id)  # step resources and phases
+```
+
+Inventory and lineage read local metadata only. Table and resource queries require
+local run payloads. Queries validate declared columns and bind filter values.
+Filters support `eq`, `ne`, `lt`, `le`, `gt`, `ge`, and literal case-insensitive
+`contains`. Equality supports null. Page sizes are limited to 1–1000 rows.
+The contract does not start an HTTP server or install frontend dependencies.
+
+`Storage.preview(...)` accepts the same selection as `Storage.plan(...)`, but reads
+only local metadata. Its result contains candidate file names, estimated bytes,
+and input choices. It has `preview=True` and no approval token. An upload preview
+cannot know which remote files already exist. Optional telemetry is discovered
+by the exact plan. `TransferPlan.details()` adds file names and the missing-byte
+cost of each input, including inputs not currently selected.
+
+```python
+preview = storage.preview("down", Search.flow_id(), run_id, include_artifacts=[])
+plan = storage.plan("down", Search.flow_id(), run_id, include_artifacts=[])
+details = plan.details()             # review the exact plan before transfer
+storage.transfer(plan)              # execute only after interface approval
+```
+
+`Storage.remove_local(artifact_id=id)` removes one artifact's local payload.
+`Storage.remove_local(flow_id=id, run_id=id)` removes one run's local payload.
+Interfaces must confirm this destructive action. Metadata, remote copies,
+dependencies, and shared blobs remain. Removal refuses active local runs and
+table parts referenced by other available runs. Removal does not contact a peer.
+Restore removed payloads through an explicit transfer. `Artifacts.evict()` only
+clears the disposable materialization cache; it does not remove canonical data.
+
 ## Resource metrics
 
 Every run records CPU and memory for every step and branch — always on, negligible
@@ -568,6 +645,30 @@ memory live from another client (orchestrator process; process-mode branch sampl
 arrive with the final write). The flush also doubles as a **heartbeat**: `ls`
 and the TUI show `running (stale?)` for runs whose heartbeat has been quiet for
 5+ minutes — the honest state for a process that was killed without cleanup.
+
+### Phases inside a step
+
+Use `self.phase(name)` to expose the stages of a long step without persisting
+application timing files:
+
+```python
+def matches(self, inputs: Inputs) -> Matches:
+    with self.phase("survey"):
+        anchors = survey(inputs)
+    with self.phase("calibration"):
+        calibration = calibrate(anchors)
+    with self.phase("search"):
+        return search(inputs, calibration)
+```
+
+Phases can nest. The `phases` view records their step, branch, parent span,
+UTC boundaries, and status. Exceptions close spans as failed and propagate.
+Worker telemetry survives failed steps in both process and thread mode.
+Process workers flush phases with their metrics heartbeat; thread workers flush
+when their task ends. `query.phase_stats(con, run_id)` combines exact boundaries
+and process memory samples. Memory is shared by concurrent steps in one process;
+it is not an allocation attributed exclusively to one phase.
+Phases are observations, not steps or resumable checkpoints.
 
 ## Resume
 

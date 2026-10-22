@@ -569,6 +569,8 @@ class Artifacts:
     def materialize(self, ref: Artifact) -> Path:
         """Download, verify, and atomically expose a complete shared cache entry."""
         record = ref.snapshot()
+        if not self.availability().get(ref.id, {}).get("local"):
+            raise MissingPayload(f"{ref.id}: payload unavailable here; download this artifact first")
         if any(not self.store.exists(f"{self.root}/_blobs/sha256/{f['sha256']}") for f in record["content"]["files"]):
             raise MissingPayload(f"{ref.id}: payload unavailable here; download this artifact first")
         cache = self._cache_root()

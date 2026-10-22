@@ -19,6 +19,7 @@ from .arrow import StepInput
 from .artifact import Artifact, Artifacts
 from .config import Config
 from .git import require_clean
+from .phases import Phases
 from .plan import Planner
 from .provenance import ArtifactRuntime, activity_key, bindings, reused_activity
 from .space import Space, key_slug, utc_now
@@ -208,6 +209,7 @@ def _task_worker(task):
     flow.config = bound.cfg
     registry = Artifacts(space.store)
     flow.artifacts = ArtifactRuntime(registry, shared["flow_id"], shared["run_id"])
+    flow._phases = Phases()
     declarations = flow_cls.Inputs.declarations() if flow_cls.Inputs else {}
     flow._artifact_inputs = bindings(registry, shared["artifacts"], declarations)
     for name, value in flow._artifact_inputs.items():
@@ -248,6 +250,10 @@ def _task_worker(task):
     # Each task flushes to its OWN metrics key (one writer per object, no CAS),
     # so its samples survive a run killed mid-task up to the last flush.
     sampler, active, label_lock = None, set(), threading.Lock()
+    metrics_key = (
+        space.metrics_node(run_id, node) if key is None else space.metrics_branch(run_id, node, key_slug(key))
+    )
+    phases_key = metrics_key.replace("/_metrics", "/_phases")
 
     def relabel():
         # concurrent members share one process, so they share one sample label
@@ -255,12 +261,9 @@ def _task_worker(task):
             sampler.mark("+".join(sorted(active)) or None, None if key is None else str(key))
 
     if shared["sample"]:
-        metrics_key = (
-            space.metrics_node(run_id, node) if key is None else space.metrics_branch(run_id, node, key_slug(key))
-        )
-
         def flush_metrics(rows):
             metrics.write_parquet(space, metrics_key, rows)
+            flow._phases.write(space, phases_key)
 
         sampler = metrics.Sampler(flush=flush_metrics).start()
     retries = shared["retries"]
@@ -280,12 +283,13 @@ def _task_worker(task):
             for attempt in range(tries):
                 flow.artifacts.begin(name, 0 if key is None else key)
                 try:
-                    for slot, path, activity in _emit(ctx._replace(con=cur), step, key):
-                        written[name] = path
-                        parts.append((slot.step, slot.key, path))
-                        ak = activity_key(slot.step, slot.key)
-                        if activity["ancestors"] or activity["outputs"]:
-                            activities[ak] = reported[ak] = activity
+                    with flow._phases.step(name, key):
+                        for slot, path, activity in _emit(ctx._replace(con=cur), step, key):
+                            written[name] = path
+                            parts.append((slot.step, slot.key, path))
+                            ak = activity_key(slot.step, slot.key)
+                            if activity["ancestors"] or activity["outputs"]:
+                                activities[ak] = reported[ak] = activity
                     return
                 except Exception:
                     if attempt == tries - 1:
@@ -316,6 +320,11 @@ def _task_worker(task):
             try:
                 flush_metrics(sampler.stop())
             except Exception:  # noqa: BLE001 — metrics must never mask the task's outcome
+                pass
+        else:
+            try:
+                flow._phases.write(space, phases_key)
+            except Exception:  # noqa: BLE001 — telemetry must never mask the task's outcome
                 pass
     custom = {c: getattr(flow, c) for c in flow_cls.ledger_columns() if hasattr(flow, c)} if key is None else {}
     # progress travels with the failure: resume restarts an item at its first
