@@ -114,7 +114,10 @@ def _parse_params(cols, pairs):
             raise typer.BadParameter(f"unknown param '{key}' (declared: {', '.join(cols) or 'none'})")
         dtype = cols[key].dtype
         try:
-            out[key] = {"true": True, "false": False}[raw.lower()] if dtype is bool else dtype(raw)
+            if typing.get_origin(dtype) in (list, dict):
+                out[key] = json.loads(raw)
+            else:
+                out[key] = {"true": True, "false": False}[raw.lower()] if dtype is bool else dtype(raw)
         except (KeyError, ValueError):
             raise typer.BadParameter(f"param '{key}': expected {dtype.__name__}, got '{raw}'") from None
     return out
@@ -169,17 +172,21 @@ def run(
     ),
     branch_retries: int = typer.Option(0, "--branch-retries", help="In-worker retries for a failed branch sub-step"),
     artifact: list[str] = typer.Option([], "--artifact", "-a", help="Artifact NAME=ID; repeat for collection inputs"),
+    reuse: str = typer.Option("auto", "--reuse", help="Artifact reuse: auto (local or download), local, or never"),
+    no_reuse: bool = typer.Option(False, "--no-reuse", help="Execute every step, including all child flows"),
 ):
     """Run FLOW (given as 'module:ClassName'); the current directory is the git repo."""
     from . import runner as _runner
 
+    if reuse not in ("auto", "local", "never"):
+        raise typer.BadParameter("--reuse must be auto, local, or never")
     cls = _load(flow)
     if dry_run:
         if artifact or param:
             raise typer.BadParameter("resume inherits its params and artifacts; omit -p and -a")
         if not resume:
             raise typer.BadParameter("--dry-run previews a resume; pass --resume as well")
-        origin, table = _runner.preview(cls, _config_or_setup(), resume)
+        origin, table = _runner.preview(cls, _config_or_setup(), resume, reuse="never" if no_reuse else reuse)
         typer.echo(f"resume from {origin} (assuming unchanged work-lists):")
         for step, (reused, computed) in table.items():
             typer.echo(f"  {step}: reuse {reused}, compute {'?' if computed < 0 else computed}")
@@ -195,6 +202,7 @@ def run(
             max_workers=max_workers,
             use_processes=use_processes,
             branch_retries=branch_retries,
+            reuse="never" if no_reuse else reuse,
         )
     )
 

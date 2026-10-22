@@ -16,7 +16,8 @@ from .store import Store
 _EMPTY_RUNS = (
     "(SELECT NULL::VARCHAR AS run_id, NULL::VARCHAR AS status, NULL::TIMESTAMP AS started, "
     'NULL::TIMESTAMP AS finished, NULL::VARCHAR AS "commit", NULL::VARCHAR AS origin_run_id, '
-    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom, NULL::VARCHAR AS artifacts, NULL::VARCHAR AS parent WHERE false)"
+    "NULL::VARCHAR AS params, NULL::VARCHAR AS custom, NULL::VARCHAR AS artifacts, NULL::VARCHAR AS parent, "
+    "NULL::VARCHAR AS reuse WHERE false)"
 )
 
 
@@ -25,7 +26,7 @@ def ledger_sql(flow_cls, src="lake.runs"):
     params and Ledger columns flattened out of their JSON storage — the table's
     schema never migrates; the view derives typed columns from the declarations.
     """
-    cols = ['run_id, status, started, finished, "commit", origin_run_id']
+    cols = ['run_id, status, started, finished, "commit", origin_run_id, reuse']
     for n, c in flow_cls.params_columns().items():
         cols.append(f"CAST(params->>'{n}' AS {c.duckdb_type()}) AS {_q(n)}")
     for n, c in flow_cls.ledger_columns().items():

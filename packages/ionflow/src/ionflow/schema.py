@@ -3,6 +3,7 @@ import types
 import typing
 
 import pyarrow as pa
+from pydantic import BaseModel, ConfigDict
 
 try:  # numpy is optional in core; when installed, np scalar types work as annotations
     import numpy as np
@@ -262,7 +263,7 @@ def _columns_of(cls, force_nullable=False):
 class _ColumnSet:
     """An ordered set of typed columns declared as class annotations — shared by
     `Table` (a step's output schema) and the flow-level sets that carry no table
-    semantics (`LedgerColumns`, `FlowParams`). `base=True` marks the intermediate
+    semantics (`LedgerColumns`). `base=True` marks the intermediate
     classes themselves, whose bodies are not a user's declaration.
     """
 
@@ -271,7 +272,6 @@ class _ColumnSet:
     # with column names.
     _columns: typing.ClassVar[dict] = {}
     _force_nullable: typing.ClassVar[bool] = False  # LedgerColumns: every column nullable
-    _scalars_only: typing.ClassVar[bool] = False  # FlowParams: int/float/str/bool only
     _require_columns: typing.ClassVar[bool] = True  # a step output with no columns is a typo
 
     def __init_subclass__(cls, base=False, **kw):
@@ -283,10 +283,6 @@ class _ColumnSet:
             raise TypeError(f"{cls.__name__} declares no columns")
         if len([n for n, c in cls._columns.items() if c.fanout_key]) > 1:
             raise TypeError(f"{cls.__name__}: only one column may be the fanout_key")
-        if cls._scalars_only:
-            for name, col in cls._columns.items():
-                if col.dtype not in (int, float, str, bool):
-                    raise TypeError(f"param '{name}': only int/float/str/bool params are supported")
 
     @classmethod
     def columns(cls):
@@ -437,45 +433,49 @@ class LedgerColumns(_ColumnSet, base=True):
     _require_columns: typing.ClassVar[bool] = False  # an empty declaration is legal here
 
 
-class FlowParams(_ColumnSet, base=True):
-    """Typed run inputs: annotations declare types, class values are defaults.
+class _JsonParam(Column):
+    @property
+    def arrow_type(self) -> pa.DataType:
+        return pa.string()
 
-    A bare type is required, a default (or `T | None`) optional. Only
-    int/float/str/bool: params round-trip JSON meta, ledger parquet and `-p k=v`.
+    def duckdb_type(self) -> str:
+        return "JSON"
+
+
+class FlowParams(BaseModel):
+    """Strict, validated run parameters; nested values round-trip as JSON.
 
     >>> class P(FlowParams):
     ...     dataset: str
     ...     batch_size: int = 32
     >>> P.resolve({"dataset": "d1"})
     {'dataset': 'd1', 'batch_size': 32}
-    >>> P.resolve({})
-    Traceback (most recent call last):
-        ...
-    ValueError: missing required param: dataset
     """
 
-    _scalars_only: typing.ClassVar[bool] = True
-    _require_columns: typing.ClassVar[bool] = False  # an empty declaration is legal here
+    model_config = ConfigDict(strict=True, extra="forbid", validate_default=True, allow_inf_nan=False)
 
     @classmethod
-    def resolve(cls, given=None):
-        """Merge `given` over the defaults; validate names, presence, and types."""
-        given = given or {}
-        if unknown := set(given) - set(cls._columns):
-            raise ValueError(f"unknown params: {sorted(unknown)}")
+    def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        from .artifact import _spec
+
+        for field_info in cls.model_fields.values():
+            _spec(field_info.annotation)
+
+    @classmethod
+    def columns(cls) -> dict[str, Column]:
         out = {}
-        for name, col in cls._columns.items():
-            if name in given:
-                v = given[name]
-            elif hasattr(cls, name):
-                v = getattr(cls, name)
+        for name, field_info in cls.model_fields.items():
+            hint, nullable = _strip_optional(field_info.annotation)
+            if typing.get_origin(hint) is dict:
+                col = _JsonParam(str, nullable=nullable)
+                col.dtype = hint
             else:
-                raise ValueError(f"missing required param: {name}")
-            if col.dtype is float and isinstance(v, int):
-                v = float(v)
-            if v is None and not col.nullable:
-                raise TypeError(f"param '{name}' may not be None")
-            if v is not None and not isinstance(v, col.dtype):
-                raise TypeError(f"param '{name}': expected {col.dtype.__name__}, got {type(v).__name__}")
-            out[name] = v
+                col = Column(hint, nullable=nullable)
+            out[name] = col
         return out
+
+    @classmethod
+    def resolve(cls, given: dict | None = None) -> dict:
+        """Validate defaults and supplied values once before starting a run."""
+        return cls.model_validate({} if given is None else given).model_dump(mode="json")

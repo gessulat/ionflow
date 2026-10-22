@@ -148,19 +148,19 @@ def test_flow_params_resolve():
     assert P.resolve({"dataset": "d1"}) == {"dataset": "d1", "batch_size": 32, "lr": 1.0, "flag": None}
     assert P.resolve({"dataset": "d1", "lr": 2})["lr"] == 2.0  # int coerces to float
     assert isinstance(P.resolve({"dataset": "d1"})["lr"], float)
-    with pytest.raises(ValueError, match="missing required param: dataset"):
+    with pytest.raises(ValueError, match="Field required"):
         P.resolve({})
-    with pytest.raises(ValueError, match="unknown params"):
+    with pytest.raises(ValueError, match="Extra inputs"):
         P.resolve({"dataset": "d1", "nope": 1})
-    with pytest.raises(TypeError, match="expected str"):
+    with pytest.raises(ValueError, match="valid string"):
         P.resolve({"dataset": 1})
-    with pytest.raises(TypeError, match="may not be None"):
+    with pytest.raises(ValueError, match="valid string"):
         P.resolve({"dataset": None})
 
 
-@pytest.mark.parametrize("annotation", [np.float32, dt.datetime, bytes, list[int]])
-def test_flow_params_reject_non_scalar_types(annotation):
-    with pytest.raises(TypeError, match="only int/float/str/bool"):
+@pytest.mark.parametrize("annotation", [dt.datetime, bytes, list])
+def test_flow_params_reject_non_json_types(annotation):
+    with pytest.raises((TypeError, ValueError)):
 
         class P(FlowParams):
             x: annotation

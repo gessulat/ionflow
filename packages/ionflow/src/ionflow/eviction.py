@@ -54,13 +54,15 @@ def _remove_local(store: Store, *, artifact_id: str | None, flow_id: str | None,
             m["sha256"]
             for other in registry.records()
             if other["id"] != artifact_id and present.get(other["id"], {}).get("local")
-            for m in other["content"]["files"]
+            for payload in registry.payload_records(other["id"])
+            for m in payload["content"]["files"]
         }
         paths = _paths(
             store,
             [
                 f"{registry.root}/_blobs/sha256/{m['sha256']}"
-                for m in record["content"]["files"]
+                for payload in registry.payload_records(record["id"])
+                for m in payload["content"]["files"]
                 if m["sha256"] not in shared
             ],
         )

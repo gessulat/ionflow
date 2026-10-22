@@ -2,7 +2,8 @@
 
 Barebones Metaflow alternative. Flow = class, step = method returning a typed
 table, persisted locally as Parquet. An optional S3 peer shares metadata;
-payload transfers are explicit (0026/0027). DuckDB-first.
+archival payload transfers are explicit (0026/0027); execution reuse may download
+a declared output under the run policy (0032). DuckDB-first.
 User docs: `packages/ionflow/README.md`. The *why* behind non-obvious choices
 lives in `packages/ionflow/docs/decisions/` (cited below by number) — check it
 before changing architecture; add a record when you make such a decision.
@@ -84,7 +85,9 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
 
 - `artifact.py` — `Artifact` schemas/references and `ArtifactInputs`; `Artifacts`
   owns shared inventory, SHA-256 blobs, bundle descriptors, revision-checked
-  metadata, verified cache materialization, sync and recovery. Explicit stable
+  metadata, verified cache materialization, sync and recovery. Declared identity
+  fields replace content identity for interchangeable builds (0032); file manifests
+  remain pinned per run. Artifact metadata uses strict Pydantic validation. Explicit stable
   kinds are independent of Python paths. Run bindings pin metadata snapshots.
 - `provenance.py` — thread-local `ArtifactRuntime` records use and publication;
   workers report activities and the orchestrator commits them with run progress.
@@ -95,6 +98,7 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   annotations (bare = NOT NULL, `T | None` nullable, `list[T]` array,
   `= primary_key` / `= check(...)` / `= fanout_key` / `= field(...)`); compiles
   to DuckDB DDL + arrow schema; `Table.make()` builds one programmatically.
+  FlowParams is a strict Pydantic model with JSON-portable nested values.
   numpy scalars work as annotations (np.float32 -> FLOAT, narrow dtypes
   persist); `shaped(...)` = fixed array enforced at write but round-tripped as
   a plain list — read-side comparisons must use `persisted_type()`, never
@@ -223,3 +227,12 @@ lake and artifact registry (0012/0019/0023); schrein must never import ionflow.
 - The ducklake extension loads from the `duckdb-extension-ducklake` PyPI wheel
   when `INSTALL` can't reach extensions.duckdb.org (schrein 0002); the wheel
   pins its duckdb version — upgrade both together.
+
+## Declared identity (0032)
+
+Artifact `identity=(...)` resolves by exact name from typed inputs, parameters, or
+artifact dependencies. Lookup precedes consumed-input payload validation. Runs
+accept `reuse="auto"|"local"|"never"`; never bypasses resume and child reuse.
+Auto authorizes verified output downloads without changing browsing defaults.
+Different platforms may produce different files under one ID. Transfers must use
+run-pinned manifests, not substitute the preferred artifact payload.

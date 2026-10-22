@@ -1,10 +1,11 @@
 import graphlib
 import heapq
 import inspect
+import types
 import typing
 from dataclasses import dataclass
 
-from .artifact import Artifact
+from .artifact import Artifact, _spec
 from .composition import Call, Subflow
 from .schema import Table
 
@@ -247,6 +248,32 @@ def build_dag(cls) -> Dag:
             if not issubclass(table, Artifact) and col in table.columns():
                 raise ValueError(f"step '{name}': column '{col}' is reserved ({why})")
         steps[name] = Step(name, fn, kinds, table, is_fanout, child)
+
+    params = cls.Params.model_fields if getattr(cls, "Params", None) else {}
+    for step in steps.values():
+        schema = step.output_table
+        if not issubclass(schema, Artifact) or not schema._identity or step.subflow:
+            continue
+        if step.is_fanout:
+            raise TypeError(f"step '{step.name}': declared identities require one artifact per invocation; use Branch")
+        sources = inputs | {n: f.annotation for n, f in params.items()}
+        for name in step.deps:
+            if name in steps:
+                upstream = steps[name]
+                if upstream.is_artifact:
+                    sources[name] = (
+                        types.GenericAlias(list, (upstream.output_table,))
+                        if upstream.is_fanout and step.param_kinds[name] != "BRANCH"
+                        else upstream.output_table
+                    )
+        for name in schema._identity:
+            if name not in sources:
+                raise TypeError(
+                    f"step '{step.name}': identity field '{name}' needs a named artifact input, "
+                    "parameter, or artifact dependency"
+                )
+            if _spec(sources[name]) != _spec(schema._fields[name]):
+                raise TypeError(f"step '{step.name}': identity field '{name}' has a different source type")
 
     for s in steps.values():
         for d in s.deps:

@@ -90,6 +90,11 @@ class ArtifactRuntime:
         self.inherit([ref.id])
         return ref
 
+    def reused(self, ref: Artifact, *, source: str, size: int) -> None:
+        """Record why a producer body did not execute, retaining its original producer."""
+        self.use(ref, role="reused")
+        self._local.activity["reuse"] = {"identity": ref.id, "source": source, "bytes": size}
+
     def snapshot(self, *, key: str | int | None = None, narrow: bool = False) -> dict:
         record = copy.deepcopy(self._local.activity)
         if key is not None:

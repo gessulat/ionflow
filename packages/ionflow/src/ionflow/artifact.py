@@ -1,8 +1,10 @@
-"""Typed, content-addressed files and bundles (decisions 0023 and 0024)."""
+"""Typed files and bundles with content or declared identity (0023 and 0032)."""
 
 import copy
+import functools
 import hashlib
 import json
+import operator
 import os
 import re
 import shutil
@@ -11,6 +13,8 @@ import tempfile
 import types
 import typing
 from pathlib import Path, PurePosixPath
+
+from pydantic import ConfigDict, Field, ValidationError, create_model
 
 from .space import utc_now
 from .store import Store, payload_lock
@@ -54,13 +58,13 @@ def _member(name: str) -> str:
     return name
 
 
-def _validate(value: typing.Any, hint: typing.Any) -> bool:
-    return _matches(value, _spec(hint))
-
-
 def _spec(hint: typing.Any) -> typing.Any:
     """Portable JSON metadata types, also usable by a CLI without the schema module."""
     origin, args = typing.get_origin(hint), typing.get_args(hint)
+    if origin is typing.Annotated:
+        return _spec(args[0])
+    if isinstance(hint, type) and issubclass(hint, Artifact):
+        return ["artifact", hint._kind]
     if hint is typing.Any:
         return "any"
     if origin in (types.UnionType, typing.Union):
@@ -74,31 +78,36 @@ def _spec(hint: typing.Any) -> typing.Any:
     return hint.__name__
 
 
-def _matches(value: typing.Any, spec: typing.Any) -> bool:
-    if spec == "any":
-        return True
-    if isinstance(spec, list):
-        kind, *args = spec
-        if kind == "union":
-            return any(_matches(value, a) for a in args)
-        if kind == "list":
-            return isinstance(value, list) and all(_matches(v, args[0]) for v in value)
-        if kind == "dict":
-            return isinstance(value, dict) and all(
-                _matches(k, args[0]) and _matches(v, args[1]) for k, v in value.items()
-            )
-        return False
-    if spec == "float":
-        return type(value) in (int, float)
-    return type(value).__name__ == spec
+def _portable_type(spec: typing.Any) -> typing.Any:
+    """Reconstruct validation types from portable metadata, without importing application code."""
+    if isinstance(spec, str):
+        return {"any": typing.Any, "str": str, "int": int, "float": float, "bool": bool, "NoneType": type(None)}[spec]
+    kind, *args = spec
+    if kind == "artifact":
+        return typing.Annotated[str, Field(pattern=rf"^{args[0]}:[0-9a-f]{{64}}$")]
+    if kind == "union":
+        return functools.reduce(operator.or_, (_portable_type(a) for a in args))
+    if kind in ("list", "dict"):
+        return types.GenericAlias(list if kind == "list" else dict, tuple(_portable_type(a) for a in args))
+    raise TypeError("invalid portable metadata type")
+
+
+@functools.lru_cache(maxsize=256)
+def _portable_model(schema_json: str) -> typing.Any:
+    return typing.cast(typing.Any, create_model)(
+        "ArtifactMetadata",
+        __config__=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False),
+        **{k: (_portable_type(spec), ...) for k, spec in json.loads(schema_json).items()},
+    )
 
 
 def _metadata(record: dict, values: dict) -> dict:
-    schema = record["schema"]
-    if set(values) != set(schema) or any(not _matches(values[k], t) for k, t in schema.items()):
-        raise TypeError("metadata does not match the persisted artifact schema")
-    _json(values)
-    return copy.deepcopy(values)
+    try:
+        out = _portable_model(_json(record["schema"])).model_validate(values).model_dump(mode="json")
+    except ValidationError as error:
+        raise TypeError("metadata does not match the persisted artifact schema") from error
+    _json(out)
+    return out
 
 
 def _check_record(record: dict) -> None:
@@ -130,6 +139,13 @@ def _check_record(record: dict) -> None:
         digest = content["files"][0]["sha256"]
     else:
         digest = hashlib.sha256(_json(content).encode()).hexdigest()
+    identity = record.get("identity")
+    if identity is not None:
+        if not isinstance(identity, dict) or not identity or any(k not in record["schema"] for k in identity):
+            raise ValueError("invalid artifact identity fields")
+        if any(record["metadata"][k] != value for k, value in identity.items()):
+            raise ValueError("artifact identity fields are immutable")
+        digest = hashlib.sha256(_json(identity).encode()).hexdigest()
     if digest != record["digest"]:
         raise ValueError("artifact descriptor checksum mismatch")
     if not isinstance(record["name"], str) or type(record["revision"]) is not int or record["revision"] < 1:
@@ -143,6 +159,47 @@ def _check_record(record: dict) -> None:
     if len(PurePosixPath(record["filename"]).parts) != 1:
         raise ValueError("artifact filename must be a basename")
     _metadata(record, record["metadata"])
+
+
+def content_token(record: dict) -> str:
+    """Checksum of a concrete file manifest, never another artifact ID."""
+    return hashlib.sha256(_json(record["content"]).encode()).hexdigest()
+
+
+def _equivalent_copy(old: dict | None, record: dict) -> bool:
+    return bool(
+        old
+        and record.get("identity")
+        and old.get("identity") == record["identity"]
+        and old["schema"] == record["schema"]
+        and old["payload"] == record["payload"]
+        and old["content"] != record["content"]
+    )
+
+
+def _value(value: typing.Any) -> typing.Any:
+    if isinstance(value, Artifact):
+        return value.id
+    if isinstance(value, list):
+        return [_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _value(v) for k, v in value.items()}
+    return value
+
+
+def _validation_type(hint: typing.Any) -> typing.Any:
+    origin, args = typing.get_origin(hint), typing.get_args(hint)
+    if origin is typing.Annotated:
+        return typing.cast(typing.Any, typing.Annotated)[(_validation_type(args[0]), *args[1:])]
+    if origin in (types.UnionType, typing.Union):
+        return functools.reduce(operator.or_, (_validation_type(a) for a in args))
+    if isinstance(hint, type) and issubclass(hint, Artifact):
+        return typing.Annotated[str, Field(pattern=rf"^{hint._kind}:[0-9a-f]{{64}}$")]
+    if origin is list:
+        return types.GenericAlias(list, (_validation_type(args[0]),))
+    if origin is dict:
+        return types.GenericAlias(dict, (str, _validation_type(args[1])))
+    return hint
 
 
 def _stage(source: Path, target: Path) -> tuple[str, int]:
@@ -178,6 +235,9 @@ class Artifact:
     _kind: typing.ClassVar[str]
     _payload: typing.ClassVar[str]
     _fields: typing.ClassVar[dict]
+    _identity: typing.ClassVar[tuple[str, ...]] = ()
+    _model: typing.ClassVar[typing.Any]
+    _identity_model: typing.ClassVar[typing.Any]
     _sync: typing.ClassVar[dict[str, bool]] = {"up": True, "down": True}
     _path: Path
     _name: str | None
@@ -191,6 +251,7 @@ class Artifact:
         *,
         kind: str | None = None,
         payload: str = "file",
+        identity: tuple[str, ...] | None = None,
         sync_up: bool | None = None,
         sync_down: bool | None = None,
         **kw: typing.Any,
@@ -209,11 +270,28 @@ class Artifact:
         cls._kind, cls._payload = kind, payload
         cls._fields = {
             k: v
-            for k, v in typing.get_type_hints(cls).items()
+            for k, v in typing.get_type_hints(cls, include_extras=True).items()
             if not k.startswith("_") and typing.get_origin(v) is not typing.ClassVar
         }
         for hint in cls._fields.values():
             _spec(hint)
+        cls._identity = cls._identity if identity is None else identity
+        if (
+            not isinstance(cls._identity, tuple)
+            or len(set(cls._identity)) != len(cls._identity)
+            or any(not isinstance(k, str) or k not in cls._fields for k in cls._identity)
+        ):
+            raise TypeError("identity must be a tuple of distinct artifact metadata field names")
+        cls._model = typing.cast(typing.Any, create_model)(
+            cls.__name__ + "Metadata",
+            __config__=ConfigDict(strict=True, extra="forbid", validate_default=True, allow_inf_nan=False),
+            **{k: (_validation_type(hint), getattr(cls, k, None)) for k, hint in cls._fields.items()},
+        )
+        cls._identity_model = typing.cast(typing.Any, create_model)(
+            cls.__name__ + "Identity",
+            __config__=cls._model.model_config,
+            **{k: (f.annotation, f) for k in cls._identity for f in [cls._model.model_fields[k]]},
+        )
         if collisions := set(cls._fields) & (set(dir(Artifact)) | {"run_id", "item_key", "local", "s3"}):
             raise ValueError(f"reserved artifact metadata fields: {sorted(collisions)}")
         _KINDS[kind] = cls
@@ -223,14 +301,22 @@ class Artifact:
         """Resolve defaults and validate JSON metadata at the publication boundary."""
         if unknown := set(given) - set(cls._fields):
             raise ValueError(f"unknown {cls._kind} metadata: {sorted(unknown)}")
-        out = {}
-        for name, hint in cls._fields.items():
-            value = given.get(name, getattr(cls, name, None))
-            if not _validate(value, hint):
-                raise TypeError(f"metadata {name!r}: expected {hint}, got {value!r}")
-            out[name] = copy.deepcopy(value)
+        try:
+            out = cls._model.model_validate(_value(given)).model_dump(mode="json")
+        except ValidationError as error:
+            raise TypeError(str(error)) from error
         _json(out)
         return out
+
+    @classmethod
+    def identity(cls, **values: typing.Any) -> str:
+        """Calculate a declared identity without constructing or reading any payload."""
+        if not cls._identity:
+            raise ValueError(f"{cls.__name__} uses content identity; its files must exist first")
+        if set(values) != set(cls._identity):
+            raise ValueError(f"identity requires exactly {list(cls._identity)}")
+        normalized = cls._identity_model.model_validate(_value(values)).model_dump(mode="json")
+        return f"{cls._kind}:" + hashlib.sha256(_json(normalized).encode()).hexdigest()
 
     @classmethod
     def from_path(
@@ -271,7 +357,9 @@ class Artifact:
     @property
     def uri(self) -> str:
         if self._record is not None and self._record["payload"] == "file":
-            return self._registry.store.uri(f"{self._registry.root}/_blobs/sha256/{self._record['digest']}")
+            return self._registry.store.uri(
+                f"{self._registry.root}/_blobs/sha256/{self._record['content']['files'][0]['sha256']}"
+            )
         return self._registry.store.uri(self._registry.directory(self.id) + "/content.json")
 
     def local_path(self) -> Path:
@@ -355,6 +443,13 @@ class Artifacts:
             raise TypeError(f"{artifact_id} is not a {resolved._kind}")
         if resolved is not Artifact and {k: _spec(v) for k, v in resolved._fields.items()} != snapshot["schema"]:
             raise TypeError(f"{artifact_id}: metadata schema differs from {resolved.__name__}")
+        if resolved is not Artifact and set(resolved._identity) != set(snapshot.get("identity") or {}):
+            raise TypeError(f"{artifact_id}: declared identity differs from {resolved.__name__}")
+        if resolved is not Artifact:
+            if resolved.metadata_values(snapshot["metadata"]) != snapshot["metadata"]:
+                raise TypeError(f"{artifact_id}: metadata is not normalized")
+            if resolved._identity and resolved.identity(**snapshot["identity"]) != artifact_id:
+                raise ValueError(f"{artifact_id}: identity is not normalized")
         obj = resolved.__new__(resolved)
         obj._record, obj._registry = copy.deepcopy(snapshot), self
         obj._metadata = copy.deepcopy(snapshot["metadata"])
@@ -365,6 +460,27 @@ class Artifacts:
         body = _json(record).encode()
         self.store.put(f"{root}/metadata/{record['revision']}.json", body)
         self.store.put(f"{root}/_meta.json", body)
+
+    def _export_payload(self, record: dict) -> None:
+        if record.get("identity") is not None:
+            self.store.put(
+                f"{self.directory(record['id'])}/payloads/{content_token(record)}.json", _json(record).encode()
+            )
+
+    def payload_records(self, artifact_id: str, *, snapshot: dict | None = None) -> list[dict]:
+        """Retained concrete manifests for an artifact, including forced local builds."""
+        preferred = self.get(artifact_id).snapshot() if snapshot is None else snapshot
+        records: dict[str, dict] = {content_token(preferred): preferred}
+        for key in self.store.list(self.directory(artifact_id) + "/payloads/"):
+            record = json.loads(self.store.get(key))
+            _check_record(record)
+            if (
+                record["id"] != artifact_id
+                or key != f"{self.directory(artifact_id)}/payloads/{content_token(record)}.json"
+            ):
+                raise ValueError("invalid artifact payload export")
+            records.setdefault(content_token(record), record)
+        return list(records.values())
 
     def _revision_keys(self) -> list[str]:
         keys = []
@@ -378,12 +494,23 @@ class Artifacts:
         same_kind = con.execute("SELECT record FROM lake.artifacts WHERE kind = ? LIMIT 1", [record["kind"]]).fetchone()
         if same_kind:
             declared = json.loads(same_kind[0])
-            if (declared["schema"], declared["payload"]) != (record["schema"], record["payload"]):
+            if (declared["schema"], declared["payload"], set(declared.get("identity") or {})) != (
+                record["schema"],
+                record["payload"],
+                set(record.get("identity") or {}),
+            ):
                 raise TypeError(f"artifact type {record['kind']!r} already has a different schema or payload kind")
         con.execute("INSERT INTO lake.artifacts VALUES (?, ?, ?)", [record["id"], record["kind"], _json(record)])
+        self._insert_files(con, record)
+
+    @staticmethod
+    def _insert_files(con: typing.Any, record: dict) -> None:
         for f in record["content"]["files"]:
+            values = [record["id"], f["path"], f["sha256"], f["size"]]
             con.execute(
-                "INSERT INTO lake.artifact_files VALUES (?, ?, ?, ?)", [record["id"], f["path"], f["sha256"], f["size"]]
+                "INSERT INTO lake.artifact_files SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+                "SELECT 1 FROM lake.artifact_files WHERE artifact_id = ? AND path = ? AND digest = ?)",
+                values + values[:3],
             )
 
     def put[A: Artifact](self, candidate: A) -> A:
@@ -425,14 +552,17 @@ class Artifacts:
                 digest, size = _stage(source, dest)
                 files.append({"path": name, "sha256": digest, "size": size})
                 staged.append((digest, dest))
-            content = {"version": 1, "payload": payload, "files": files}
+            content: dict = {"version": 1, "payload": payload, "files": files}
             digest = files[0]["sha256"] if payload == "file" else hashlib.sha256(_json(content).encode()).hexdigest()
             artifact_id = f"{candidate._kind}:{digest}"
             for file_digest, dest in staged:
                 key = f"{self.root}/_blobs/sha256/{file_digest}"
                 if not self.store.exists(key):
                     self.store.upload(key, str(dest))
-            self.store.put(self.directory(artifact_id) + "/content.json", _json(content).encode())
+            identity = {k: candidate.metadata[k] for k in candidate._identity} or None
+            if identity is not None:
+                digest = candidate.identity(**identity).split(":")[1]
+                artifact_id = f"{candidate._kind}:{digest}"
         record = {
             "id": artifact_id,
             "kind": candidate._kind,
@@ -447,23 +577,45 @@ class Artifacts:
             "schema": {k: _spec(v) for k, v in candidate._fields.items()},
             "sync": dict(candidate._sync),
             "history": [],
+            "identity": identity,
         }
+        published = record
 
         def commit(con: typing.Any) -> None:
+            nonlocal published
             self._genesis(con)
             row = con.execute("SELECT record FROM lake.artifacts WHERE id = ?", [artifact_id]).fetchone()
             if row is not None:
                 old = json.loads(row[0])
                 if old["schema"] != record["schema"]:
                     raise TypeError(f"artifact type {record['kind']!r} already has a different schema")
-                if old["metadata"] != record["metadata"] or old["payload"] != payload:
+                if old.get("identity") != identity or old["payload"] != payload:
+                    raise MetadataConflict(f"{artifact_id}: existing identity or payload declaration differs")
+                if identity is None and old["metadata"] != record["metadata"]:
                     raise MetadataConflict(f"{artifact_id}: existing metadata differs; use update explicitly")
+                published = old
+                if (
+                    identity is not None
+                    and self.store.local_dir
+                    and (old["content"] != record["content"] or old["metadata"] != record["metadata"])
+                ):
+                    published = old | {
+                        "content": content,
+                        "metadata": record["metadata"],
+                        "filename": record["filename"],
+                        "revision": old["revision"] + 1,
+                        "history": [*old.get("history", []), metadata_token(old)],
+                    }
+                    con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(published), artifact_id])
+                    self._insert_files(con, published)
                 return
             self._insert(con, record)
 
         self.lake.commit(commit)
+        self.store.put(self.directory(artifact_id) + "/content.json", _json(published["content"]).encode())
+        self._export_payload(published)
         self.mark_present(artifact_id)
-        ref = self.get(artifact_id, type(candidate))
+        ref = self.get(artifact_id, type(candidate), snapshot=published)
         self._export(ref.snapshot())
         from .storage import request_refresh
 
@@ -476,6 +628,10 @@ class Artifacts:
         """Edit metadata using the revision that the caller actually read."""
         old = self.get(artifact_id)
         values = _metadata(old.snapshot(), old.metadata if metadata is None else metadata)
+        if type(old) is not Artifact:
+            values = type(old).metadata_values(values)
+        if any(values[k] != v for k, v in (old.snapshot().get("identity") or {}).items()):
+            raise ValueError("artifact identity fields are immutable")
         if name is not None and not isinstance(name, str):
             raise TypeError("artifact name must be a string")
         record = old.snapshot() | {
@@ -498,7 +654,7 @@ class Artifacts:
         request_refresh(self.store.cfg)
         return self.get(artifact_id)
 
-    def availability(self, peer: str | None = None) -> dict[str, dict[str, bool]]:
+    def availability(self, peer: str | None = None, *, artifact_id: str | None = None) -> dict[str, dict[str, bool]]:
         """Payload presence here and at the last observed peer; metadata alone is absent."""
         if self.lake.register.read()[0] is None:
             return {}
@@ -508,8 +664,9 @@ class Artifacts:
                 for aid, present, remote in con.execute(
                     "SELECT a.id, p.present, r.present FROM lake.artifacts a "
                     "LEFT JOIN lake.artifact_presence p ON p.id = a.id "
-                    "LEFT JOIN lake.artifact_peers r ON r.id = a.id AND r.peer = ?",
-                    [peer],
+                    "LEFT JOIN lake.artifact_peers r ON r.id = a.id AND r.peer = ? "
+                    "WHERE (? IS NULL OR a.id = ?)",
+                    [peer, artifact_id, artifact_id],
                 ).fetchall()
             }
 
@@ -529,17 +686,22 @@ class Artifacts:
                     raise MissingPayload(f"{artifact_id}: payload unavailable; review a new transfer plan")
             self.lake.commit(commit)
 
-    def merge_metadata(self, records: list[dict], peer: str | None = None, presence: dict | None = None) -> list[str]:
+    def merge_metadata(
+        self, records: list[dict], peer: str | None = None, presence: dict | None = None, *, received: bool = False
+    ) -> list[str]:
         """Import descriptors without blobs; return divergent metadata IDs."""
         conflicts = []
         for record in records:
             _check_record(record)
+            if received and not self.has_payload(self.get(record["id"], snapshot=record)):
+                raise MissingPayload(f"{record['id']}: receiving files are incomplete; review a new transfer plan")
         existing = {r["id"]: r for r in self.records()}
         observed = self.availability(peer)
         records = [
             r
             for r in records
-            if existing.get(r["id"]) != r
+            if received
+            or (existing.get(r["id"]) != r and not _equivalent_copy(existing.get(r["id"]), r))
             or (
                 peer is not None
                 and observed.get(r["id"], {}).get("s3", False) != bool((presence or {}).get(r["id"], {}).get("local"))
@@ -556,18 +718,37 @@ class Artifacts:
                 old = json.loads(row[0]) if row else None
                 if old is None:
                     self._insert(con, record)
-                elif (old["schema"], old["payload"], old["content"]) != (
+                elif (old["schema"], old["payload"], old.get("identity")) != (
                     record["schema"],
                     record["payload"],
-                    record["content"],
-                ):
+                    record.get("identity"),
+                ) or (old["content"] != record["content"] and record.get("identity") is None):
                     raise TypeError(f"{record['id']}: artifact schema or content differs")
+                elif old["content"] != record["content"]:
+                    pass  # Equivalent builds retain their own payload metadata.
                 elif metadata_token(old) in record.get("history", []):
-                    con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(record), record["id"]])
+                    updated = record | {"content": old["content"], "filename": old["filename"]}
+                    con.execute("UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(updated), record["id"]])
                 elif (old["name"], old["metadata"]) != (record["name"], record["metadata"]) and (
                     metadata_token(record) not in old.get("history", [])
                 ):
                     conflicts.append(record["id"])
+                if received and record["id"] not in conflicts:
+                    present = con.execute(
+                        "SELECT present FROM lake.artifact_presence WHERE id = ?", [record["id"]]
+                    ).fetchone()
+                    if not present or not present[0]:
+                        preferred = json.loads(
+                            con.execute("SELECT record FROM lake.artifacts WHERE id = ?", [record["id"]]).fetchone()[0]
+                        )
+                        if preferred["content"] != record["content"]:
+                            preferred = record
+                        con.execute(
+                            "UPDATE lake.artifacts SET record = ? WHERE id = ?", [_json(preferred), record["id"]]
+                        )
+                    con.execute("DELETE FROM lake.artifact_presence WHERE id = ?", [record["id"]])
+                    con.execute("INSERT INTO lake.artifact_presence VALUES (?, true)", [record["id"]])
+                self._insert_files(con, record)
                 if peer is not None:
                     con.execute("DELETE FROM lake.artifact_peers WHERE peer = ? AND id = ?", [peer, record["id"]])
                     con.execute(
@@ -579,8 +760,10 @@ class Artifacts:
             self.lake.commit(commit)
         for record in records:
             if record["id"] not in conflicts:
-                self.store.put(self.directory(record["id"]) + "/content.json", _json(record["content"]).encode())
-                self._export(self.get(record["id"]).snapshot())
+                self._export_payload(record)
+                preferred = self.get(record["id"]).snapshot()
+                self.store.put(self.directory(record["id"]) + "/content.json", _json(preferred["content"]).encode())
+                self._export(preferred)
         return conflicts
 
     def _cache_root(self) -> Path:
@@ -589,7 +772,7 @@ class Artifacts:
 
     def _file_alias(self, record: dict, payload: Path) -> Path:
         """Names are outside content identity; aliases share verified cache bytes."""
-        directory = self._cache_root() / "_files" / record["id"].replace(":", "-")
+        directory = self._cache_root() / "_files" / (record["id"].replace(":", "-") + "-" + content_token(record))
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / record["filename"]
         try:
@@ -608,7 +791,7 @@ class Artifacts:
             raise MissingPayload(f"{ref.id}: payload unavailable here; download this artifact first")
         cache = self._cache_root()
         cache.mkdir(parents=True, exist_ok=True)
-        dest = cache / record["id"].replace(":", "-")
+        dest = cache / (record["id"].replace(":", "-") + "-" + content_token(record))
         if dest.is_dir():
             return self._file_alias(record, dest / "data") if record["payload"] == "file" else dest
         with tempfile.TemporaryDirectory(prefix=".partial-", dir=cache) as tmp:
@@ -634,11 +817,19 @@ class Artifacts:
                     raise
         return self._file_alias(record, dest / "data") if record["payload"] == "file" else dest
 
+    def has_payload(self, ref: Artifact) -> bool:
+        """Check the pinned files, rather than a different build of the same artifact."""
+        return all(
+            (info := self.store.stat(f"{self.root}/_blobs/sha256/{m['sha256']}")) is not None
+            and info["size"] == m["size"]
+            for m in ref.snapshot()["content"]["files"]
+        )
+
     def evict(self, artifact_id: str) -> bool:
         """Remove only this store's disposable local cache entry, never canonical data."""
         self.directory(artifact_id)
         name = artifact_id.replace(":", "-")
-        paths = [self._cache_root() / name, self._cache_root() / "_files" / name]
+        paths = [*self._cache_root().glob(name + "-*"), *(self._cache_root() / "_files").glob(name + "-*")]
         evicted = False
         for path in paths:
             if path.exists():
@@ -802,8 +993,11 @@ class Artifacts:
                 records[record["id"]] = record
         for record in records.values():
             content = json.loads(self.store.get(self.directory(record["id"]) + "/content.json") or "null")
-            if content != record["content"]:
+            if content != record["content"] and record.get("identity") is None:
                 raise ValueError(f"missing or conflicting descriptor: {record['id']}")
+        payloads = [
+            payload for record in records.values() for payload in self.payload_records(record["id"], snapshot=record)
+        ]
         links = [json.loads(self.store.get(k)) for k in self.store.list(self.root + "/_links/")]
 
         def commit(con: typing.Any) -> None:
@@ -820,6 +1014,8 @@ class Artifacts:
                     self.store.exists(f"{self.root}/_blobs/sha256/{m['sha256']}") for m in record["content"]["files"]
                 )
                 con.execute("INSERT INTO lake.artifact_presence VALUES (?, ?)", [record["id"], present])
+            for payload in payloads:
+                self._insert_files(con, payload)
             for values in links:
                 if not all(v in records for v in values[:2]):
                     raise ValueError("artifact relationship references missing content")

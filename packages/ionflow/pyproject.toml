@@ -25,6 +25,7 @@ dependencies = [
     "duckdb>=1.5.4",
     "psutil>=7.2.2",
     "pyarrow>=24.0.0",
+    "pydantic>=2.12,<3",
     "schrein",
     "textual>=8.2.8",
     "typer>=0.26.8",

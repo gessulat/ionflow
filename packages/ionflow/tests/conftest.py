@@ -96,6 +96,46 @@ def composition(localcfg, tmp_path):
 
 
 @pytest.fixture
+def identity_build(localcfg, tmp_path, repo):
+    """A recipe and helpers that read exact run snapshots rather than current inventory."""
+    from types import SimpleNamespace
+
+    from identity_flows import Source
+
+    from ionflow import Artifacts
+    from ionflow.lake import Catalog
+    from ionflow.space import Space
+    from ionflow.store import Store
+
+    path = tmp_path / "library"
+    path.write_bytes(b"scientific input")
+    registry = Artifacts(localcfg)
+    source = registry.put(Source.from_path(path))
+    work = tmp_path / "work"
+
+    def result(flow, run_id, config=localcfg):
+        row, _ = Catalog(Space.for_flow(Store.of(config), flow)).run_state(run_id)
+        outputs = [o for activity in row["activities"].values() for o in activity["outputs"]]
+        snapshot = outputs[-1]["artifact"]
+        return Artifacts(config).get(snapshot["id"], snapshot=snapshot)
+
+    def calls():
+        path = work / "executed"
+        return path.read_text().splitlines() if path.exists() else []
+
+    return SimpleNamespace(
+        cfg=localcfg,
+        root=tmp_path,
+        repo=repo,
+        registry=registry,
+        source=source,
+        given={"artifacts": {"library": source.id}, "params": {"work_dir": str(work)}},
+        result=result,
+        calls=calls,
+    )
+
+
+@pytest.fixture
 def shared_blob_publication(localcfg, tmp_path):
     """A receiving store and incoming bundle sharing the receiver's only file."""
     from browser_flows import Bundle, Document

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .artifact import Artifacts, MetadataConflict, MissingPayload, metadata_token
+from .artifact import Artifacts, MetadataConflict, MissingPayload, content_token, metadata_token
 from .config import Config
 from .lake import Catalog
 from .space import utc_now
@@ -181,6 +181,7 @@ class TransferPlan:
     links: list[list] = field(default_factory=list)
     activities: list[dict] = field(default_factory=list)
     run_groups: dict[str, dict] = field(default_factory=dict)
+    payload_records: list[dict] = field(default_factory=list)
 
     def _groups(self) -> dict[str, dict]:
         """Child catalogs first, then the selected parent catalog."""
@@ -208,7 +209,7 @@ class TransferPlan:
                     body,
                     self.files,
                     {identifier: [r["version"] for r in group["runs"]] for identifier, group in self._groups().items()},
-                    [metadata_token(r) for r in self.artifact_records],
+                    [[metadata_token(r), content_token(r)] for r in self.artifact_records + self.payload_records],
                 ],
                 sort_keys=True,
             ).encode()
@@ -219,7 +220,8 @@ class TransferPlan:
         """Expose member names and artifact choices without exposing credentials."""
         names: dict[str, list[str]] = {}
         missing = {f["target"]: f["size"] for f in self.files}
-        for record in self.artifact_records:
+        payloads = self.payload_records + [r for r in self.artifact_records if r["id"] not in self.artifacts]
+        for record in payloads:
             for member in record["content"]["files"]:
                 key = f"{self.target.prefix}/artifacts/_blobs/sha256/{member['sha256']}"
                 names.setdefault(key, []).append(f"{record['name']}/{member['path']}")
@@ -237,7 +239,10 @@ class TransferPlan:
                     "bytes": sum(
                         missing.get(k, 0)
                         for k in {
-                            f"{self.target.prefix}/artifacts/_blobs/sha256/{m['sha256']}" for m in r["content"]["files"]
+                            f"{self.target.prefix}/artifacts/_blobs/sha256/{m['sha256']}"
+                            for p in payloads
+                            if p["id"] == r["id"]
+                            for m in p["content"]["files"]
                         }
                     ),
                 }
@@ -265,6 +270,21 @@ def _choose_artifacts(
     return chosen
 
 
+def _payload_records(groups: dict, records: dict[str, dict], ids: list[str]) -> list[dict]:
+    """Prefer the concrete manifests pinned by selected runs over current inventory."""
+    pinned: dict[str, dict[str, dict]] = {}
+    for group in groups.values():
+        for run in group["runs"]:
+            snapshots = []
+            for bound in run["artifacts"].values():
+                snapshots.extend(bound if isinstance(bound, list) else [bound])
+            for activity in run["activities"]:
+                snapshots.extend(v["artifact"] for v in [*activity["uses"], *activity["outputs"]])
+            for snapshot in snapshots:
+                pinned.setdefault(snapshot["id"], {})[content_token(snapshot)] = snapshot
+    return [record for aid in ids for record in (list(pinned[aid].values()) if aid in pinned else [records[aid]])]
+
+
 def plan_transfer(
     source: Store,
     target: Store,
@@ -285,6 +305,7 @@ def plan_transfer(
         direction = "up" if source.local_dir else "down"
     source_records = {r["id"]: r for r in registry.records()}
     payload_ids = _choose_artifacts(source_records, ids, include_artifacts, direction)
+    payload_records = _payload_records(groups, source_records, payload_ids)
     files = {}
 
     def add(relative: str, size: int, digest: str | None) -> None:
@@ -294,12 +315,12 @@ def plan_transfer(
         if info is None or info["size"] != size:
             files[target_key] = {"source": source_key, "target": target_key, "size": size, "sha256": digest}
 
-    for aid in payload_ids:
-        for member in source_records[aid]["content"]["files"]:
+    for record in payload_records:
+        for member in record["content"]["files"]:
             key = f"artifacts/_blobs/sha256/{member['sha256']}"
             info = source.stat(f"{source.prefix}/{key}")
             if info is None or info["size"] != member["size"]:
-                raise MissingPayload(f"{aid}: payload unavailable at source")
+                raise MissingPayload(f"{record['id']}: payload unavailable at source")
             add(key, member["size"], member["sha256"])
     for identifier, group in groups.items():
         for record in group["runs"]:
@@ -326,6 +347,7 @@ def plan_transfer(
         [link for link in registry.links() if link[0] in selected and link[1] in selected],
         [a for a in registry.activities() if any(o["artifact"]["id"] in selected for o in a["outputs"])],
         groups,
+        payload_records,
     )
 
 
@@ -364,6 +386,9 @@ def _execute_transfer(plan: TransferPlan, progress: Callable[[dict], None] | Non
     if plan.artifact_records:
         registry = Artifacts(target)
         conflicts = registry.merge_metadata(plan.artifact_records)
+        if conflicts:
+            raise MetadataConflict("artifact metadata conflicts: " + ", ".join(conflicts))
+        conflicts = registry.merge_metadata(plan.payload_records, received=True)
         if conflicts:
             raise MetadataConflict("artifact metadata conflicts: " + ", ".join(conflicts))
         for aid in plan.artifacts:
@@ -567,6 +592,7 @@ class Storage:
         registry, groups, ids = _selection(self.local, flow_id, run_id, artifact_ids, require_present=False)
         records = {r["id"]: r for r in registry.records()}
         chosen = _choose_artifacts(records, ids, include_artifacts, direction)
+        payloads = _payload_records(groups, records, ids)
         if self._remote is not None:
             peer = self._remote.uri(self._remote.prefix)
         else:
@@ -605,8 +631,9 @@ class Storage:
             if name not in entry["names"]:
                 entry["names"].append(name)
 
-        for aid in chosen:
-            r = records[aid]
+        for r in payloads:
+            if r["id"] not in chosen:
+                continue
             for member in r["content"]["files"]:
                 add(
                     f"artifacts/_blobs/sha256/{member['sha256']}",
@@ -634,7 +661,9 @@ class Storage:
                     "chosen": aid in chosen,
                     "bytes": sum(
                         size
-                        for digest, size in {m["sha256"]: m["size"] for m in records[aid]["content"]["files"]}.items()
+                        for digest, size in {
+                            m["sha256"]: m["size"] for p in payloads if p["id"] == aid for m in p["content"]["files"]
+                        }.items()
                         if is_missing(f"artifacts/_blobs/sha256/{digest}", size)
                     ),
                 }
