@@ -15,3 +15,4 @@ here hold the *why*, so AGENTS.md should link to a record rather than inline
 its reasoning.
 
 - [0032 — Declared artifact identity and execution reuse](0032-declared-artifact-identity-and-reuse.md)
+- [0033 — Table step inputs and partitioning](0033-table-step-inputs-and-partitioning.md)

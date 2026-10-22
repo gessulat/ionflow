@@ -171,7 +171,8 @@ run_id`); `ionflow stats <flow> [run_id]` summarizes it per step.
   relations drain through `to_arrow_reader`. `sync_to` delegates to the shared
   transfer planner. Timestamps: naive UTC (`utc_now`).
 - `arrow.py` — pure marshalling: `to_arrow` (numpy dicts/structured/bare
-  arrays; complex rejected), `StepInput` (lazy relation + `.np()`); numpy
+  arrays; complex rejected), `StepInput[Schema]` (lazy relation + `.np()` and
+  `.partition_by(column)` for ordered, lazy fan-out partitions; 0033); numpy
   optional in core.
 - `lake.py` — both DuckLakes. `Catalog` = the run's ONE metadata authority
   (0019): per-step data tables + fixed-DDL `runs` (the ledger) and `manifest`

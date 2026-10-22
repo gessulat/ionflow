@@ -1,7 +1,11 @@
 import io
+from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from .schema import _q
 
 try:  # numpy is optional in core; step returns convert when it's installed
     import numpy as np
@@ -113,19 +117,37 @@ def _np_column(name, arr):
     return inner.reshape(len(arr), d, *inner.shape[1:])
 
 
-class StepInput:
-    """A step's input: the lazy DuckDB relation plus a numpy accessor.
+class StepInput[T]:
+    """A table step's input: a lazy DuckDB relation with its declared schema T.
 
     Relation methods (`.filter`, `.aggregate`, `.project`, `.df()`, ...) delegate
-    through and return plain relations. `.np()` is the one addition, and it
-    MATERIALIZES what it touches — filter/project first when the input is large.
+    through and return plain relations. `.np()` materializes arrays; filter or
+    project first when the input is large. `.partition_by()` materializes keys only.
     """
 
-    def __init__(self, rel):
+    def __init__(self, rel: duckdb.DuckDBPyRelation) -> None:
         self.rel = rel
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self.rel, name)
+
+    def partition_by(self, column: str) -> list[duckdb.DuckDBPyRelation]:
+        """One lazy relation per distinct key, ordered by key with NULL last.
+
+        Only the distinct keys are materialized. Names and values are quoted
+        independently; a NULL key retains its rows in a separate partition.
+
+        >>> inp = StepInput(duckdb.sql("SELECT * FROM (VALUES ('b'), ('a'), ('b'), (NULL)) t(k)"))
+        >>> [part.fetchall() for part in inp.partition_by("k")]
+        [[('a',)], [('b',), ('b',)], [(None,)]]
+        """
+        quoted = _q(column)
+        keys = self.rel.project(quoted).distinct().order(f"{quoted} ASC NULLS LAST").fetchall()
+        expression = duckdb.SQLExpression(quoted)
+        return [
+            self.rel.filter(expression.isnull() if key is None else expression == duckdb.ConstantExpression(key))
+            for (key,) in keys
+        ]
 
     def np(self, column=None):
         """One column as an ndarray, or every column as {name: ndarray}.

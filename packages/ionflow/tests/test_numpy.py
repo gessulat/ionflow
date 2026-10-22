@@ -8,8 +8,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from ionflow import Branch, Collect, Fanout, Flow, Table, check, shaped
-from ionflow.arrow import StepInput, table_from_bytes, to_arrow
+from ionflow import Branch, Collect, Fanout, Flow, StepInput, Table, check, shaped
+from ionflow.arrow import table_from_bytes, to_arrow
 from ionflow.space import ConstraintViolation, Space
 from ionflow.store import Store
 
@@ -158,6 +158,24 @@ def test_step_input_delegates_to_the_relation():
     assert inp.aggregate("sum(x) AS s").fetchone()[0] == 6
 
 
+def test_partition_by_quotes_keys_and_column_names_and_keeps_null_rows():
+    con = duckdb.connect(config={"default_order": "DESC", "default_null_order": "NULLS_FIRST"})
+    inp = StepInput(
+        con.from_arrow(pa.table({'job."key': ["O'Hara", None, "x' OR TRUE--", "O'Hara"], "row": [1, 2, 3, 4]}))
+    )
+    parts = inp.partition_by('job."key')
+    assert all(isinstance(part, duckdb.DuckDBPyRelation) for part in parts)
+    assert [part.fetchall() for part in parts] == [
+        [("O'Hara", 1), ("O'Hara", 4)],
+        [("x' OR TRUE--", 3)],
+        [(None, 2)],
+    ]
+
+
+def test_partition_by_empty_input_emits_no_branches():
+    assert _input(pa.table({"key": pa.array([], pa.string())})).partition_by("key") == []
+
+
 def test_write_part_accepts_an_input_returned_unchanged(cfg):
     # identity step: `def copy(self, raw: Raw) -> Raw: return raw`
     store = Store.of(cfg)
@@ -195,8 +213,8 @@ class SignalFlow(Flow):
             "spectrum": np.abs(rng.standard_normal((4, 16))).astype(np.float32),
         }
 
-    def frames(self, spectra: Spectra) -> Fanout[Spectra]:
-        return [spectra.filter(f"frame = {i}") for i in range(4)]
+    def frames(self, spectra: StepInput[Spectra]) -> Fanout[Spectra]:
+        return spectra.partition_by("frame")
 
     def peaks(self, frames: Branch[Spectra]) -> Peak:
         return {"frame": frames.np("frame"), "peak": frames.np("spectrum").max(axis=1)}

@@ -5,6 +5,7 @@ import types
 import typing
 from dataclasses import dataclass
 
+from .arrow import StepInput
 from .artifact import Artifact, _spec
 from .composition import Call, Subflow
 from .schema import Table
@@ -14,11 +15,11 @@ class Fanout[T]:
     """Return marker: step yields N branch outputs."""
 
 
-class Branch[T]:
+class Branch[T](StepInput[T]):
     """Param marker: step runs once per branch of the named fan-out step."""
 
 
-class Collect[T]:
+class Collect[T](StepInput[T]):
     """Param marker: step receives all branch outputs of the named step."""
 
 
@@ -279,16 +280,21 @@ def build_dag(cls) -> Dag:
         for d in s.deps:
             if d not in steps:
                 raise ValueError(f"step '{s.name}' depends on unknown step '{d}'")
-            if s.subflow:
-                hint = typing.get_type_hints(s.method).get(d)
-                if typing.get_origin(hint) in (Branch, Collect):
+            hint = typing.get_type_hints(s.method).get(d)
+            typed_input = typing.get_origin(hint) is StepInput
+            if hint is StepInput:
+                raise TypeError(f"step '{s.name}': dependency '{d}' needs StepInput[TableSchema]")
+            if typed_input and steps[d].is_artifact:
+                raise TypeError(f"step '{s.name}': StepInput requires a table dependency, not artifact '{d}'")
+            if s.subflow or typed_input:
+                if typing.get_origin(hint) in (Branch, Collect, StepInput):
                     hint = typing.get_args(hint)[0]
                 upstream = steps[d]
                 expected = upstream.output_table
                 if upstream.is_artifact and upstream.is_fanout and s.param_kinds[d] == "NORMAL":
                     hint = typing.get_args(hint)[0] if typing.get_origin(hint) is list else None
                 if hint != expected:
-                    raise TypeError(f"subflow step '{s.name}': dependency '{d}' must be annotated {expected}")
+                    raise TypeError(f"step '{s.name}': dependency '{d}' must be annotated {expected}")
     try:
         order = _toposort({n: s.deps for n, s in steps.items()})
     except graphlib.CycleError as e:
