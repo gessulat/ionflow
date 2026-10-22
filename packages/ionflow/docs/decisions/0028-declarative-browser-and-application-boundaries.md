@@ -57,3 +57,8 @@ aliases, historical readers, table migration, or production-store deletion.
 Applications can replace bespoke inventory and storage implementations incrementally.
 The initial contracts require no web framework or frontend dependencies.
 Domain renderers can supplement generated defaults without redefining storage policy.
+
+2026-10-22: `ionflow.web.browser_script()` now supplies optional ES-module browser
+components. They consume the Python browser's descriptors and data, using an
+htm-compatible renderer supplied by the host. HTTP, routes, state, credentials,
+transfers, and scientific extensions remain application responsibilities.
