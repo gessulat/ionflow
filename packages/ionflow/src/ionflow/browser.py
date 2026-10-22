@@ -49,7 +49,13 @@ class Browser:
         self, config: Config, *, flows: Sequence[type[Flow]] = (), artifacts: Sequence[type[Artifact]] = ()
     ) -> None:
         self.storage = Storage(config)
-        self.flows = {flow.flow_id(): flow for flow in flows}
+        self.flows: dict[str, type[Flow]] = {}
+        pending = list(flows)
+        while pending:
+            flow = pending.pop(0)
+            if flow.flow_id() not in self.flows:
+                self.flows[flow.flow_id()] = flow
+                pending.extend(step.subflow.flow for step in flow._dag.steps.values() if step.subflow)
         self.kinds = {artifact._kind: artifact for artifact in artifacts}
 
     def describe(self) -> dict:
@@ -110,6 +116,11 @@ class Browser:
                         "fanout": step.is_fanout,
                         "branch": flow._dag.roots.get(name),
                         "output": descriptor,
+                        **(
+                            {"subflow": {"flow_id": step.subflow.flow.flow_id(), "output": step.subflow.output}}
+                            if step.subflow
+                            else {}
+                        ),
                     }
                 )
             inputs = flow.Inputs.declarations() if flow.Inputs else {}
@@ -138,6 +149,27 @@ class Browser:
             [row.get("params", {}) | row.get("custom", {}) | row for row in rows],
             key=lambda row: row["run_id"],
             reverse=True,
+        )
+
+    def children(self, flow_id: str, run_id: str) -> list[dict]:
+        """Return child attempts, including children retained through parent resume."""
+        flow = self._flow(flow_id)
+        runs = {row["run_id"]: row for row in self.storage.runs(flow_id)}
+        if run_id not in runs:
+            raise ValueError(f"unknown run: {run_id}")
+        origins, ancestor = set(), run_id
+        while ancestor and ancestor not in origins:
+            origins.add(ancestor)
+            ancestor = runs.get(ancestor, {}).get("origin_run_id")
+        children = {step.subflow.flow.flow_id() for step in flow._dag.steps.values() if step.subflow}
+        return sorted(
+            [
+                row | {"flow_id": child, "reused": row["parent"]["run_id"] != run_id}
+                for child in children
+                for row in self.storage.runs(child)
+                if (link := row.get("parent")) and link["flow_id"] == flow_id and link["run_id"] in origins
+            ],
+            key=lambda row: (row["parent"]["step"], str(row["parent"]["key"]), row["run_id"]),
         )
 
     def artifacts(self, kind: str) -> list[dict]:

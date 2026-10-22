@@ -112,6 +112,7 @@ def test_meta_json_is_the_cross_version_resume_surface(cfg, repo):
         "params",
         "custom",
         "artifacts",
+        "parent",
         "activities",
         "version",
         "files",

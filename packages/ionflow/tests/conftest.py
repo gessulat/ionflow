@@ -71,6 +71,31 @@ def cfg(localcfg):
 
 
 @pytest.fixture
+def composition(localcfg, tmp_path):
+    """Two published inputs and a clean invocation of the composed test flow."""
+    from types import SimpleNamespace
+
+    from subflow_flows import Raw
+
+    from ionflow import Artifacts
+
+    registry = Artifacts(localcfg)
+    path = tmp_path / "input.raw"
+    path.write_text("content")
+    raw = registry.put(Raw.from_path(path))
+    path = tmp_path / "other.raw"
+    path.write_text("other")
+    other = registry.put(Raw.from_path(path))
+    return SimpleNamespace(
+        cfg=localcfg,
+        registry=registry,
+        raw=raw,
+        other=other,
+        given={"artifacts": {"raw": raw.id}, "params": {"work_dir": str(tmp_path)}},
+    )
+
+
+@pytest.fixture
 def shared_blob_publication(localcfg, tmp_path):
     """A receiving store and incoming bundle sharing the receiver's only file."""
     from browser_flows import Bundle, Document

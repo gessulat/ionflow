@@ -11,13 +11,16 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from multiprocessing import get_context
+from pathlib import Path
 
 import psutil
 
 from . import lake, metrics
 from .arrow import StepInput
 from .artifact import Artifact, Artifacts
+from .composition import Call
 from .config import Config
+from .dag import Step
 from .git import require_clean
 from .phases import Phases
 from .plan import Planner
@@ -31,10 +34,13 @@ def _new_run_id(now):
     return f"{int(now.timestamp() * 1000):013d}-{uuid.uuid4().hex[:8]}"
 
 
-def _fair_share(workers):
+def _fair_share(workers: int, limits: tuple[int, int] | None = None) -> tuple[int, int]:
     """Per-worker DuckDB caps: workers x per-worker share ~ the machine (cores, 80% RAM)."""
     cores = os.cpu_count() or 1
     memory_mb = int(psutil.virtual_memory().total * 0.8) // workers // 2**20
+    if limits:
+        cores = min(cores, limits[0])
+        memory_mb = min(memory_mb, limits[1] // workers)
     return max(1, cores // workers), memory_mb
 
 
@@ -63,7 +69,67 @@ def _call(ctx, step, key):
         else:
             value = ctx.resolve(ctx.con, dep, kind, key, dag.steps[dep].output_table)
             kwargs[dep] = value if dag.steps[dep].is_artifact else StepInput(value)
-    return step.method(ctx.flow, **kwargs)
+    result = step.method(ctx.flow, **kwargs)
+    return _call_subflow(ctx, step, key, result) if step.subflow else result
+
+
+def _call_subflow(ctx: _Ctx, step: Step, key: str | int | None, call: Call) -> typing.Any:
+    """Child genesis is the durable call record, written before any child work."""
+    if not isinstance(call, Call):
+        raise TypeError(f"subflow step '{step.name}' must return Call")
+    assert step.subflow is not None
+    child = step.subflow.flow
+    shared = _RUN[ctx.run_id]
+    parent = {"flow_id": shared["flow_id"], "run_id": ctx.run_id, "step": step.name, "key": 0 if key is None else key}
+    cat = lake.Catalog(Space.for_flow(ctx.space.store, child))
+    candidates = [
+        row
+        for row in cat.runs()
+        if (link := row.get("parent"))
+        and link["flow_id"] == parent["flow_id"]
+        and link["run_id"] in shared["origins"]
+        and link["step"] == parent["step"]
+        and link["key"] == parent["key"]
+    ]
+    origin = max(candidates, key=lambda row: row["run_id"], default=None)
+    if origin:
+        declarations = child.Inputs.declarations() if child.Inputs else {}
+        expected = Artifacts(ctx.space.store).bind(declarations, call.artifacts)
+        if child.resolve_params(call.params) != origin["params"] or expected != origin["artifacts"]:
+            raise ValueError(f"subflow step '{step.name}': invocation changed while resuming")
+        if origin["status"] == "running":
+            raise RuntimeError(f"child run {origin['run_id']} is still running; refusing concurrent execution")
+    if origin and origin["status"] == "complete":
+        child_id = origin["run_id"]
+    else:
+        child_id = run(
+            child,
+            ctx.space.store.cfg,
+            repo=shared["repo"],
+            resume=origin["run_id"] if origin else None,
+            params=None if origin else call.params,
+            artifacts=None if origin else call.artifacts,
+            max_workers=max(1, ctx.threads or 1),
+            use_processes=shared["sample"],
+            branch_retries=shared["retries"],
+            allow_commit_drift=shared["allow_commit_drift"] if origin else False,
+            _parent=parent,
+            _limits=(ctx.threads, ctx.memory_mb),
+        )
+    row, triples = cat.run_state(child_id)
+    selected = [(k, path) for name, k, path in triples if name == step.subflow.output]
+    if len(selected) != 1:
+        raise RuntimeError(f"child run {child_id}: selected output is missing")
+    child_key, path = selected[0]
+    activity = row["activities"].get(activity_key(step.subflow.output, child_key), {})
+    ctx.flow.artifacts.inherit(activity.get("ancestors", []))
+    if step.is_artifact:
+        assert issubclass(step.output_table, Artifact)
+        snapshot = next(o["artifact"] for o in activity["outputs"] if o["artifact"]["id"] == path)
+        return ctx.flow.artifacts.use(
+            Artifacts(ctx.space.store).get(path, step.output_table, snapshot=snapshot), role=step.name
+        )
+    return cat.space.relation(ctx.con, [path])
 
 
 def _emit(ctx, step, key=None):
@@ -177,6 +243,9 @@ def _bound(shared, threads):
                 os.environ.setdefault(var, str(threads))
         cfg = Config(**shared["config"])
         flow_cls = _import(shared["file"], shared["flow"], "_ionflow_" + shared["run_id"].replace("-", "_"))
+        for value in vars(sys.modules[flow_cls.__module__]).values():
+            if isinstance(value, type) and value.__module__ == flow_cls.__module__ and hasattr(value, "_dag"):
+                value._flow_identity = shared["module"] + "." + value.__name__
         # identity travels in the payload, never derived here: the re-imported
         # The isolated loader's module name is not the flow's durable identity.
         space = Store.of(cfg).space(shared["flow_id"])
@@ -390,6 +459,8 @@ def run(
     params=None,
     allow_commit_drift=False,
     artifacts=None,
+    _parent=None,
+    _limits=None,
 ):
     """Execute `flow_cls`; returns the new run_id.
 
@@ -489,6 +560,7 @@ def run(
         params=params,
         custom={},
         artifacts=artifact_inputs,
+        parent=_parent,
     )
 
     def flush(row=False, genesis=None):
@@ -531,7 +603,15 @@ def run(
         "retries": branch_retries,
         "params": params,
         "artifacts": artifact_inputs,
+        "repo": str(Path(repo).resolve()),
+        "module": flow_cls.flow_id().rsplit(".", 1)[0],
+        "origins": [run_id],
+        "allow_commit_drift": allow_commit_drift,
     }
+    ancestor = origin_row
+    while ancestor and ancestor["run_id"] not in shared["origins"]:
+        shared["origins"].append(ancestor["run_id"])
+        ancestor = cat.run_state(ancestor["origin_run_id"])[0] if ancestor["origin_run_id"] else None
     if use_processes:
         # spawn, never fork: this process is multi-threaded (the sampler, DuckDB
         # inside the catalog commits), and forked children would inherit that
@@ -583,7 +663,7 @@ def run(
         left[nk] = len(tasks)
         # a fair share of the machine per task, sized by what is actually in
         # flight — a solo step gets the whole machine, a wide wave splits it
-        threads, memory_mb = _fair_share(min(workers, len(running) + len(tasks)))
+        threads, memory_mb = _fair_share(min(workers, len(running) + len(tasks)), _limits)
         for t in tasks:
             t |= {"run_id": run_id, "custom": dict(custom), "threads": threads, "memory_mb": memory_mb}
             running[pool.submit(_task_worker, t)] = nk
@@ -648,7 +728,9 @@ def run(
         bound = _BOUND.pop(run_id, None)
         if bound is not None:
             sys.modules.pop(bound.flow_cls.__module__, None)
-            flow_cls._registry.pop(bound.flow_cls.flow_id(), None)
+            for identity in list(flow_cls._registry):
+                if identity.startswith(bound.flow_cls.__module__ + "."):
+                    flow_cls._registry.pop(identity)
         for k in [k for k in _DEPS if k[0] == run_id]:
             del _DEPS[k]
         try:

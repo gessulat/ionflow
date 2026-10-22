@@ -5,6 +5,7 @@ import typing
 from dataclasses import dataclass
 
 from .artifact import Artifact
+from .composition import Call, Subflow
 from .schema import Table
 
 
@@ -27,6 +28,7 @@ class Step:
     param_kinds: dict[str, str]  # name -> NORMAL | BRANCH | COLLECT
     output_table: type
     is_fanout: bool
+    subflow: Subflow | None = None
 
     @property
     def deps(self):
@@ -224,6 +226,15 @@ def build_dag(cls) -> Dag:
             else:
                 kinds[p] = {Branch: "BRANCH", Collect: "COLLECT"}.get(origin, "NORMAL")
         ret = hints.get("return")
+        child = getattr(fn, "__ionflow_subflow__", None)
+        if child:
+            if typing.get_origin(ret) is not Call:
+                raise TypeError(f"subflow step '{name}' must return Call[OutputSchema]")
+            ret = typing.get_args(ret)[0]
+            if ret is not child.flow._dag.steps[child.output].output_table:
+                raise TypeError(f"subflow step '{name}': output schema differs from {child.output}")
+        elif typing.get_origin(ret) is Call:
+            raise TypeError(f"step '{name}': Call requires @subflow")
         if ret is type(None):  # `-> None` counts as untyped
             ret = None
         is_fanout = typing.get_origin(ret) is Fanout
@@ -235,12 +246,22 @@ def build_dag(cls) -> Dag:
         for col, why in RESERVED_COLUMNS.items():
             if not issubclass(table, Artifact) and col in table.columns():
                 raise ValueError(f"step '{name}': column '{col}' is reserved ({why})")
-        steps[name] = Step(name, fn, kinds, table, is_fanout)
+        steps[name] = Step(name, fn, kinds, table, is_fanout, child)
 
     for s in steps.values():
         for d in s.deps:
             if d not in steps:
                 raise ValueError(f"step '{s.name}' depends on unknown step '{d}'")
+            if s.subflow:
+                hint = typing.get_type_hints(s.method).get(d)
+                if typing.get_origin(hint) in (Branch, Collect):
+                    hint = typing.get_args(hint)[0]
+                upstream = steps[d]
+                expected = upstream.output_table
+                if upstream.is_artifact and upstream.is_fanout and s.param_kinds[d] == "NORMAL":
+                    hint = typing.get_args(hint)[0] if typing.get_origin(hint) is list else None
+                if hint != expected:
+                    raise TypeError(f"subflow step '{s.name}': dependency '{d}' must be annotated {expected}")
     try:
         order = _toposort({n: s.deps for n, s in steps.items()})
     except graphlib.CycleError as e:
