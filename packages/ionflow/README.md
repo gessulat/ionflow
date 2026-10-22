@@ -84,6 +84,23 @@ including children retained through parent resume. Metadata refresh carries thes
 links. Payload transfer remains scoped to the selected run and its dependencies;
 transfer a child run separately to retain its additional tables and telemetry.
 
+## Embed the browser
+
+`ionflow.web.browser_script()` returns a JavaScript ES module for an HTTP host to
+serve. Import `createBrowser` from that route and supply an htm-compatible renderer:
+
+```javascript
+const { Navigation, Artifacts, Runs, Table, Record, Graph } = createBrowser(html);
+```
+
+Components consume `Browser.describe()`, `Browser.artifacts()`, and `Browser.runs()`
+data. They generate navigation, lists, field labels, formatting, references, and
+flow graphs from declarations. The host supplies a `href(type, kindOrFlow, id)`
+function, selected IDs, and optional `actions(row)` and `details(row)` renderers.
+These callbacks retain scientific views, transfer dialogs, and authentication in
+the application. `Table` accepts object rows and the same schema/view descriptor.
+Components make no network requests and add no frontend dependencies.
+
 ## Configure (the only setup)
 
 Run the wizard once per repo:
